@@ -9,17 +9,17 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
 )
 
-// MySQLRepository implements horno.Repository and alerta.Repository.
-// It simulates a MySQL database adapter for testing and transactional scaffolding.
-type MySQLRepository struct {
+// PostgresRepository implements horno.Repository and alerta.Repository.
+// It simulates a PostgreSQL database adapter for testing and transactional scaffolding.
+type PostgresRepository struct {
 	mu      sync.RWMutex
 	hornos  map[string]horno.Horno
 	alertas map[string][]alerta.Alerta
 }
 
-// NewMySQLRepository initializes the MySQL repository simulator with seed data.
-func NewMySQLRepository() *MySQLRepository {
-	repo := &MySQLRepository{
+// NewPostgresRepository initializes the PostgreSQL repository simulator with seed data.
+func NewPostgresRepository() *PostgresRepository {
+	repo := &PostgresRepository{
 		hornos:  make(map[string]horno.Horno),
 		alertas: make(map[string][]alerta.Alerta),
 	}
@@ -36,8 +36,8 @@ func NewMySQLRepository() *MySQLRepository {
 	return repo
 }
 
-// GetByID retrieves a Horno record from the simulated MySQL database.
-func (r *MySQLRepository) GetByID(id string) (*horno.Horno, error) {
+// GetByID retrieves a Horno record from the simulated PostgreSQL database.
+func (r *PostgresRepository) GetByID(id string) (*horno.Horno, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -49,7 +49,7 @@ func (r *MySQLRepository) GetByID(id string) (*horno.Horno, error) {
 }
 
 // Update updates a Horno record inside the database.
-func (r *MySQLRepository) Update(h *horno.Horno) error {
+func (r *PostgresRepository) Update(h *horno.Horno) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -63,7 +63,7 @@ func (r *MySQLRepository) Update(h *horno.Horno) error {
 }
 
 // Save saves an industrial alert event to the database.
-func (r *MySQLRepository) Save(a *alerta.Alerta) error {
+func (r *PostgresRepository) Save(a *alerta.Alerta) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -73,7 +73,7 @@ func (r *MySQLRepository) Save(a *alerta.Alerta) error {
 }
 
 // GetByHornoID retrieves all alerts generated for a specific kiln.
-func (r *MySQLRepository) GetByHornoID(hornoID string) ([]alerta.Alerta, error) {
+func (r *PostgresRepository) GetByHornoID(hornoID string) ([]alerta.Alerta, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
