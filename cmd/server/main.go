@@ -6,10 +6,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
+	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
+	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
-	"github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
+	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
+	loteService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
 )
 
 func main() {
@@ -20,13 +22,16 @@ func main() {
 
 	// 1. Instantiate Infrastructure Adapters (Providers Layer)
 	dbRepo := database.NewMySQLRepository()
+	loteRepo := database.NewLoteProductivoRepository()
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500/yolo/conveyor")
 
 	// 2. Instantiate Business Layer injecting providers (Service Layer)
-	hornoService := service.NewHornoService(dbRepo, dbRepo, yolo)
+	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
+	loteSvc := loteService.NewLoteProductivoService(loteRepo)
 
 	// 3. Instantiate Presentation HTTP Handlers injecting services (Controller Layer)
-	hornoHandler := controller.NewHornoHandler(hornoService, dbRepo)
+	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
+	loteHandler := loteController.NewLoteProductivoHandler(loteSvc)
 
 	// 4. Setup Serve Multiplexer and Register routes
 	mux := http.NewServeMux()
@@ -37,6 +42,7 @@ func main() {
 	// Register API endpoints with logging middleware
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(hornoHandler.GetHornoStatus))
 	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
+	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteHandler.GetAll))
 
 	// 5. Read environment configs and launch server
 	port := os.Getenv("PORT")
