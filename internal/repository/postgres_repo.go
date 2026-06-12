@@ -9,13 +9,7 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote"
 )
 
-// LoteRepository defines the contract for persisting productive batches
-// into the PostgreSQL database.
-type LoteRepository interface {
-	Create(ctx context.Context, lote *lote.Lote) error
-}
-
-// PostgresRepository implements LoteRepository using a pgxpool connection pool.
+// PostgresRepository implements lote.Repository using a pgxpool connection pool.
 type PostgresRepository struct {
 	db *pgxpool.Pool
 }

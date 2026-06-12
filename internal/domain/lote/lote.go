@@ -1,6 +1,41 @@
 package lote
 
-import "time"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// turnos válidos según reglas de negocio de Fermar S.A.
+var turnosValidos = map[string]bool{
+	"mañana": true,
+	"tarde":  true,
+	"noche":  true,
+}
+
+// ValidationError agrupa todos los errores de validación de un LoteRequest.
+type ValidationError struct {
+	Fields []string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("errores de validación: %s", strings.Join(e.Fields, "; "))
+}
+
+// IsValidationError informa si un error es de tipo ValidationError.
+func IsValidationError(err error) bool {
+	var ve *ValidationError
+	return errors.As(err, &ve)
+}
+
+// Repository defines the storage contract for productive batches.
+// Implementations live in the infrastructure layer (internal/repository).
+type Repository interface {
+	Create(ctx context.Context, lote *Lote) error
+}
+
 
 // LoteRequest represents the incoming JSON payload from the Raspberry Pi
 // for registering a productive batch in the industrial oven line.
@@ -70,4 +105,63 @@ func MapLoteRequestToLote(req LoteRequest) Lote {
 		CreatedAt:      req.CreatedAt,
 		UpdatedAt:      req.UpdatedAt,
 	}
+}
+
+// Validate verifica todas las reglas de negocio del LoteRequest.
+// Retorna un *ValidationError con el listado completo de campos inválidos,
+// o nil si el request es válido.
+func (req LoteRequest) Validate() error {
+	var errs []string
+
+	// Campo obligatorio: producto_id
+	if strings.TrimSpace(req.ProductoID) == "" {
+		errs = append(errs, "productoId: es requerido")
+	}
+
+	// Turno debe ser uno de los valores permitidos por el negocio
+	if !turnosValidos[req.Turno] {
+		errs = append(errs, fmt.Sprintf("turno: valor '%s' inválido, debe ser 'mañana', 'tarde' o 'noche'", req.Turno))
+	}
+
+	// Consistencia temporal: fin_at debe ser igual o posterior a inicio_at
+	if !req.FinAt.IsZero() && !req.InicioAt.IsZero() && req.FinAt.Before(req.InicioAt) {
+		errs = append(errs, "finAt: debe ser igual o posterior a inicioAt")
+	}
+
+	// Unidades no negativas
+	if req.TotalUnidades < 0 {
+		errs = append(errs, "totalUnidades: no puede ser negativo")
+	}
+	if req.Correctos < 0 {
+		errs = append(errs, "correctos: no puede ser negativo")
+	}
+	if req.Quemados < 0 {
+		errs = append(errs, "quemados: no puede ser negativo")
+	}
+
+	// Consistencia de unidades: correctos + quemados == total_unidades
+	if req.Correctos+req.Quemados != req.TotalUnidades {
+		errs = append(errs, fmt.Sprintf(
+			"correctos(%d) + quemados(%d) = %d, debe ser igual a totalUnidades(%d)",
+			req.Correctos, req.Quemados, req.Correctos+req.Quemados, req.TotalUnidades,
+		))
+	}
+
+	// Pesos no negativos
+	if req.CorrectosKg < 0 {
+		errs = append(errs, "correctosKg: no puede ser negativo")
+	}
+	if req.QuemadosKg < 0 {
+		errs = append(errs, "quemadosKg: no puede ser negativo")
+	}
+
+	// Velocidad del horno no negativa
+	if req.VelocidadHorno < 0 {
+		errs = append(errs, "velocidadHorno: no puede ser negativo")
+	}
+
+	if len(errs) > 0 {
+		return &ValidationError{Fields: errs}
+	}
+	return nil
 }

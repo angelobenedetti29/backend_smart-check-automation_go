@@ -11,10 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote"
-	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
 )
 
-// mockLoteRepo implements repository.LoteRepository for controlled testing.
+// mockLoteRepo implements lote.Repository (domain interface) for controlled testing.
 type mockLoteRepo struct {
 	createFunc func(ctx context.Context, l *lote.Lote) error
 }
@@ -46,7 +45,7 @@ func validLoteJSON() []byte {
 	}`)
 }
 
-func setupHandlerTest(t *testing.T, repo repository.LoteRepository) *LoteHandler {
+func setupHandlerTest(t *testing.T, repo lote.Repository) *LoteHandler {
 	t.Helper()
 	t.Setenv("API_KEY_SECRET", "test-key-fermar")
 	return NewLoteHandler(repo)
@@ -98,13 +97,13 @@ func TestHandleCreateLote_ValidationError(t *testing.T) {
 	invalidBody := bytes.ReplaceAll(validLoteJSON(), []byte(`"totalUnidades": 1200`), []byte(`"totalUnidades": 2000`))
 	rr := executeRequest(t, handler, http.MethodPost, invalidBody, "test-key-fermar")
 
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
 
 	var resp map[string]interface{}
 	err := json.Unmarshal(rr.Body.Bytes(), &resp)
 	assert.NoError(t, err)
 	assert.False(t, resp["success"].(bool))
-	assert.Contains(t, resp["message"], "suma")
+	assert.Contains(t, resp["message"], "inválidos")
 }
 
 func TestHandleCreateLote_Unauthorized(t *testing.T) {

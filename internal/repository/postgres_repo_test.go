@@ -4,13 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"log"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,23 +25,20 @@ func testUUID() string {
 		buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:])
 }
 
-// setupTestPool loads .env from the project root and creates a pgxpool
-// connected to the real Aiven PostgreSQL instance.
+// setupTestPool creates a pgxpool connected to the test database.
+// It uses TEST_DATABASE_URL (never the production .env) so that
+// running `go test ./...` never touches the Aiven production instance.
+// If TEST_DATABASE_URL is not set the test is skipped cleanly.
 func setupTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
-	// Load .env from project root (test runs from internal/repository/)
-	if err := godotenv.Load("../../.env"); err != nil {
-		log.Println("Advertencia: .env no encontrado, se usará DATABASE_URL del entorno")
-	}
-
-	connStr := os.Getenv("DATABASE_URL")
+	connStr := os.Getenv("TEST_DATABASE_URL")
 	if connStr == "" {
-		t.Skip("DATABASE_URL no configurada — saltando test de integración")
+		t.Skip("TEST_DATABASE_URL no configurada — saltando test de integración (no tocar producción)")
 	}
 
 	pool, err := pgxpool.New(context.Background(), connStr)
-	require.NoError(t, err, "fallo al crear pool de conexión a PostgreSQL")
+	require.NoError(t, err, "fallo al crear pool de conexión a PostgreSQL de test")
 
 	t.Cleanup(pool.Close)
 	return pool

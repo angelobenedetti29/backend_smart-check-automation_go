@@ -2,18 +2,30 @@ package database
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NewPostgresPool creates a connection pool to PostgreSQL, verifies connectivity with a Ping,
-// and fatally exits if the database is unreachable — preventing the server from starting with a broken connection.
+// NewPostgresPool creates a configured connection pool to PostgreSQL and
+// verifies connectivity with a Ping before returning.
+// Pool limits are tuned for Aiven Cloud Free Tier (max 5 simultaneous connections).
 func NewPostgresPool(ctx context.Context, connString string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, connString)
+	config, err := pgxpool.ParseConfig(connString)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error parsing database config: %w", err)
+	}
+
+	// Connection pool limits — calibrated for Aiven Free Tier
+	config.MaxConns = 5
+	config.MinConns = 1
+	config.MaxConnLifetime = 30 * time.Minute
+	config.MaxConnIdleTime = 5 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("error creating postgres pool: %w", err)
 	}
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -21,9 +33,8 @@ func NewPostgresPool(ctx context.Context, connString string) (*pgxpool.Pool, err
 
 	if err := pool.Ping(pingCtx); err != nil {
 		pool.Close()
-		log.Fatalf("No se puede conectar a PostgreSQL: ping falló — %v", err)
+		return nil, fmt.Errorf("postgres ping failed: %w", err)
 	}
 
-	log.Println("Pool de conexiones a PostgreSQL inicializado y verificado exitosamente")
 	return pool, nil
 }

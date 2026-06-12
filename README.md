@@ -6,7 +6,7 @@ Backend transaccional para el monitoreo de hornos industriales y registro de lot
 
 ## Requisitos
 
-- Go 1.20 o superior
+- Go 1.22 o superior
 - Instancia PostgreSQL (Aiven Cloud, AWS sa-east-1)
 - Conexión a internet para alcanzar la base de datos
 
@@ -15,17 +15,20 @@ Backend transaccional para el monitoreo de hornos industriales y registro de lot
 ## Configuración inicial
 
 1. Clonar el repositorio.
-2. Crear un archivo `.env` en la raíz del proyecto con las siguientes variables:
+2. Copiar `.env.example` como `.env` en la raíz del proyecto y configurar las variables:
 
 ```env
 DATABASE_URL=postgres://usuario:contraseña@host:puerto/nombre_bd?sslmode=require
-API_KEY_SECRET=
+TEST_DATABASE_URL=postgres://usuario:contraseña@host:puerto/nombre_bd_test?sslmode=require
+API_KEY_SECRET=mi_super_clave_secreta
 PORT=8080
 ```
 
-> `DATABASE_URL` debe apuntar a la instancia de PostgreSQL. El parámetro `?sslmode=require` es obligatorio para conexiones a Aiven.
+> **DATABASE_URL** debe apuntar a la instancia de PostgreSQL. El parámetro `?sslmode=require` es obligatorio para conexiones a Aiven.
 >
-> `API_KEY_SECRET` es la clave que deben enviar los clientes (Raspberry Pi) en el header `X-API-Key`.
+> **TEST_DATABASE_URL** es opcional para tests de integración. Si no se provee, los tests de integración con base de datos real se omitirán automáticamente.
+>
+> **API_KEY_SECRET** es la clave que deben enviar los clientes (Raspberry Pi) en el header `X-API-Key`.
 
 ---
 
@@ -41,9 +44,15 @@ El servidor arranca en `http://localhost:8080`. Para detenerlo, presionar `Ctrl+
 
 ## Ejecutar tests
 
+El proyecto incluye tests unitarios y tests de integración con la base de datos:
+
+### Correr todos los tests (unitarios + integración si está TEST_DATABASE_URL configurada)
 ```bash
 go test ./... -v
 ```
+
+### Correr solo tests unitarios (sin requerir base de datos)
+Si no configuras `TEST_DATABASE_URL` en tus variables de entorno, los tests de integración que requieren la base de datos real se omitirán (skipping) de manera segura, ejecutando únicamente los tests unitarios.
 
 ---
 
@@ -51,11 +60,25 @@ go test ./... -v
 
 ### GET /
 
-Verifica que el servidor esté corriendo.
+Verifica que el servidor esté corriendo (básico).
 
 ```bash
 curl http://localhost:8080/
 ```
+
+---
+
+### GET /health
+
+Realiza un chequeo de salud del sistema, incluyendo un ping en tiempo real a la base de datos PostgreSQL.
+
+```bash
+curl http://localhost:8080/health
+```
+
+**Respuestas:**
+- `200 OK`: Base de datos conectada correctamente.
+- `503 Service Unavailable`: Si hay algún problema de conexión con PostgreSQL.
 
 ---
 
@@ -93,7 +116,7 @@ Registra un lote productivo horneado. Requiere autenticación via `X-API-Key`.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/lotes \
-  -H "X-API-Key:" \
+  -H "X-API-Key: mi_super_clave_secreta" \
   -H "Content-Type: application/json" \
   -d '{
     "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -120,15 +143,36 @@ curl -X POST http://localhost:8080/api/v1/lotes \
 **Headers requeridos:**
 | Header | Valor |
 |---|---|
-| `X-API-Key` | La clave definida en `API_KEY_SECRET` del `.env` |
-| `Content-Type` | `application/json` |
+| `X-API-Key` | La clave definida en `API_KEY_SECRET` del `.env` (se compara usando `crypto/subtle` para evitar ataques de canal lateral/timing attacks) |
+| `Content-Type` | Debe ser exactamente `application/json` |
 
-**Regla de negocio:** `correctos + quemados` debe ser exactamente igual a `totalUnidades`.
+**Reglas de Validación de Negocio (Lotes):**
+1. El `id` debe ser un UUID v4 válido y no vacío.
+2. El `productoId` debe ser un UUID v4 válido y no vacío.
+3. El `turno` debe ser `mañana`, `tarde` o `noche`.
+4. El `totalUnidades` debe ser mayor a 0.
+5. El valor de `correctos + quemados` debe ser exactamente igual a `totalUnidades`.
+6. El valor de `correctosKg` debe ser mayor o igual a 0.
+7. El valor de `quemadosKg` debe ser mayor o igual a 0.
+8. La fecha de fin (`finAt`) debe ser posterior a la fecha de inicio (`inicioAt`).
 
 **Respuestas:**
 | Código | Significado |
 |---|---|
 | 201 | Lote creado exitosamente |
-| 400 | JSON inválido o suma incorrecta de unidades |
+| 400 | JSON malformado o body excedido (Límite: 1MB para prevenir ataques DoS) |
 | 401 | API key faltante o inválida |
+| 415 | Content-Type no soportado (diferente a `application/json`) |
+| 422 | Error de validación de negocio (retorna JSON detallado con los errores específicos) |
 | 500 | Error interno del servidor (base de datos) |
+
+#### Ejemplo de Respuesta de Error de Validación (422):
+```json
+{
+  "error": "validation failed",
+  "details": {
+    "totalUnidades": "totalUnidades must be equal to correctos + quemados",
+    "turno": "turno must be one of: mañana, tarde, noche"
+  }
+}
+```

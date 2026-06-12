@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	lotectrl "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
@@ -41,6 +44,8 @@ func main() {
 	}
 	defer pgPool.Close()
 
+	log.Println("Pool de conexiones a PostgreSQL inicializado y verificado exitosamente.")
+
 	log.Println("PostgreSQL pool delegado a los repositorios. Inicializando capas de negocio...")
 
 	// 1. Instantiate Infrastructure Adapters (Providers Layer)
@@ -67,6 +72,9 @@ func main() {
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(hornoHandler.GetHornoStatus))
 	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
 	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
+
+	// Health check for liveness/readiness probes (load balancers, Kubernetes, etc.)
+	mux.HandleFunc("/health", healthHandler(pgPool))
 
 	// 5. Read environment configs and launch server with graceful shutdown
 	port := os.Getenv("PORT")
@@ -126,5 +134,31 @@ func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 
 		log.Printf("[HTTP Telemetry] %s %s finished in %v", r.Method, r.URL.Path, time.Since(start))
+	}
+}
+
+// healthHandler returns 200 OK if the service is up and can reach PostgreSQL,
+// or 503 Service Unavailable if the database ping fails.
+func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		if err := pool.Ping(ctx); err != nil {
+			log.Printf("[HEALTH] PostgreSQL ping failed: %v", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "unhealthy",
+				"reason": "database unreachable",
+			})
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "healthy",
+		})
 	}
 }
