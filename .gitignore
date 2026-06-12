@@ -1,6 +1,9 @@
 # Environment variables (contain credentials for Aiven PostgreSQL)
 .env
 
+# Claude Code
+.claude/
+
 # OS files
 Thumbs.db
 .DS_Store

@@ -11,27 +11,29 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
 
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
-	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
+	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
+	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
+	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
-	loteService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
+	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
 )
 
 func main() {
-	// Enable microsecond resolution logs for Industry 4.0 telemetry monitoring
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	log.Println("Initializing Smart-Check Automation Backend (Layered/Clean Architecture - Modular)...")
+	log.Println("Initializing Smart-Check Automation Backend...")
 
 	// 0. Load environment variables from .env file
 	if err := godotenv.Load(); err != nil {
 		log.Println("Advertencia: archivo .env no encontrado, se usarán variables de entorno del sistema")
 	}
 
-	// Initialize PostgreSQL connection pool with mandatory SSL for Aiven Cloud
+	// 1. Initialize PostgreSQL connection pool
 	connString := os.Getenv("DATABASE_URL")
 	if connString == "" {
 		log.Fatal("DATABASE_URL no configurada. Verifica el archivo .env o la variable de entorno")
@@ -45,33 +47,35 @@ func main() {
 
 	log.Println("Pool de conexiones a PostgreSQL inicializado y verificado exitosamente.")
 
-	log.Println("PostgreSQL pool delegado a los repositorios. Inicializando capas de negocio...")
-
-	// 1. Instantiate Infrastructure Adapters (Providers Layer)
-	dbRepo := database.NewMySQLRepository()
-	loteRepo := database.NewLoteProductivoRepository()
+	// 2. Instantiate Infrastructure Adapters (Providers Layer)
+	dbRepo := database.NewPostgresRepository()
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500/yolo/conveyor")
 
-	// 2. Instantiate Business Layer injecting providers (Service Layer)
+	// Real PostgreSQL repositories
+	loteCreateRepo := repository.NewPostgresRepository(pgPool)
+	loteGetRepo := repository.NewLoteProductivoPostgresRepository(pgPool)
+
+	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
-	loteSvc := loteService.NewLoteProductivoService(loteRepo)
+	loteProdSvc := loteProductivoService.NewLoteProductivoService(loteGetRepo)
 
-	// 3. Instantiate Presentation HTTP Handlers injecting services (Controller Layer)
+	// 4. Instantiate Presentation HTTP Handlers
 	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
-	loteHandler := loteController.NewLoteProductivoHandler(loteSvc)
+	loteHandler := loteController.NewLoteHandler(loteCreateRepo)
+	loteProductivoHandler := loteProductivoController.NewLoteProductivoHandler(loteProdSvc)
 
-	// 4. Setup Serve Multiplexer and Register routes
+	// 5. Setup routes
 	mux := http.NewServeMux()
 
-	// Root welcome landing
 	mux.HandleFunc("/", rootHandler)
+	mux.HandleFunc("/health", healthHandler(pgPool))
 
-	// Register API endpoints with logging middleware
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(hornoHandler.GetHornoStatus))
 	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
-	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteHandler.GetAll))
+	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
+	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteProductivoHandler.GetAll))
 
-	// 5. Read environment configs and launch server with graceful shutdown
+	// 6. Launch server with graceful shutdown
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -85,15 +89,13 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start server in a goroutine so we can listen for shutdown signals
 	go func() {
-		log.Printf("Transactional server running on http://localhost%s", server.Addr)
+		log.Printf("Server running on http://localhost%s", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server shutdown unexpectedly: %v", err)
 		}
 	}()
 
-	// Block until an OS signal is received (Ctrl+C, SIGTERM)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -107,33 +109,27 @@ func main() {
 		log.Fatalf("Error durante graceful shutdown: %v", err)
 	}
 
-	log.Println("Servidor apagado exitosamente. Pool de PostgreSQL cerrado.")
+	log.Println("Servidor apagado exitosamente.")
 }
 
-// rootHandler maps the homepage to double check server status
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running. Endpoints: GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes\n"))
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos\n"))
 }
 
-// loggingMiddleware prints execution diagnostics for each HTTP request
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Printf("[HTTP Telemetry] %s %s starting from %s", r.Method, r.URL.Path, r.RemoteAddr)
-
+		log.Printf("[HTTP] %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 		next(w, r)
-
-		log.Printf("[HTTP Telemetry] %s %s finished in %v", r.Method, r.URL.Path, time.Since(start))
+		log.Printf("[HTTP] %s %s finished in %v", r.Method, r.URL.Path, time.Since(start))
 	}
 }
 
-// healthHandler returns 200 OK if the service is up and can reach PostgreSQL,
-// or 503 Service Unavailable if the database ping fails.
 func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -152,8 +148,6 @@ func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status": "healthy",
-		})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 	}
 }

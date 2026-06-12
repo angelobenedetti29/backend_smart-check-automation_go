@@ -1,86 +1,129 @@
-# Levantar y probar Smart-Check Automation Backend (Go)
-
-Este archivo describe pasos mínimos para instalar dependencias, ejecutar tests, levantar el servidor y probar el endpoint `GET /api/v1/lotes-productivos` en el entorno local.
+# Cómo levantar el proyecto
 
 ## Requisitos
-- Go 1.20 o superior instalado y en `PATH`.
-- (Opcional) `curl` o PowerShell para llamadas HTTP.
 
-## 1) Ejecutar la suite de tests
-Abrir una terminal en la carpeta del proyecto:
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) instalado y corriendo
+- No se necesita Go ni PostgreSQL instalados localmente
 
-```powershell
-cd "d:\UTN\Proyecto Final\Codigo\backend-principal\test_backend_go"
-# Ejecuta todos los tests del módulo
-go test ./... -v
+---
+
+## 1. Configurar variables de entorno
+
+Crear el archivo `.env` en la raíz del proyecto (ya existe si clonaste el repo con él):
+
+```env
+POSTGRES_USER=smartcheck
+POSTGRES_PASSWORD=smartcheck123
+POSTGRES_DB=smart_check
+
+DATABASE_URL=postgres://smartcheck:smartcheck123@localhost:5432/smart_check?sslmode=disable
+API_KEY_SECRET=dev-secret-key
+PORT=8080
 ```
 
-Resultado esperado: todos los tests actuales deben pasar. Si falta `go` en el PATH, instalá Go y volvé a ejecutar.
+> El `.env` está en `.gitignore` — nunca se commitea con credenciales reales.
 
-## 2) Levantar el servidor
-En la misma carpeta ejecutá:
+---
 
-```powershell
-cd "d:\UTN\Proyecto Final\Codigo\backend-principal\test_backend_go"
-go run cmd/server/main.go
-```
-
-El servidor por defecto escucha en `:8080`. Mensaje esperado en logs:
-
-```
-Initializing Smart-Check Automation Backend (Layered/Clean Architecture - Modular)...
-Transactional server running on http://localhost:8080
-```
-
-> Nota: el servidor usa repositorios simulados en memoria para datos (no PostgreSQL por defecto).
-
-## 3) Probar el endpoint de lotes productivos
-Llamada con PowerShell (recomendada en Windows):
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8080/api/v1/lotes-productivos?page=1&pageSize=10" | ConvertTo-Json -Depth 10
-```
-
-Alternativa con curl:
+## 2. Levantar los contenedores
 
 ```bash
-curl -s "http://localhost:8080/api/v1/lotes-productivos?page=1&pageSize=10" | jq
+docker compose up --build
 ```
 
-Respuesta esperada (estructura resumida):
+Esto levanta dos contenedores:
+- **db** — PostgreSQL 16, crea las tablas automáticamente desde `database/schema.sql`
+- **app** — la API Go, espera a que la DB esté lista antes de arrancar
+
+La primera vez descarga las imágenes y compila el binario (tarda ~1 min). Las siguientes veces es mucho más rápido.
+
+Logs esperados:
+```
+db-1   | database system is ready to accept connections
+app-1  | Pool de conexiones a PostgreSQL inicializado y verificado exitosamente.
+app-1  | Server running on http://localhost:8080
+```
+
+---
+
+## 3. Verificar que funciona
+
+```bash
+# Chequeo de salud (DB conectada)
+curl http://localhost:8080/health
+
+# Listar lotes productivos (vacío al principio)
+curl http://localhost:8080/api/v1/lotes-productivos
+```
+
+---
+
+## 4. Probar el POST desde Postman
+
+1. Método: `POST`
+2. URL: `http://localhost:8080/api/v1/lotes`
+3. Headers:
+   - `Content-Type: application/json`
+   - `X-API-Key: dev-secret-key`
+4. Body (raw JSON):
 
 ```json
 {
-  "success": true,
-  "message": "Lotes productivos obtenidos exitosamente",
-  "data": {
-    "items": [ /* array de lotes */ ],
-    "total": 2,
-    "page": 1,
-    "pageSize": 10,
-    "totalPages": 1
-  }
+  "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "productoNombre": "Tostada Integral",
+  "turno": "tarde",
+  "inicioAt": "2026-06-12T14:00:00Z",
+  "finAt": "2026-06-12T18:00:00Z",
+  "totalUnidades": 500,
+  "correctos": 480,
+  "quemados": 20,
+  "correctosKg": 96.0,
+  "quemadosKg": 4.0,
+  "tempHorno1": 188.0,
+  "tempHorno2": 192.0,
+  "velocidadHorno": 1.1,
+  "createdAt": "2026-06-12T14:00:00Z",
+  "updatedAt": "2026-06-12T18:00:00Z"
 }
 ```
 
-## 4) Archivos relevantes
-- `cmd/server/main.go` — punto de entrada y registro de rutas.
-- `internal/controller/lote_productivo/lote_productivo_handler.go` — handler HTTP.
-- `internal/service/lote_productivo/lote_productivo_service.go` — lógica de paginación y límites.
-- `internal/provider/database/lote_productivo_repo.go` — repo en memoria (seed data).
-- `internal/domain/lote_productivo/lote_productivo.go` — modelo `LoteProductivo` y `PaginatedResult`.
+Después hacer GET a `http://localhost:8080/api/v1/lotes-productivos` para ver el lote creado.
 
-## 5) Observaciones y recomendaciones
-- Actualmente no hay tests unitarios para `lote_productivo` (handler ni servicio). Recomiendo agregar:
-  - `internal/service/lote_productivo/lote_productivo_service_test.go` (paginación, límites, edge cases).
-  - `internal/controller/lote_productivo/lote_productivo_handler_test.go` (httptest para la ruta).
-- El repositorio documenta que debe devolver lotes "ordenados por inicio_at descendente", pero hoy devuelve el slice en el orden sembrado. Si necesitás orden garantizado, implementar `sort.Slice` por `InicioAt` antes de paginar en `lote_productivo_repo.go`.
-- Para producción/CI: reemplazar el repo en memoria por uno que conecte a PostgreSQL.
-
-## 6) Próximos pasos (sugeridos)
-- Agregar tests para `lote_productivo`.
-- Implementar ordenamiento por `InicioAt` en el repo.
-- Añadir README/documentación del endpoint en `README.md` principal.
+> El `productoId` del ejemplo es el único producto sembrado por el schema (`Tostada Integral`).
+> Usar un UUID diferente devuelve error de FK.
 
 ---
-Archivo generado automáticamente para facilitar pruebas locales.
+
+## 5. Comandos útiles
+
+```bash
+# Detener los contenedores
+docker compose down
+
+# Detener y borrar la base de datos (reset completo)
+docker compose down -v
+
+# Ver logs en tiempo real
+docker compose logs -f app
+
+# Correr solo la DB (para desarrollo local con go run)
+docker compose up db
+```
+
+---
+
+## Desarrollo local sin Docker
+
+Si tenés Go 1.25 instalado y la DB corriendo (por ej. con `docker compose up db`):
+
+```bash
+go run cmd/server/main.go
+```
+
+Para correr los tests unitarios (no requieren DB):
+
+```bash
+go test ./... -v
+```
+
+Para los tests de integración con DB real, configurar `TEST_DATABASE_URL` en el `.env`.
