@@ -6,8 +6,8 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 )
 
-func TestMySQLRepository_GetByID(t *testing.T) {
-	repo := NewMySQLRepository()
+func TestPostgresRepository_GetByID(t *testing.T) {
+	repo := NewPostgresRepository()
 
 	// Test retrieving existing seeded record
 	h, err := repo.GetByID("horno-01")
@@ -26,8 +26,8 @@ func TestMySQLRepository_GetByID(t *testing.T) {
 	}
 }
 
-func TestMySQLRepository_Update(t *testing.T) {
-	repo := NewMySQLRepository()
+func TestPostgresRepository_Update(t *testing.T) {
+	repo := NewPostgresRepository()
 
 	h, _ := repo.GetByID("horno-01")
 	h.Temperatura = 195.0
@@ -47,8 +47,8 @@ func TestMySQLRepository_Update(t *testing.T) {
 	}
 }
 
-func TestMySQLRepository_Alerts(t *testing.T) {
-	repo := NewMySQLRepository()
+func TestPostgresRepository_Alerts(t *testing.T) {
+	repo := NewPostgresRepository()
 
 	a := &alerta.Alerta{
 		ID:      "alert-01",

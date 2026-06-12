@@ -1,0 +1,12 @@
+# Environment variables (contain credentials for Aiven PostgreSQL)
+.env
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

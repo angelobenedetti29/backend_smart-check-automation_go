@@ -1,156 +1,178 @@
-# Smart-Check Automation Backend 🚀
+# Smart-Check Automation Backend
 
-Este es el backend transaccional de la aplicación para **Fermar**, diseñado bajo una **Arquitectura de Capas / Clean Architecture** en **Golang**. El sistema se encarga de monitorear el estado de los hornos industriales, disparar alertas transaccionales ante anomalías y simular análisis de visión artificial mediante YOLO en la cinta transportadora de carga.
-
----
-
-## 🏗️ Estructura del Proyecto
-El código se organiza siguiendo principios de diseño limpio y dominio desacoplado:
-*   `cmd/server/`: Punto de entrada (`main.go`) que inicializa las capas e inyecta dependencias.
-*   `internal/domain/`: Capa de dominio pura sin dependencias externas. Contiene entidades e interfaces (`horno`, `alerta`).
-*   `internal/service/`: Lógica de negocio (procesamiento de umbrales térmicos y disparadores de alertas).
-*   `internal/controller/`: Capa de presentación HTTP (manejadores de rutas y validación de entradas).
-*   `internal/provider/`: Adaptadores externos de infraestructura (Simulación de base de datos MySQL e integración YOLO).
-*   `pkg/`: Paquetes comunes compartidos (utilidades de respuestas JSON estándar).
+Backend transaccional para el monitoreo de hornos industriales y registro de lotes productivos en Fermar S.A.
 
 ---
 
-## 🛠️ Requisitos Previos
-*   **Go** versión `1.20` o superior instalado. Puedes comprobar tu versión ejecutando:
-    ```bash
-    go version
-    ```
+## Requisitos
+
+- Go 1.22 o superior
+- Instancia PostgreSQL (Aiven Cloud, AWS sa-east-1)
+- Conexión a internet para alcanzar la base de datos
 
 ---
 
-## 🚀 Cómo Levantar el Servidor en Local
+## Configuración inicial
 
-1.  **Abrir una terminal** en el directorio raíz del proyecto (`test_backend_go/`).
-2.  **Ejecutar el comando de arranque**:
-    ```bash
-    go run cmd/server/main.go
-    ```
-3.  El servidor iniciará e imprimirá los logs de inicialización de telemetría de Industria 4.0:
-    ```text
-    Initializing Smart-Check Automation Backend (Layered/Clean Architecture - Modular)...
-    Transactional server running on http://localhost:8080
-    ```
+1. Clonar el repositorio.
+2. Copiar `.env.example` como `.env` en la raíz del proyecto y configurar las variables:
+
+```env
+DATABASE_URL=postgres://usuario:contraseña@host:puerto/nombre_bd?sslmode=require
+TEST_DATABASE_URL=postgres://usuario:contraseña@host:puerto/nombre_bd_test?sslmode=require
+API_KEY_SECRET=mi_super_clave_secreta
+PORT=8080
+```
+
+> **DATABASE_URL** debe apuntar a la instancia de PostgreSQL. El parámetro `?sslmode=require` es obligatorio para conexiones a Aiven.
+>
+> **TEST_DATABASE_URL** es opcional para tests de integración. Si no se provee, los tests de integración con base de datos real se omitirán automáticamente.
+>
+> **API_KEY_SECRET** es la clave que deben enviar los clientes (Raspberry Pi) en el header `X-API-Key`.
 
 ---
 
-## 🧪 Cómo Ejecutar las Pruebas Unitarias
-El proyecto cuenta con cobertura de pruebas automatizadas en todas sus capas críticas. Para correrlas, ejecuta:
+## Ejecutar el servidor
+
 ```bash
-go test ./internal/... -v
+go run cmd/server/main.go
+```
+
+El servidor arranca en `http://localhost:8080`. Para detenerlo, presionar `Ctrl+C` — el servidor realiza un apagado graceful, esperando hasta 10 segundos a que las conexiones activas finalicen antes de cerrar el pool de PostgreSQL.
+
+---
+
+## Ejecutar tests
+
+El proyecto incluye tests unitarios y tests de integración con la base de datos:
+
+### Correr todos los tests (unitarios + integración si está TEST_DATABASE_URL configurada)
+```bash
+go test ./... -v
+```
+
+### Correr solo tests unitarios (sin requerir base de datos)
+Si no configuras `TEST_DATABASE_URL` en tus variables de entorno, los tests de integración que requieren la base de datos real se omitirán (skipping) de manera segura, ejecutando únicamente los tests unitarios.
+
+---
+
+## Endpoints
+
+### GET /
+
+Verifica que el servidor esté corriendo (básico).
+
+```bash
+curl http://localhost:8080/
 ```
 
 ---
 
-## 📡 Guía de Interacción con los Endpoints
+### GET /health
 
-El servidor expone los siguientes endpoints HTTP nativos en el puerto `8080`.
+Realiza un chequeo de salud del sistema, incluyendo un ping en tiempo real a la base de datos PostgreSQL.
 
-### 1. Endpoint Índice / Estado de Servidor (`GET /`)
-Comprueba si el servidor web está corriendo correctamente.
+```bash
+curl http://localhost:8080/health
+```
 
-*   **Bash / cURL**:
-    ```bash
-    curl -i http://localhost:8080/
-    ```
-*   **Windows PowerShell**:
-    ```powershell
-    Invoke-RestMethod -Uri "http://localhost:8080/"
-    ```
+**Respuestas:**
+- `200 OK`: Base de datos conectada correctamente.
+- `503 Service Unavailable`: Si hay algún problema de conexión con PostgreSQL.
 
 ---
 
-### 2. Consulta de Estado de Horno (`GET /api/v1/horno`)
-Obtiene el estado en tiempo real del horno. Ejecuta una inspección automática de la cinta mediante visión computacional YOLO. Si detecta un defecto visual (15% de probabilidad simulada), registrará una alerta crítica y cambiará el estado del horno a `MANTENIMIENTO`.
+### GET /api/v1/horno?id=horno-01
 
-*   **Parámetros query requeridos**:
-    *   `id`: Identificador del horno (por defecto el inicializado es `horno-01`).
+Consulta el estado del horno industrial y ejecuta una inspección visual simulada (YOLO).
 
-*   **Bash / cURL**:
-    ```bash
-    curl -i "http://localhost:8080/api/v1/horno?id=horno-01"
-    ```
-*   **Windows PowerShell**:
-    ```powershell
-    Invoke-RestMethod -Uri "http://localhost:8080/api/v1/horno?id=horno-01" | ConvertTo-Json -Depth 10
-    ```
+```bash
+curl "http://localhost:8080/api/v1/horno?id=horno-01"
+```
 
-*   **Respuesta JSON esperada**:
-    ```json
-    {
-      "success": true,
-      "message": "Estado de Horno verificado exitosamente",
-      "data": {
-        "conveyor_checked": true,
-        "horno": {
-          "id": "horno-01",
-          "nombre": "Horno Rotativo de Clinkerización A-1",
-          "temperatura": 185.3,
-          "estado": "ACTIVO",
-          "ultimo_check": "2026-05-26T22:40:18.7404336-03:00"
-        },
-        "alertas_recientes": [],
-        "saludo": "Hola Mundo desde el controlador de Horno en Arquitectura de Capas Go!"
-      }
-    }
-    ```
+**Respuesta:** Estado del horno, alertas recientes y resultado de la inspección visual.
 
 ---
 
-### 3. Actualizar Temperatura e Historial Transaccional (`POST /api/v1/horno/temperatura`)
-Actualiza manualmente la temperatura de un horno. Evalúa las siguientes reglas lógicas del servicio de forma automática:
-*   Si temperatura **> 180°C**: Genera una alerta transaccional de tipo `WARNING` y pasa el horno a estado `ATENCION`.
-*   Si temperatura **> 200°C**: Genera una alerta transaccional de tipo `CRITICAL` en base de datos y bloquea el horno en estado `MANTENIMIENTO`.
-*   Si temperatura **<= 180°C**: El horno opera en rango seguro, el estado es `ACTIVO`.
+### POST /api/v1/horno/temperatura
 
-*   **Esquema del Body JSON**:
-    ```json
-    {
-      "id": "horno-01",
-      "temperatura": 212.8
-    }
-    ```
+Actualiza la temperatura del horno. Aplica reglas de umbral térmico:
 
-*   **Bash / cURL**:
-    ```bash
-    curl -i -X POST \
-      -H "Content-Type: application/json" \
-      -d '{"id":"horno-01","temperatura":212.8}' \
-      http://localhost:8080/api/v1/horno/temperatura
-    ```
-*   **Windows PowerShell**:
-    ```powershell
-    Invoke-RestMethod -Uri "http://localhost:8080/api/v1/horno/temperatura" \
-      -Method Post \
-      -Body '{"id":"horno-01","temperatura":212.8}' \
-      -ContentType "application/json" | ConvertTo-Json -Depth 10
-    ```
+- `> 200°C` → estado `MANTENIMIENTO` + alerta `CRITICAL`
+- `> 180°C` → estado `ATENCION` + alerta `WARNING`
+- `<= 180°C` → estado `ACTIVO`
 
-*   **Respuesta JSON esperada (Disparo de Alerta Crítica)**:
-    ```json
-    {
-      "success": true,
-      "message": "Temperatura del horno actualizada transaccionalmente",
-      "data": {
-        "alertas_totales": 1,
-        "horno": {
-          "id": "horno-01",
-          "nombre": "Horno Rotativo de Clinkerización A-1",
-          "temperatura": 212.8,
-          "estado": "MANTENIMIENTO",
-          "ultimo_check": "2026-05-26T22:40:29.4106943-03:00"
-        },
-        "ultima_alerta": {
-          "id": "alt-temp-1779846029410694300",
-          "horno_id": "horno-01",
-          "nivel": "CRITICAL",
-          "mensaje": "Temperatura crítica excedida: 212.8°C. Límite seguro: 200.0°C (Previa: 185.3°C)",
-          "creada_en": "2026-05-26T22:40:29.4106943-03:00"
-        }
-      }
-    }
-    ```
+```bash
+curl -X POST http://localhost:8080/api/v1/horno/temperatura \
+  -H "Content-Type: application/json" \
+  -d '{"id":"horno-01","temperatura":212.8}'
+```
+
+---
+
+### POST /api/v1/lotes
+
+Registra un lote productivo horneado. Requiere autenticación via `X-API-Key`.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/lotes \
+  -H "X-API-Key: mi_super_clave_secreta" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+    "productoNombre": "Tostada Integral",
+    "turno": "mañana",
+    "inicioAt": "2026-06-02T06:00:00Z",
+    "finAt": "2026-06-02T08:30:00Z",
+    "totalUnidades": 1200,
+    "correctos": 1150,
+    "quemados": 50,
+    "correctosKg": 138.00,
+    "quemadosKg": 6.00,
+    "tempHorno1": 210.50,
+    "tempCombHorno1": null,
+    "tempHorno2": 215.00,
+    "tempCombHorno2": null,
+    "velocidadHorno": 3.20,
+    "createdAt": "2026-06-02T06:00:01Z",
+    "updatedAt": "2026-06-02T08:30:05Z"
+  }'
+```
+
+**Headers requeridos:**
+| Header | Valor |
+|---|---|
+| `X-API-Key` | La clave definida en `API_KEY_SECRET` del `.env` (se compara usando `crypto/subtle` para evitar ataques de canal lateral/timing attacks) |
+| `Content-Type` | Debe ser exactamente `application/json` |
+
+**Reglas de Validación de Negocio (Lotes):**
+1. El `id` debe ser un UUID v4 válido y no vacío.
+2. El `productoId` debe ser un UUID v4 válido y no vacío.
+3. El `turno` debe ser `mañana`, `tarde` o `noche`.
+4. El `totalUnidades` debe ser mayor a 0.
+5. El valor de `correctos + quemados` debe ser exactamente igual a `totalUnidades`.
+6. El valor de `correctosKg` debe ser mayor o igual a 0.
+7. El valor de `quemadosKg` debe ser mayor o igual a 0.
+8. La fecha de fin (`finAt`) debe ser posterior a la fecha de inicio (`inicioAt`).
+
+**Respuestas:**
+| Código | Significado |
+|---|---|
+| 201 | Lote creado exitosamente |
+| 400 | JSON malformado o body excedido (Límite: 1MB para prevenir ataques DoS) |
+| 401 | API key faltante o inválida |
+| 415 | Content-Type no soportado (diferente a `application/json`) |
+| 422 | Error de validación de negocio (retorna JSON detallado con los errores específicos) |
+| 500 | Error interno del servidor (base de datos) |
+
+#### Ejemplo de Respuesta de Error de Validación (422):
+```json
+{
+  "error": "validation failed",
+  "details": {
+    "totalUnidades": "totalUnidades must be equal to correctos + quemados",
+    "turno": "turno must be one of: mañana, tarde, noche"
+  }
+}
+```
