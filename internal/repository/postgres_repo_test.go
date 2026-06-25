@@ -50,11 +50,11 @@ func verifyLoteInDB(t *testing.T, pool *pgxpool.Pool, expected lote.Lote) {
 
 	var retrieved lote.Lote
 	query := `SELECT id, producto_id, turno, inicio_at, fin_at,
-		total_unidades, correctos, quemados,
-		correctos_kg, quemados_kg,
+		total_unidades, correctos, quemados, crudas,
+		correctos_kg, quemados_kg, crudos_kg,
 		temp_horno_1, temp_comb_horno_1,
 		temp_horno_2, temp_comb_horno_2,
-		velocidad_horno,
+		velocidad_cinta,
 		created_at, updated_at
 		FROM lotes_productivos WHERE id = $1`
 
@@ -67,13 +67,15 @@ func verifyLoteInDB(t *testing.T, pool *pgxpool.Pool, expected lote.Lote) {
 		&retrieved.TotalUnidades,
 		&retrieved.Correctos,
 		&retrieved.Quemados,
+		&retrieved.Crudas,
 		&retrieved.CorrectosKg,
 		&retrieved.QuemadosKg,
+		&retrieved.CrudosKg,
 		&retrieved.TempHorno1,
 		&retrieved.TempCombHorno1,
 		&retrieved.TempHorno2,
 		&retrieved.TempCombHorno2,
-		&retrieved.VelocidadHorno,
+		&retrieved.VelocidadCinta,
 		&retrieved.CreatedAt,
 		&retrieved.UpdatedAt,
 	)
@@ -87,9 +89,16 @@ func verifyLoteInDB(t *testing.T, pool *pgxpool.Pool, expected lote.Lote) {
 	assert.Equal(t, expected.TotalUnidades, retrieved.TotalUnidades)
 	assert.Equal(t, expected.Correctos, retrieved.Correctos)
 	assert.Equal(t, expected.Quemados, retrieved.Quemados)
+	assert.Equal(t, expected.Crudas, retrieved.Crudas)
 	assert.Equal(t, expected.CorrectosKg, retrieved.CorrectosKg)
 	assert.Equal(t, expected.QuemadosKg, retrieved.QuemadosKg)
-	assert.Equal(t, expected.TempHorno1, retrieved.TempHorno1)
+	assert.Equal(t, expected.CrudosKg, retrieved.CrudosKg)
+
+	if expected.TempHorno1 == nil {
+		assert.Nil(t, retrieved.TempHorno1)
+	} else {
+		assert.Equal(t, *expected.TempHorno1, *retrieved.TempHorno1)
+	}
 
 	if expected.TempCombHorno1 == nil {
 		assert.Nil(t, retrieved.TempCombHorno1)
@@ -97,7 +106,11 @@ func verifyLoteInDB(t *testing.T, pool *pgxpool.Pool, expected lote.Lote) {
 		assert.Equal(t, *expected.TempCombHorno1, *retrieved.TempCombHorno1)
 	}
 
-	assert.Equal(t, expected.TempHorno2, retrieved.TempHorno2)
+	if expected.TempHorno2 == nil {
+		assert.Nil(t, retrieved.TempHorno2)
+	} else {
+		assert.Equal(t, *expected.TempHorno2, *retrieved.TempHorno2)
+	}
 
 	if expected.TempCombHorno2 == nil {
 		assert.Nil(t, retrieved.TempCombHorno2)
@@ -105,7 +118,12 @@ func verifyLoteInDB(t *testing.T, pool *pgxpool.Pool, expected lote.Lote) {
 		assert.Equal(t, *expected.TempCombHorno2, *retrieved.TempCombHorno2)
 	}
 
-	assert.Equal(t, expected.VelocidadHorno, retrieved.VelocidadHorno)
+	if expected.VelocidadCinta == nil {
+		assert.Nil(t, retrieved.VelocidadCinta)
+	} else {
+		assert.Equal(t, *expected.VelocidadCinta, *retrieved.VelocidadCinta)
+	}
+
 	assert.WithinDuration(t, expected.CreatedAt, retrieved.CreatedAt, time.Second)
 	assert.WithinDuration(t, expected.UpdatedAt, retrieved.UpdatedAt, time.Second)
 }
@@ -119,6 +137,8 @@ func cleanupLote(t *testing.T, pool *pgxpool.Pool, id string) {
 	}
 }
 
+func ptr[T any](v T) *T { return &v }
+
 func buildTestLote() lote.Lote {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	return lote.Lote{
@@ -130,13 +150,15 @@ func buildTestLote() lote.Lote {
 		TotalUnidades:  1200,
 		Correctos:      1150,
 		Quemados:       50,
+		Crudas:         nil,
 		CorrectosKg:    138.00,
 		QuemadosKg:     6.00,
-		TempHorno1:     210.50,
+		CrudosKg:       nil,
+		TempHorno1:     ptr(210.50),
 		TempCombHorno1: nil,
-		TempHorno2:     215.00,
+		TempHorno2:     ptr(215.00),
 		TempCombHorno2: nil,
-		VelocidadHorno: 3.20,
+		VelocidadCinta: ptr(3.20),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}

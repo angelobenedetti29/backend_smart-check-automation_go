@@ -11,17 +11,18 @@ import (
 // baseValidRequest returns a fully valid LoteRequest for use as a test baseline.
 func baseValidRequest() LoteRequest {
 	now := time.Now().UTC()
+	vel := 3.20
 	return LoteRequest{
-		ProductoID:    "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-		Turno:         "mañana",
-		InicioAt:      now.Add(-2 * time.Hour),
-		FinAt:         now,
-		TotalUnidades: 1200,
-		Correctos:     1150,
-		Quemados:      50,
-		CorrectosKg:   138.00,
-		QuemadosKg:    6.00,
-		VelocidadHorno: 3.20,
+		ProductoID:     "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+		Turno:          "mañana",
+		InicioAt:       now.Add(-2 * time.Hour),
+		FinAt:          now,
+		TotalUnidades:  1200,
+		Correctos:      1150,
+		Quemados:       50,
+		CorrectosKg:    138.00,
+		QuemadosKg:     6.00,
+		VelocidadCinta: &vel,
 	}
 }
 
@@ -106,14 +107,21 @@ func TestValidate_NegativeCorrectos(t *testing.T) {
 	assert.Contains(t, err.Error(), "correctos")
 }
 
-func TestValidate_SumMismatch(t *testing.T) {
+func TestValidate_SumExceedsTotal(t *testing.T) {
 	req := baseValidRequest()
-	req.TotalUnidades = 2000 // correctos(1150) + quemados(50) = 1200 ≠ 2000
+	req.TotalUnidades = 100 // correctos(1150) + quemados(50) = 1200 > 100
 
 	err := req.Validate()
 	require.Error(t, err)
 	assert.True(t, IsValidationError(err))
 	assert.Contains(t, err.Error(), "totalUnidades")
+}
+
+func TestValidate_SumWithinTotal(t *testing.T) {
+	req := baseValidRequest()
+	req.TotalUnidades = 1500 // correctos(1150) + quemados(50) = 1200 <= 1500
+
+	assert.NoError(t, req.Validate())
 }
 
 func TestValidate_NegativeCorrectosKg(t *testing.T) {
@@ -134,20 +142,21 @@ func TestValidate_NegativeQuemadosKg(t *testing.T) {
 	assert.Contains(t, err.Error(), "quemadosKg")
 }
 
-func TestValidate_NegativeVelocidadHorno(t *testing.T) {
+func TestValidate_NegativeVelocidadCinta(t *testing.T) {
 	req := baseValidRequest()
-	req.VelocidadHorno = -3.0
+	neg := -3.0
+	req.VelocidadCinta = &neg
 
 	err := req.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "velocidadHorno")
+	assert.Contains(t, err.Error(), "velocidadCinta")
 }
 
 func TestValidate_MultipleErrors(t *testing.T) {
 	req := baseValidRequest()
 	req.ProductoID = ""
 	req.Turno = "invalido"
-	req.TotalUnidades = 9999
+	req.TotalUnidades = 100 // correctos(1150) + quemados(50) = 1200 > 100 → error de suma
 
 	err := req.Validate()
 	require.Error(t, err)

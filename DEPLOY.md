@@ -38,32 +38,33 @@ curl https://backend-smart-check-automation-go.onrender.com/api/v1/lotes-product
 {
   "success": true,
   "message": "Lotes productivos obtenidos exitosamente",
-  "data": {
-    "items": [
-      {
-        "id": "b4ae1a81-6d47-4f7c-bcaf-fc8ae710118f",
-        "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-        "productoNombre": "Tostada Integral",
-        "turno": "tarde",
-        "inicioAt": "2026-06-25T14:00:00Z",
-        "finAt": "2026-06-25T18:00:00Z",
-        "totalUnidades": 200,
-        "correctos": 180,
-        "quemados": 20,
-        "correctosKg": 90,
-        "quemadosKg": 10,
-        "tempHorno1": 215,
-        "tempCombHorno1": 310,
-        "tempHorno2": 212.5,
-        "tempCombHorno2": 308,
-        "velocidadHorno": 0.9
-      }
-    ],
-    "total": 1,
-    "page": 1,
-    "pageSize": 10,
-    "totalPages": 1
-  }
+  "data": [
+    {
+      "id": "b4ae1a81-6d47-4f7c-bcaf-fc8ae710118f",
+      "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+      "productoNombre": "Tostada Integral",
+      "turno": "tarde",
+      "inicioAt": "2026-06-25T14:00:00Z",
+      "finAt": "2026-06-25T18:00:00Z",
+      "totalUnidades": 200,
+      "correctos": 180,
+      "quemados": 20,
+      "crudas": null,
+      "correctosKg": 90,
+      "quemadosKg": 10,
+      "crudosKg": null,
+      "tempHorno1": 215,
+      "tempCombHorno1": 310,
+      "tempHorno2": 212.5,
+      "tempCombHorno2": 308,
+      "velocidadCinta": 0.9,
+      "createdAt": "2026-06-25T14:00:01Z",
+      "updatedAt": "2026-06-25T18:00:05Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "pageSize": 10
 }
 ```
 
@@ -73,7 +74,7 @@ curl https://backend-smart-check-automation-go.onrender.com/api/v1/lotes-product
 
 Registra un nuevo lote productivo. Requiere el header `X-API-Key` con el valor configurado en `API_KEY_SECRET`.
 
-Los campos del body van en **camelCase**. `correctos + quemados` debe ser igual a `totalUnidades`.
+Los campos del body van en **camelCase**. `correctos + quemados + crudas` (si se envía) no puede superar `totalUnidades`.
 
 El único `productoId` disponible en el seed actual es `a1b2c3d4-5678-90ab-cdef-1234567890ab` ("Tostada Integral").
 
@@ -89,13 +90,15 @@ curl -X POST https://backend-smart-check-automation-go.onrender.com/api/v1/lotes
     "totalUnidades": 200,
     "correctos": 180,
     "quemados": 20,
+    "crudas": null,
     "correctosKg": 90.00,
     "quemadosKg": 10.00,
+    "crudosKg": null,
     "tempHorno1": 215.00,
     "tempCombHorno1": 310.00,
     "tempHorno2": 212.50,
     "tempCombHorno2": 308.00,
-    "velocidadHorno": 0.90
+    "velocidadCinta": 0.90
   }'
 ```
 
@@ -112,13 +115,15 @@ curl -X POST https://backend-smart-check-automation-go.onrender.com/api/v1/lotes
     "total_unidades": 200,
     "correctos": 180,
     "quemados": 20,
+    "crudas": null,
     "correctos_kg": 90,
     "quemados_kg": 10,
+    "crudos_kg": null,
     "temp_horno_1": 215,
     "temp_comb_horno_1": 310,
     "temp_horno_2": 212.5,
     "temp_comb_horno_2": 308,
-    "velocidad_horno": 0.9
+    "velocidad_cinta": 0.9
   }
 }
 ```

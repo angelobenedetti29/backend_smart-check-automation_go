@@ -1,7 +1,6 @@
 package database
 
 import (
-	"math"
 	"sync"
 	"time"
 
@@ -21,6 +20,12 @@ func NewLoteProductivoRepository() *LoteProductivoRepository {
 
 	tempComb1 := 320.50
 	tempComb2 := 315.75
+	temp1a := 185.30
+	temp2a := 190.10
+	temp1b := 192.00
+	temp2b := 195.50
+	vel1 := 1.20
+	vel2 := 0.95
 
 	return &LoteProductivoRepository{
 		lotes: []lote.LoteProductivo{
@@ -34,13 +39,15 @@ func NewLoteProductivoRepository() *LoteProductivoRepository {
 				TotalUnidades:  1200,
 				Correctos:      1150,
 				Quemados:       50,
+				Crudas:         nil,
 				CorrectosKg:    2300.00,
 				QuemadosKg:     100.00,
-				TempHorno1:     185.30,
+				CrudosKg:       nil,
+				TempHorno1:     &temp1a,
 				TempCombHorno1: &tempComb1,
-				TempHorno2:     190.10,
+				TempHorno2:     &temp2a,
 				TempCombHorno2: &tempComb2,
-				VelocidadHorno: 1.20,
+				VelocidadCinta: &vel1,
 				CreatedAt:      now.Add(-8 * time.Hour),
 				UpdatedAt:      finAt,
 			},
@@ -54,13 +61,15 @@ func NewLoteProductivoRepository() *LoteProductivoRepository {
 				TotalUnidades:  800,
 				Correctos:      780,
 				Quemados:       20,
+				Crudas:         nil,
 				CorrectosKg:    3120.00,
 				QuemadosKg:     80.00,
-				TempHorno1:     192.00,
+				CrudosKg:       nil,
+				TempHorno1:     &temp1b,
 				TempCombHorno1: nil,
-				TempHorno2:     195.50,
+				TempHorno2:     &temp2b,
 				TempCombHorno2: nil,
-				VelocidadHorno: 0.95,
+				VelocidadCinta: &vel2,
 				CreatedAt:      now.Add(-4 * time.Hour),
 				UpdatedAt:      now,
 			},
@@ -74,16 +83,14 @@ func (r *LoteProductivoRepository) GetAll(page, pageSize int) (*lote.PaginatedRe
 	defer r.mu.RUnlock()
 
 	total := len(r.lotes)
-	totalPages := int(math.Ceil(float64(total) / float64(pageSize)))
 
 	start := (page - 1) * pageSize
 	if start >= total {
 		return &lote.PaginatedResult{
-			Items:      []lote.LoteProductivo{},
-			Total:      total,
-			Page:       page,
-			PageSize:   pageSize,
-			TotalPages: totalPages,
+			Items:    []lote.LoteProductivo{},
+			Total:    total,
+			Page:     page,
+			PageSize: pageSize,
 		}, nil
 	}
 
@@ -93,10 +100,9 @@ func (r *LoteProductivoRepository) GetAll(page, pageSize int) (*lote.PaginatedRe
 	}
 
 	return &lote.PaginatedResult{
-		Items:      r.lotes[start:end],
-		Total:      total,
-		Page:       page,
-		PageSize:   pageSize,
-		TotalPages: totalPages,
+		Items:    r.lotes[start:end],
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
 	}, nil
 }

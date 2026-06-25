@@ -36,50 +36,53 @@ type Repository interface {
 	Create(ctx context.Context, lote *Lote) error
 }
 
-
 // LoteRequest represents the incoming JSON payload from the Raspberry Pi
 // for registering a productive batch in the industrial oven line.
 type LoteRequest struct {
-	ID              string    `json:"id"`
-	ProductoID      string    `json:"productoId"`
-	ProductoNombre  string    `json:"productoNombre"`
-	Turno           string    `json:"turno"`
-	InicioAt        time.Time `json:"inicioAt"`
-	FinAt           time.Time `json:"finAt"`
-	TotalUnidades   int       `json:"totalUnidades"`
-	Correctos       int       `json:"correctos"`
-	Quemados        int       `json:"quemados"`
-	CorrectosKg     float64   `json:"correctosKg"`
-	QuemadosKg      float64   `json:"quemadosKg"`
-	TempHorno1      float64   `json:"tempHorno1"`
-	TempCombHorno1  *float64  `json:"tempCombHorno1"`
-	TempHorno2      float64   `json:"tempHorno2"`
-	TempCombHorno2  *float64  `json:"tempCombHorno2"`
-	VelocidadHorno  float64   `json:"velocidadHorno"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID             string    `json:"id"`
+	ProductoID     string    `json:"productoId"`
+	ProductoNombre string    `json:"productoNombre"`
+	Turno          string    `json:"turno"`
+	InicioAt       time.Time `json:"inicioAt"`
+	FinAt          time.Time `json:"finAt"`
+	TotalUnidades  int       `json:"totalUnidades"`
+	Correctos      int       `json:"correctos"`
+	Quemados       int       `json:"quemados"`
+	Crudas         *int      `json:"crudas"`
+	CorrectosKg    float64   `json:"correctosKg"`
+	QuemadosKg     float64   `json:"quemadosKg"`
+	CrudosKg       *float64  `json:"crudosKg"`
+	TempHorno1     *float64  `json:"tempHorno1"`
+	TempCombHorno1 *float64  `json:"tempCombHorno1"`
+	TempHorno2     *float64  `json:"tempHorno2"`
+	TempCombHorno2 *float64  `json:"tempCombHorno2"`
+	VelocidadCinta *float64  `json:"velocidadCinta"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // Lote represents the domain entity for a productive batch as stored
 // in the PostgreSQL database.
 type Lote struct {
-	ID              string    `json:"id"`
-	ProductoID      string    `json:"producto_id"`
-	Turno           string    `json:"turno"`
-	InicioAt        time.Time `json:"inicio_at"`
-	FinAt           time.Time `json:"fin_at"`
-	TotalUnidades   int       `json:"total_unidades"`
-	Correctos       int       `json:"correctos"`
-	Quemados        int       `json:"quemados"`
-	CorrectosKg     float64   `json:"correctos_kg"`
-	QuemadosKg      float64   `json:"quemados_kg"`
-	TempHorno1      float64   `json:"temp_horno_1"`
-	TempCombHorno1  *float64  `json:"temp_comb_horno_1"`
-	TempHorno2      float64   `json:"temp_horno_2"`
-	TempCombHorno2  *float64  `json:"temp_comb_horno_2"`
-	VelocidadHorno  float64   `json:"velocidad_horno"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID             string    `json:"id"`
+	ProductoID     string    `json:"producto_id"`
+	Turno          string    `json:"turno"`
+	InicioAt       time.Time `json:"inicio_at"`
+	FinAt          time.Time `json:"fin_at"`
+	TotalUnidades  int       `json:"total_unidades"`
+	Correctos      int       `json:"correctos"`
+	Quemados       int       `json:"quemados"`
+	Crudas         *int      `json:"crudas"`
+	CorrectosKg    float64   `json:"correctos_kg"`
+	QuemadosKg     float64   `json:"quemados_kg"`
+	CrudosKg       *float64  `json:"crudos_kg"`
+	TempHorno1     *float64  `json:"temp_horno_1"`
+	TempCombHorno1 *float64  `json:"temp_comb_horno_1"`
+	TempHorno2     *float64  `json:"temp_horno_2"`
+	TempCombHorno2 *float64  `json:"temp_comb_horno_2"`
+	VelocidadCinta *float64  `json:"velocidad_cinta"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // MapLoteRequestToLote converts a LoteRequest (API DTO from Raspberry Pi)
@@ -95,13 +98,15 @@ func MapLoteRequestToLote(req LoteRequest) Lote {
 		TotalUnidades:  req.TotalUnidades,
 		Correctos:      req.Correctos,
 		Quemados:       req.Quemados,
+		Crudas:         req.Crudas,
 		CorrectosKg:    req.CorrectosKg,
 		QuemadosKg:     req.QuemadosKg,
+		CrudosKg:       req.CrudosKg,
 		TempHorno1:     req.TempHorno1,
 		TempCombHorno1: req.TempCombHorno1,
 		TempHorno2:     req.TempHorno2,
 		TempCombHorno2: req.TempCombHorno2,
-		VelocidadHorno: req.VelocidadHorno,
+		VelocidadCinta: req.VelocidadCinta,
 		CreatedAt:      req.CreatedAt,
 		UpdatedAt:      req.UpdatedAt,
 	}
@@ -138,12 +143,19 @@ func (req LoteRequest) Validate() error {
 	if req.Quemados < 0 {
 		errs = append(errs, "quemados: no puede ser negativo")
 	}
+	if req.Crudas != nil && *req.Crudas < 0 {
+		errs = append(errs, "crudas: no puede ser negativo")
+	}
 
-	// Consistencia de unidades: correctos + quemados == total_unidades
-	if req.Correctos+req.Quemados != req.TotalUnidades {
+	// Consistencia de unidades: la suma clasificada no puede superar el total
+	crudas := 0
+	if req.Crudas != nil {
+		crudas = *req.Crudas
+	}
+	if req.Correctos+req.Quemados+crudas > req.TotalUnidades {
 		errs = append(errs, fmt.Sprintf(
-			"correctos(%d) + quemados(%d) = %d, debe ser igual a totalUnidades(%d)",
-			req.Correctos, req.Quemados, req.Correctos+req.Quemados, req.TotalUnidades,
+			"correctos(%d) + quemados(%d) + crudas(%d) = %d, no puede superar totalUnidades(%d)",
+			req.Correctos, req.Quemados, crudas, req.Correctos+req.Quemados+crudas, req.TotalUnidades,
 		))
 	}
 
@@ -154,10 +166,13 @@ func (req LoteRequest) Validate() error {
 	if req.QuemadosKg < 0 {
 		errs = append(errs, "quemadosKg: no puede ser negativo")
 	}
+	if req.CrudosKg != nil && *req.CrudosKg < 0 {
+		errs = append(errs, "crudosKg: no puede ser negativo")
+	}
 
-	// Velocidad del horno no negativa
-	if req.VelocidadHorno < 0 {
-		errs = append(errs, "velocidadHorno: no puede ser negativo")
+	// Velocidad de la cinta no negativa
+	if req.VelocidadCinta != nil && *req.VelocidadCinta < 0 {
+		errs = append(errs, "velocidadCinta: no puede ser negativo")
 	}
 
 	if len(errs) > 0 {
