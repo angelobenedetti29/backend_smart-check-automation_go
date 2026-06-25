@@ -34,7 +34,7 @@ func (h *LoteProductivoHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.OK(w, "Lotes productivos obtenidos exitosamente", result)
+	response.Paginated(w, "Lotes productivos obtenidos exitosamente", result.Items, result.Total, result.Page, result.PageSize)
 }
 
 // parseQueryInt extrae un parámetro entero de la query string, devolviendo el valor por defecto si falla.

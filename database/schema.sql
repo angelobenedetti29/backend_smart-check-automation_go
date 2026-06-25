@@ -40,13 +40,15 @@ CREATE TABLE IF NOT EXISTS lotes_productivos (
     total_unidades      INTEGER         NOT NULL,
     correctos           INTEGER         NOT NULL,
     quemados            INTEGER         NOT NULL,
+    crudas              INTEGER,
     correctos_kg        NUMERIC(10,2)   NOT NULL,
     quemados_kg         NUMERIC(10,2)   NOT NULL,
+    crudos_kg           NUMERIC(10,2),
     temp_horno_1        NUMERIC(6,2),
     temp_comb_horno_1   NUMERIC(6,2),
     temp_horno_2        NUMERIC(6,2),
     temp_comb_horno_2   NUMERIC(6,2),
-    velocidad_horno     NUMERIC(6,2),
+    velocidad_cinta     NUMERIC(6,2),
     created_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
 
@@ -75,9 +77,13 @@ CREATE TABLE IF NOT EXISTS lotes_productivos (
     CONSTRAINT chk_lotes_quemados_no_negativo
         CHECK (quemados >= 0),
 
-    -- Consistencia: la suma de correctos + quemados no puede exceder el total
+    -- Los panes crudos no pueden ser negativos
+    CONSTRAINT chk_lotes_crudas_no_negativo
+        CHECK (crudas >= 0),
+
+    -- Consistencia: la suma de correctos + quemados + crudas no puede exceder el total
     CONSTRAINT chk_lotes_sum_unidades_consistente
-        CHECK (correctos + quemados <= total_unidades),
+        CHECK (correctos + quemados + COALESCE(crudas, 0) <= total_unidades),
 
     -- Consistencia temporal: fin no puede ser anterior a inicio
     CONSTRAINT chk_lotes_fin_after_inicio
@@ -93,13 +99,15 @@ COMMENT ON COLUMN lotes_productivos.fin_at    IS 'Marca temporal de fin de la ho
 COMMENT ON COLUMN lotes_productivos.total_unidades IS 'Total de unidades horneadas en el lote';
 COMMENT ON COLUMN lotes_productivos.correctos IS 'Unidades en estado correcto (aprobadas)';
 COMMENT ON COLUMN lotes_productivos.quemados  IS 'Unidades quemadas (rechazadas)';
+COMMENT ON COLUMN lotes_productivos.crudas    IS 'Unidades crudas / sin clasificar (nullable)';
 COMMENT ON COLUMN lotes_productivos.correctos_kg IS 'Peso total en kg de panes correctos';
 COMMENT ON COLUMN lotes_productivos.quemados_kg  IS 'Peso total en kg de panes quemados';
+COMMENT ON COLUMN lotes_productivos.crudos_kg    IS 'Peso total en kg de panes crudos (nullable)';
 COMMENT ON COLUMN lotes_productivos.temp_horno_1 IS 'Temperatura del horno 1 al inicio (°C)';
 COMMENT ON COLUMN lotes_productivos.temp_comb_horno_1 IS 'Temperatura de la cámara de combustión del horno 1 (°C, nullable)';
 COMMENT ON COLUMN lotes_productivos.temp_horno_2 IS 'Temperatura del horno 2 al inicio (°C)';
 COMMENT ON COLUMN lotes_productivos.temp_comb_horno_2 IS 'Temperatura de la cámara de combustión del horno 2 (°C, nullable)';
-COMMENT ON COLUMN lotes_productivos.velocidad_horno IS 'Velocidad de la cinta del horno (m/s)';
+COMMENT ON COLUMN lotes_productivos.velocidad_cinta IS 'Velocidad de la cinta transportadora del horno (m/s)';
 
 -- ============================================================================
 -- ÍNDICES (Indexes)

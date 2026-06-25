@@ -3,7 +3,6 @@ package repository
 import (
 	"context"
 	"fmt"
-	"math"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -30,18 +29,14 @@ func (r *LoteProductivoPostgresRepository) GetAll(page, pageSize int) (*lote.Pag
 	}
 
 	offset := (page - 1) * pageSize
-	totalPages := int(math.Ceil(float64(total) / float64(pageSize)))
-	if total == 0 {
-		totalPages = 0
-	}
 
 	rows, err := r.db.Query(ctx, `
 		SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
-		       lp.total_unidades, lp.correctos, lp.quemados,
-		       lp.correctos_kg, lp.quemados_kg,
+		       lp.total_unidades, lp.correctos, lp.quemados, lp.crudas,
+		       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
 		       lp.temp_horno_1, lp.temp_comb_horno_1,
 		       lp.temp_horno_2, lp.temp_comb_horno_2,
-		       lp.velocidad_horno, lp.created_at, lp.updated_at
+		       lp.velocidad_cinta, lp.created_at, lp.updated_at
 		FROM lotes_productivos lp
 		JOIN productos pr ON lp.producto_id = pr.id
 		ORDER BY lp.inicio_at DESC
@@ -57,11 +52,11 @@ func (r *LoteProductivoPostgresRepository) GetAll(page, pageSize int) (*lote.Pag
 		var l lote.LoteProductivo
 		if err := rows.Scan(
 			&l.ID, &l.ProductoID, &l.ProductoNombre, &l.Turno, &l.InicioAt, &l.FinAt,
-			&l.TotalUnidades, &l.Correctos, &l.Quemados,
-			&l.CorrectosKg, &l.QuemadosKg,
+			&l.TotalUnidades, &l.Correctos, &l.Quemados, &l.Crudas,
+			&l.CorrectosKg, &l.QuemadosKg, &l.CrudosKg,
 			&l.TempHorno1, &l.TempCombHorno1,
 			&l.TempHorno2, &l.TempCombHorno2,
-			&l.VelocidadHorno, &l.CreatedAt, &l.UpdatedAt,
+			&l.VelocidadCinta, &l.CreatedAt, &l.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan lote: %w", err)
 		}
@@ -72,10 +67,9 @@ func (r *LoteProductivoPostgresRepository) GetAll(page, pageSize int) (*lote.Pag
 	}
 
 	return &lote.PaginatedResult{
-		Items:      items,
-		Total:      total,
-		Page:       page,
-		PageSize:   pageSize,
-		TotalPages: totalPages,
+		Items:    items,
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
 	}, nil
 }

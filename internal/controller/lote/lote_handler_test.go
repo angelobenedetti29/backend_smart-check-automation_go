@@ -33,13 +33,15 @@ func validLoteJSON() []byte {
 		"totalUnidades": 1200,
 		"correctos": 1150,
 		"quemados": 50,
+		"crudas": null,
 		"correctosKg": 138.00,
 		"quemadosKg": 6.00,
+		"crudosKg": null,
 		"tempHorno1": 210.50,
 		"tempCombHorno1": null,
 		"tempHorno2": 215.00,
 		"tempCombHorno2": null,
-		"velocidadHorno": 3.20,
+		"velocidadCinta": 3.20,
 		"createdAt": "2026-06-02T06:00:01Z",
 		"updatedAt": "2026-06-02T08:30:05Z"
 	}`)
@@ -93,8 +95,8 @@ func TestHandleCreateLote_ValidationError(t *testing.T) {
 	}
 	handler := setupHandlerTest(t, mock)
 
-	// Suma incorrecta: 1000 + 50 = 1050 ≠ 1200
-	invalidBody := bytes.ReplaceAll(validLoteJSON(), []byte(`"totalUnidades": 1200`), []byte(`"totalUnidades": 2000`))
+	// Suma excede el total: correctos(1150) + quemados(50) = 1200 > totalUnidades(100)
+	invalidBody := bytes.ReplaceAll(validLoteJSON(), []byte(`"totalUnidades": 1200`), []byte(`"totalUnidades": 100`))
 	rr := executeRequest(t, handler, http.MethodPost, invalidBody, "test-key-fermar")
 
 	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)

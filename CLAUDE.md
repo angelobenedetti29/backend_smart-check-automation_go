@@ -110,13 +110,15 @@ CREATE TABLE lotes_productivos (
     total_unidades    INTEGER NOT NULL,
     correctos         INTEGER NOT NULL,
     quemados          INTEGER NOT NULL,
+    crudas            INTEGER,
     correctos_kg      NUMERIC(10,2) NOT NULL,
     quemados_kg       NUMERIC(10,2) NOT NULL,
+    crudos_kg         NUMERIC(10,2),
     temp_horno_1      NUMERIC(6,2),
     temp_comb_horno_1 NUMERIC(6,2),
     temp_horno_2      NUMERIC(6,2),
     temp_comb_horno_2 NUMERIC(6,2),
-    velocidad_horno   NUMERIC(6,2),
+    velocidad_cinta   NUMERIC(6,2),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -126,6 +128,7 @@ CREATE TABLE lotes_productivos (
 
 **Importante:** `lotes_productivos` NO tiene columna `producto_nombre`.
 El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los POSTs de prueba.
+`crudas` y `crudos_kg` son nullable. La validación exige `correctos + quemados + crudas <= total_unidades`.
 
 ## Decisiones de arquitectura tomadas
 

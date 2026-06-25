@@ -13,24 +13,25 @@ type LoteProductivo struct {
 	TotalUnidades  int        `json:"totalUnidades"    db:"total_unidades"`
 	Correctos      int        `json:"correctos"        db:"correctos"`
 	Quemados       int        `json:"quemados"         db:"quemados"`
+	Crudas         *int       `json:"crudas"           db:"crudas"`
 	CorrectosKg    float64    `json:"correctosKg"      db:"correctos_kg"`
 	QuemadosKg     float64    `json:"quemadosKg"       db:"quemados_kg"`
-	TempHorno1     float64    `json:"tempHorno1"       db:"temp_horno_1"`
-	TempCombHorno1 *float64   `json:"tempCombHorno1,omitempty" db:"temp_comb_horno_1"`
-	TempHorno2     float64    `json:"tempHorno2"       db:"temp_horno_2"`
-	TempCombHorno2 *float64   `json:"tempCombHorno2,omitempty" db:"temp_comb_horno_2"`
-	VelocidadHorno float64    `json:"velocidadHorno"   db:"velocidad_horno"`
+	CrudosKg       *float64   `json:"crudosKg"         db:"crudos_kg"`
+	TempHorno1     *float64   `json:"tempHorno1"       db:"temp_horno_1"`
+	TempCombHorno1 *float64   `json:"tempCombHorno1"   db:"temp_comb_horno_1"`
+	TempHorno2     *float64   `json:"tempHorno2"       db:"temp_horno_2"`
+	TempCombHorno2 *float64   `json:"tempCombHorno2"   db:"temp_comb_horno_2"`
+	VelocidadCinta *float64   `json:"velocidadCinta"   db:"velocidad_cinta"`
 	CreatedAt      time.Time  `json:"createdAt"        db:"created_at"`
 	UpdatedAt      time.Time  `json:"updatedAt"        db:"updated_at"`
 }
 
 // PaginatedResult encapsula una página de lotes junto con metadatos de paginación.
 type PaginatedResult struct {
-	Items      []LoteProductivo `json:"items"`
-	Total      int              `json:"total"`
-	Page       int              `json:"page"`
-	PageSize   int              `json:"pageSize"`
-	TotalPages int              `json:"totalPages"`
+	Items    []LoteProductivo
+	Total    int
+	Page     int
+	PageSize int
 }
 
 // Repository define el contrato de persistencia para LoteProductivo.

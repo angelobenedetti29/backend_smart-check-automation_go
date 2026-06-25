@@ -26,21 +26,21 @@ func (r *PostgresRepository) Create(ctx context.Context, l *lote.Lote) error {
 	const query = `
 		INSERT INTO lotes_productivos (
 			id, producto_id, turno, inicio_at, fin_at,
-			total_unidades, correctos, quemados,
-			correctos_kg, quemados_kg,
+			total_unidades, correctos, quemados, crudas,
+			correctos_kg, quemados_kg, crudos_kg,
 			temp_horno_1, temp_comb_horno_1,
 			temp_horno_2, temp_comb_horno_2,
-			velocidad_horno,
+			velocidad_cinta,
 			created_at, updated_at
 		) VALUES (
 			CASE WHEN $1 = '' THEN gen_random_uuid() ELSE $1::uuid END,
 			$2, $3, $4, $5,
-			$6, $7, $8,
-			$9, $10,
-			$11, $12,
+			$6, $7, $8, $9,
+			$10, $11, $12,
 			$13, $14,
-			$15,
-			$16, $17
+			$15, $16,
+			$17,
+			$18, $19
 		)
 		RETURNING id`
 
@@ -53,13 +53,15 @@ func (r *PostgresRepository) Create(ctx context.Context, l *lote.Lote) error {
 		l.TotalUnidades,
 		l.Correctos,
 		l.Quemados,
+		l.Crudas,
 		l.CorrectosKg,
 		l.QuemadosKg,
+		l.CrudosKg,
 		l.TempHorno1,
 		l.TempCombHorno1,
 		l.TempHorno2,
 		l.TempCombHorno2,
-		l.VelocidadHorno,
+		l.VelocidadCinta,
 		l.CreatedAt,
 		l.UpdatedAt,
 	).Scan(&l.ID)

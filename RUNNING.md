@@ -77,11 +77,13 @@ curl http://localhost:8080/api/v1/lotes-productivos
   "totalUnidades": 500,
   "correctos": 480,
   "quemados": 20,
+  "crudas": null,
   "correctosKg": 96.0,
   "quemadosKg": 4.0,
+  "crudosKg": null,
   "tempHorno1": 188.0,
   "tempHorno2": 192.0,
-  "velocidadHorno": 1.1,
+  "velocidadCinta": 1.1,
   "createdAt": "2026-06-12T14:00:00Z",
   "updatedAt": "2026-06-12T18:00:00Z"
 }
