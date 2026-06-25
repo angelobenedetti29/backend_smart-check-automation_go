@@ -1,0 +1,44 @@
+services:
+  # ── Staging ────────────────────────────────────────────────────────────────
+  - type: web
+    name: smartcheck-backend-staging
+    runtime: docker
+    branch: staging
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    # El deploy lo dispara el workflow de GitHub Actions (migrate.yml) después
+    # de correr las migraciones. Render NO deploya automáticamente al push.
+    autoDeploy: false
+    envVars:
+      - key: DATABASE_URL
+        # Session pooler de Supabase — puerto 5432, NO el transaction pooler (6543).
+        # Ver DEPLOYMENT.md § "Connection string de Supabase".
+        sync: false
+      - key: API_KEY_SECRET
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: PORT
+        value: "8080"
+
+  # ── Production ─────────────────────────────────────────────────────────────
+  - type: web
+    name: smartcheck-backend-prod
+    runtime: docker
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeploy: false
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: API_KEY_SECRET
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: PORT
+        value: "8080"

@@ -1,0 +1,37 @@
+name: Migrate & Deploy
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+
+jobs:
+  migrate-and-deploy:
+    name: Migrate DB then Deploy
+    runs-on: ubuntu-latest
+
+    # Resuelve al GitHub Environment "staging" o "production" según la rama.
+    # Cada environment tiene sus propios secrets: DATABASE_URL y RENDER_DEPLOY_HOOK.
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client
+
+      # El schema usa IF NOT EXISTS y ON CONFLICT DO NOTHING: es idempotente.
+      # Al agregar tablas nuevas, crear un nuevo archivo .sql en database/ y
+      # aplicarlo aquí; o migrar a golang-migrate cuando el esquema evolucione.
+      - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: psql "$DATABASE_URL" -f database/schema.sql
+
+      - name: Trigger Render deploy
+        env:
+          DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: curl --silent --fail --show-error -X POST "$DEPLOY_HOOK"

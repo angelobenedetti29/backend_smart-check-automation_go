@@ -69,6 +69,7 @@ func main() {
 
 	mux.HandleFunc("/", rootHandler)
 	mux.HandleFunc("/health", healthHandler(pgPool))
+	mux.HandleFunc("/healthz", healthHandler(pgPool))
 
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(hornoHandler.GetHornoStatus))
 	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
