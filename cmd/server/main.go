@@ -16,11 +16,13 @@ import (
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
 	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
+	sseController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sse"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
+	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
 
 func main() {
@@ -55,14 +57,18 @@ func main() {
 	loteCreateRepo := repository.NewPostgresRepository(pgPool)
 	loteGetRepo := repository.NewLoteProductivoPostgresRepository(pgPool)
 
+	// SSE broker for real-time event streaming
+	sseBroker := sse.NewBroker()
+
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
 	loteProdSvc := loteProductivoService.NewLoteProductivoService(loteGetRepo)
 
 	// 4. Instantiate Presentation HTTP Handlers
 	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
-	loteHandler := loteController.NewLoteHandler(loteCreateRepo)
+	loteHandler := loteController.NewLoteHandler(loteCreateRepo, sseBroker, loteGetRepo)
 	loteProductivoHandler := loteProductivoController.NewLoteProductivoHandler(loteProdSvc)
+	sseHandler := sseController.NewSSEHandler(sseBroker)
 
 	// 5. Setup routes
 	mux := http.NewServeMux()
@@ -75,8 +81,12 @@ func main() {
 	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
 	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
 	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteProductivoHandler.GetAll))
+	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(sseHandler.HandleSSE))
 
-	// 6. Launch server with graceful shutdown
+	// 6. Wrap mux with CORS middleware
+	handler := corsMiddleware(mux)
+
+	// 7. Launch server with graceful shutdown
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -84,7 +94,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         ":" + port,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -119,7 +129,23 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos\n"))
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos, GET /api/v1/lotes-productivos/events (SSE)\n"))
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-API-Key")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {

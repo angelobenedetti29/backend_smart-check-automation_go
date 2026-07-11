@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote"
+	loteProductivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_productivo"
+	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
 
 // mockLoteRepo implements lote.Repository (domain interface) for controlled testing.
@@ -45,10 +47,19 @@ func validLoteJSON() []byte {
 	}`)
 }
 
+// mockLoteProductivoFetcher implements LoteFetcher for controlled testing.
+type mockLoteProductivoFetcher struct{}
+
+func (m *mockLoteProductivoFetcher) GetByID(id string) (*loteProductivo.LoteProductivo, error) {
+	return &loteProductivo.LoteProductivo{
+		ID: id,
+	}, nil
+}
+
 func setupHandlerTest(t *testing.T, repo lote.Repository) *LoteHandler {
 	t.Helper()
 	t.Setenv("API_KEY_SECRET", "test-key-fermar")
-	return NewLoteHandler(repo)
+	return NewLoteHandler(repo, sse.NewBroker(), &mockLoteProductivoFetcher{})
 }
 
 func executeRequest(t *testing.T, handler *LoteHandler, method string, body []byte, apiKey string) *httptest.ResponseRecorder {

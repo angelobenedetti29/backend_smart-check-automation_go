@@ -36,6 +36,7 @@ type PaginatedResult struct {
 // Repository define el contrato de persistencia para LoteProductivo.
 type Repository interface {
 	GetAll(page, pageSize int) (*PaginatedResult, error)
+	GetByID(id string) (*LoteProductivo, error)
 }
 
 // Service define las operaciones de negocio para lotes productivos.
