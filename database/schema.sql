@@ -1,16 +1,18 @@
 -- ============================================================================
 -- Smart-Check Automation — Fermar S.A.
 -- Esquema de Base de Datos PostgreSQL (MVP)
--- Versión: 1.0
+-- Versión: 1.1
 -- Motor:  PostgreSQL 15+ (Aiven Cloud, AWS sa-east-1)
 -- ============================================================================
--- Este script crea la estructura completa del modelo de datos para la
--- User Story "Persistir lotes productivos".
--- 
+-- Este script crea la estructura completa del modelo de datos para las
+-- User Stories "Persistir lotes productivos" y "ABM de Parámetros y Umbrales
+-- de Control por Tipo de Producto" (SCA-142).
+--
 -- Orden de ejecución:
 --   1. Tabla maestra: productos
 --   2. Tabla transaccional: lotes_productivos (depende de productos vía FK)
---   3. Seed de datos de catálogo
+--   3. Tabla de configuración: parametros_producto (depende de productos vía FK)
+--   4. Seed de datos de catálogo
 -- ============================================================================
 
 BEGIN;
@@ -131,12 +133,102 @@ CREATE INDEX IF NOT EXISTS idx_lotes_created_at
     ON lotes_productivos (created_at);
 
 -- ============================================================================
+-- TABLA 3: parametros_producto (Parámetros y umbrales de control por producto)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS parametros_producto (
+    id                      UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+    producto_id             UUID            NOT NULL UNIQUE,
+    peso_referencia_kg      NUMERIC(10,3)   NOT NULL,
+    tolerancia_peso_pct     NUMERIC(5,2)    NOT NULL,
+    dimension_base_cm       NUMERIC(6,2)    NOT NULL,
+    tolerancia_dimension_cm NUMERIC(6,2)    NOT NULL,
+    temp_min                NUMERIC(6,2)    NOT NULL,
+    temp_max                NUMERIC(6,2)    NOT NULL,
+    velocidad_cinta_min     NUMERIC(6,2)    NOT NULL,
+    velocidad_cinta_max     NUMERIC(6,2)    NOT NULL,
+    activo                  BOOLEAN         NOT NULL DEFAULT true,
+    created_at              TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ     NOT NULL DEFAULT now(),
+
+    -- FOREIGN KEY: garantiza integridad referencial con la tabla maestra
+    CONSTRAINT fk_parametros_producto_producto
+        FOREIGN KEY (producto_id)
+        REFERENCES productos (id)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE,
+
+    -- RESTRICCIONES DE DOMINIO (Check Constraints)
+
+    -- El peso de referencia debe ser positivo
+    CONSTRAINT chk_parametros_peso_positivo
+        CHECK (peso_referencia_kg > 0),
+
+    -- La tolerancia de peso no puede ser negativa
+    CONSTRAINT chk_parametros_tolerancia_peso
+        CHECK (tolerancia_peso_pct >= 0),
+
+    -- La dimensión base debe ser positiva
+    CONSTRAINT chk_parametros_dimension_positiva
+        CHECK (dimension_base_cm > 0),
+
+    -- La tolerancia de dimensión no puede ser negativa
+    CONSTRAINT chk_parametros_tolerancia_dimension
+        CHECK (tolerancia_dimension_cm >= 0),
+
+    -- Consistencia del rango de temperatura: el máximo debe superar al mínimo
+    CONSTRAINT chk_parametros_temp_rango
+        CHECK (temp_max > temp_min),
+
+    -- Consistencia del rango de velocidad de cinta: el máximo debe superar al mínimo
+    CONSTRAINT chk_parametros_velocidad_rango
+        CHECK (velocidad_cinta_max > velocidad_cinta_min)
+);
+
+COMMENT ON TABLE  parametros_producto IS 'Parámetros y umbrales de control ideales de horneado por variedad de producto, usados por las reglas de detección y el recomendador inteligente.';
+COMMENT ON COLUMN parametros_producto.id IS 'Identificador UUID del registro de parámetros';
+COMMENT ON COLUMN parametros_producto.producto_id IS 'FK al catálogo de productos (relación 1:1, un set de parámetros activo por producto)';
+COMMENT ON COLUMN parametros_producto.peso_referencia_kg IS 'Peso patrón/ideal de una unidad del producto (kg)';
+COMMENT ON COLUMN parametros_producto.tolerancia_peso_pct IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
+COMMENT ON COLUMN parametros_producto.dimension_base_cm IS 'Dimensión base/tamaño ideal del producto (cm)';
+COMMENT ON COLUMN parametros_producto.tolerancia_dimension_cm IS 'Tolerancia de tamaño admitida sobre la dimensión base (cm)';
+COMMENT ON COLUMN parametros_producto.temp_min IS 'Temperatura mínima aceptable de horneado (°C)';
+COMMENT ON COLUMN parametros_producto.temp_max IS 'Temperatura máxima aceptable de horneado (°C)';
+COMMENT ON COLUMN parametros_producto.velocidad_cinta_min IS 'Velocidad mínima aceptable de la cinta transportadora (m/s)';
+COMMENT ON COLUMN parametros_producto.velocidad_cinta_max IS 'Velocidad máxima aceptable de la cinta transportadora (m/s)';
+COMMENT ON COLUMN parametros_producto.activo IS 'Indica si el set de parámetros está vigente (baja lógica para el ABM)';
+COMMENT ON COLUMN parametros_producto.created_at IS 'Marca temporal de alta del registro';
+COMMENT ON COLUMN parametros_producto.updated_at IS 'Marca temporal de la última modificación del registro';
+
+-- ============================================================================
+-- ÍNDICES (Indexes) — parametros_producto
+-- ============================================================================
+
+-- Índice para búsquedas por producto (FK lookup), explícito por consistencia
+-- aunque producto_id ya tiene una restricción UNIQUE
+CREATE INDEX IF NOT EXISTS idx_parametros_producto_producto_id
+    ON parametros_producto (producto_id);
+
+-- ============================================================================
 -- SEED: Datos de catálogo de productos
 -- Incluye el producto de referencia del JSON contrato
 -- ============================================================================
 INSERT INTO productos (id, nombre) VALUES
     ('a1b2c3d4-5678-90ab-cdef-1234567890ab', 'Tostada Integral')
 ON CONFLICT (id) DO NOTHING;
+
+-- ============================================================================
+-- SEED: Parámetros de control por defecto para el producto de referencia
+-- ============================================================================
+INSERT INTO parametros_producto (
+    producto_id, peso_referencia_kg, tolerancia_peso_pct,
+    dimension_base_cm, tolerancia_dimension_cm,
+    temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
+) VALUES (
+    'a1b2c3d4-5678-90ab-cdef-1234567890ab', 0.030, 10.00,
+    8.00, 0.50,
+    160.00, 180.00, 0.10, 0.30
+)
+ON CONFLICT (producto_id) DO NOTHING;
 
 COMMIT;
  
