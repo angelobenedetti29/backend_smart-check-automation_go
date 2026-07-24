@@ -16,11 +16,13 @@ import (
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
 	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
+	parametrosProductoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/parametros_producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
+	parametrosProductoService "github.com/angelobenedetti29/smart-check-automation/internal/service/parametros_producto"
 )
 
 func main() {
@@ -54,15 +56,18 @@ func main() {
 	// Real PostgreSQL repositories
 	loteCreateRepo := repository.NewPostgresRepository(pgPool)
 	loteGetRepo := repository.NewLoteProductivoPostgresRepository(pgPool)
+	parametrosProductoRepo := repository.NewParametrosProductoPostgresRepository(pgPool)
 
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
 	loteProdSvc := loteProductivoService.NewLoteProductivoService(loteGetRepo)
+	parametrosProductoSvc := parametrosProductoService.NewParametrosProductoService(parametrosProductoRepo)
 
 	// 4. Instantiate Presentation HTTP Handlers
 	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
 	loteHandler := loteController.NewLoteHandler(loteCreateRepo)
 	loteProductivoHandler := loteProductivoController.NewLoteProductivoHandler(loteProdSvc)
+	parametrosProductoHandler := parametrosProductoController.NewParametrosProductoHandler(parametrosProductoSvc)
 
 	// 5. Setup routes
 	mux := http.NewServeMux()
@@ -75,6 +80,7 @@ func main() {
 	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
 	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
 	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteProductivoHandler.GetAll))
+	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(parametrosProductoHandler.Handle))
 
 	// 6. Launch server with graceful shutdown
 	port := os.Getenv("PORT")
@@ -119,7 +125,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos\n"))
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto\n"))
 }
 
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
