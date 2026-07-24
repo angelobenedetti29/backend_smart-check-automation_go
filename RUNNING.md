@@ -54,6 +54,9 @@ curl http://localhost:8080/health
 
 # Listar lotes productivos (vacío al principio)
 curl http://localhost:8080/api/v1/lotes-productivos
+
+# Listar parámetros por producto (ya viene con el seed de Tostada Integral)
+curl http://localhost:8080/api/v1/parametros-producto
 ```
 
 ---
@@ -93,6 +96,34 @@ Después hacer GET a `http://localhost:8080/api/v1/lotes-productivos` para ver e
 
 > El `productoId` del ejemplo es el único producto sembrado por el schema (`Tostada Integral`).
 > Usar un UUID diferente devuelve error de FK.
+
+---
+
+## 4bis. Probar el ABM de parámetros por producto
+
+No requiere `X-API-Key` (endpoints del panel de configuración del Supervisor, sin auth de usuario todavía).
+
+**Modificar el rango de temperatura de un producto existente (PUT):**
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/parametros-producto \
+  -H "Content-Type: application/json" \
+  -d '{
+    "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+    "pesoReferenciaKg": 0.03,
+    "toleranciaPesoPct": 10,
+    "dimensionBaseCm": 8,
+    "toleranciaDimensionCm": 0.5,
+    "tempMin": 160,
+    "tempMax": 180,
+    "velocidadCintaMin": 0.1,
+    "velocidadCintaMax": 0.3
+  }'
+```
+
+Después hacer GET a `http://localhost:8080/api/v1/parametros-producto` para confirmar el cambio.
+
+> El body es un reemplazo completo (no parcial): hay que enviar todos los campos. `tempMax` debe ser mayor a `tempMin` y `velocidadCintaMax` mayor a `velocidadCintaMin`, o el server responde 422.
 
 ---
 

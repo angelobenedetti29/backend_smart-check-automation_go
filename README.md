@@ -119,6 +119,94 @@ Registra un lote productivo enviado por la Raspberry Pi. Requiere `X-API-Key`.
 
 ---
 
+### GET /api/v1/parametros-producto
+
+Devuelve todos los sets de parámetros y umbrales de control configurados, uno por producto, ordenados por nombre. Usado por el panel de configuración del Supervisor.
+
+**Respuesta 200:**
+```json
+{
+  "success": true,
+  "message": "Parámetros por producto obtenidos exitosamente",
+  "data": [
+    {
+      "id": "de91d67e-a9e1-4b69-a08a-46a965a4b728",
+      "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+      "productoNombre": "Tostada Integral",
+      "pesoReferenciaKg": 0.03,
+      "toleranciaPesoPct": 10,
+      "dimensionBaseCm": 8,
+      "toleranciaDimensionCm": 0.5,
+      "tempMin": 160,
+      "tempMax": 180,
+      "velocidadCintaMin": 0.1,
+      "velocidadCintaMax": 0.3,
+      "activo": true,
+      "createdAt": "2026-07-23T23:10:05Z",
+      "updatedAt": "2026-07-23T23:10:05Z"
+    }
+  ]
+}
+```
+
+---
+
+### POST /api/v1/parametros-producto
+
+Da de alta un nuevo set de parámetros para un producto que todavía no tiene uno cargado. No requiere `X-API-Key` (login con Google OAuth 2.0 pendiente — ver sección de tareas).
+
+**Body:**
+```json
+{
+  "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "pesoReferenciaKg": 0.03,
+  "toleranciaPesoPct": 10,
+  "dimensionBaseCm": 8,
+  "toleranciaDimensionCm": 0.5,
+  "tempMin": 160,
+  "tempMax": 180,
+  "velocidadCintaMin": 0.1,
+  "velocidadCintaMax": 0.3
+}
+```
+
+**Reglas de validación** (replican los CHECK constraints de `parametros_producto`):
+- `productoId` requerido y no vacío
+- `pesoReferenciaKg` y `dimensionBaseCm` deben ser mayores a 0
+- `toleranciaPesoPct` y `toleranciaDimensionCm` no pueden ser negativos
+- `tempMax` debe ser mayor a `tempMin`
+- `velocidadCintaMax` debe ser mayor a `velocidadCintaMin`
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 201 | Parámetros creados |
+| 400 | JSON malformado o body > 1MB |
+| 409 | El producto ya tiene un set de parámetros cargado |
+| 415 | Content-Type incorrecto |
+| 422 | Error de validación de negocio, o `productoId` inexistente en el catálogo |
+| 500 | Error de base de datos |
+
+---
+
+### PUT /api/v1/parametros-producto
+
+Modifica el set de parámetros existente de un producto. El `productoId` (dentro del body) identifica el registro a actualizar — no hay path param. El sistema aplica los nuevos rangos de inmediato a los próximos lotes de ese producto.
+
+**Body:** mismo formato que el POST, incluyendo todos los campos (reemplazo completo, no parcial).
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 200 | Parámetros actualizados |
+| 400 | JSON malformado o body > 1MB |
+| 404 | No existe un set de parámetros para el `productoId` indicado |
+| 415 | Content-Type incorrecto |
+| 422 | Error de validación de negocio |
+| 500 | Error de base de datos |
+
+---
+
 ### GET /api/v1/horno?id=horno-01
 
 Consulta el estado del horno y ejecuta una inspección visual (YOLO).
