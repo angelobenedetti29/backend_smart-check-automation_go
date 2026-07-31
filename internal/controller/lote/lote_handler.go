@@ -8,20 +8,29 @@ import (
 	"os"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote"
+	loteProductivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_productivo"
+	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
 
 // maxRequestBodyBytes limita el tamaño del body a 1 MB para evitar DoS por memoria.
 const maxRequestBodyBytes = 1 << 20 // 1 MB
 
-// LoteHandler handles HTTP requests for productive batch operations.
-type LoteHandler struct {
-	repo lote.Repository
+// LoteFetcher allows retrieving a full LoteProductivo (with JOIN) by ID.
+type LoteFetcher interface {
+	GetByID(id string) (*loteProductivo.LoteProductivo, error)
 }
 
-// NewLoteHandler creates a new LoteHandler with the given repository.
-func NewLoteHandler(repo lote.Repository) *LoteHandler {
-	return &LoteHandler{repo: repo}
+// LoteHandler handles HTTP requests for productive batch operations.
+type LoteHandler struct {
+	repo    lote.Repository
+	broker  *sse.Broker
+	fetcher LoteFetcher
+}
+
+// NewLoteHandler creates a new LoteHandler with the given repository, SSE broker, and fetcher.
+func NewLoteHandler(repo lote.Repository, broker *sse.Broker, fetcher LoteFetcher) *LoteHandler {
+	return &LoteHandler{repo: repo, broker: broker, fetcher: fetcher}
 }
 
 // HandleCreateLote processes POST /api/v1/lotes.
@@ -75,6 +84,34 @@ func (h *LoteHandler) HandleCreateLote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 8. Respond 201 Created
+	// 8. Broadcast SSE event (fire-and-forget: if broadcast fails, POST still returns 201)
+	go h.broadcastCreation(domainLote.ID)
+
+	// 10. Respond 201 Created
 	response.JSON(w, http.StatusCreated, true, "Lote creado exitosamente", domainLote, nil)
+}
+
+// broadcastCreation fetches the full lot info and broadcasts it via SSE.
+// It runs in a separate goroutine so failures don't affect the HTTP response.
+func (h *LoteHandler) broadcastCreation(loteID string) {
+	loteProductivo, err := h.fetcher.GetByID(loteID)
+	if err != nil {
+		log.Printf("[SSE] Error al obtener lote %s para broadcast: %v", loteID, err)
+		return
+	}
+
+	payload := map[string]interface{}{
+		"success": true,
+		"message": "Lote creado exitosamente",
+		"data":    loteProductivo,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[SSE] Error al serializar payload para broadcast: %v", err)
+		return
+	}
+
+	h.broker.Broadcast("lote.created", jsonData)
+	log.Printf("[SSE] Broadcast lote.created para lote %s", loteID)
 }

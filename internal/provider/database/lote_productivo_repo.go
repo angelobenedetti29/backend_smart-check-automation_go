@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -105,4 +106,18 @@ func (r *LoteProductivoRepository) GetAll(page, pageSize int) (*lote.PaginatedRe
 		Page:     page,
 		PageSize: pageSize,
 	}, nil
+}
+
+// GetByID busca un lote productivo por su ID en el repositorio en memoria.
+func (r *LoteProductivoRepository) GetByID(id string) (*lote.LoteProductivo, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for i := range r.lotes {
+		if r.lotes[i].ID == id {
+			return &r.lotes[i], nil
+		}
+	}
+
+	return nil, fmt.Errorf("lote productivo con id %s no encontrado", id)
 }

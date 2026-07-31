@@ -73,3 +73,33 @@ func (r *LoteProductivoPostgresRepository) GetAll(page, pageSize int) (*lote.Pag
 		PageSize: pageSize,
 	}, nil
 }
+
+// GetByID returns a single LoteProductivo with its producto_nombre via JOIN.
+func (r *LoteProductivoPostgresRepository) GetByID(id string) (*lote.LoteProductivo, error) {
+	ctx := context.Background()
+
+	var l lote.LoteProductivo
+	err := r.db.QueryRow(ctx, `
+		SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
+		       lp.total_unidades, lp.correctos, lp.quemados,
+		       lp.correctos_kg, lp.quemados_kg,
+		       lp.temp_horno_1, lp.temp_comb_horno_1,
+		       lp.temp_horno_2, lp.temp_comb_horno_2,
+		       lp.velocidad_horno, lp.created_at, lp.updated_at
+		FROM lotes_productivos lp
+		JOIN productos pr ON lp.producto_id = pr.id
+		WHERE lp.id = $1
+	`, id).Scan(
+		&l.ID, &l.ProductoID, &l.ProductoNombre, &l.Turno, &l.InicioAt, &l.FinAt,
+		&l.TotalUnidades, &l.Correctos, &l.Quemados,
+		&l.CorrectosKg, &l.QuemadosKg,
+		&l.TempHorno1, &l.TempCombHorno1,
+		&l.TempHorno2, &l.TempCombHorno2,
+		&l.VelocidadHorno, &l.CreatedAt, &l.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get lote by id %s: %w", id, err)
+	}
+
+	return &l, nil
+}
