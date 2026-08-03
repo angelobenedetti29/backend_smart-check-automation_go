@@ -81,8 +81,8 @@ func (r *LoteProductivoPostgresRepository) GetByID(id string) (*lote.LoteProduct
 	var l lote.LoteProductivo
 	err := r.db.QueryRow(ctx, `
 		SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
-		       lp.total_unidades, lp.correctos, lp.quemados,
-		       lp.correctos_kg, lp.quemados_kg,
+		       lp.total_unidades, lp.correctos, lp.quemados, lp.crudas,
+		       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
 		       lp.temp_horno_1, lp.temp_comb_horno_1,
 		       lp.temp_horno_2, lp.temp_comb_horno_2,
 		       lp.velocidad_cinta, lp.created_at, lp.updated_at
@@ -91,8 +91,8 @@ func (r *LoteProductivoPostgresRepository) GetByID(id string) (*lote.LoteProduct
 		WHERE lp.id = $1
 	`, id).Scan(
 		&l.ID, &l.ProductoID, &l.ProductoNombre, &l.Turno, &l.InicioAt, &l.FinAt,
-		&l.TotalUnidades, &l.Correctos, &l.Quemados,
-		&l.CorrectosKg, &l.QuemadosKg,
+		&l.TotalUnidades, &l.Correctos, &l.Quemados, &l.Crudas,
+		&l.CorrectosKg, &l.QuemadosKg, &l.CrudosKg,
 		&l.TempHorno1, &l.TempCombHorno1,
 		&l.TempHorno2, &l.TempCombHorno2,
 		&l.VelocidadCinta, &l.CreatedAt, &l.UpdatedAt,
