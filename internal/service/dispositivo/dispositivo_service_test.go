@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,14 +13,34 @@ import (
 )
 
 type fakeDispositivoRepo struct {
+	mu           sync.Mutex
 	dispositivos map[string]dispositivo.Dispositivo
 	inserted     []dispositivo.MetricaDispositivo
 }
 
 func (f *fakeDispositivoRepo) InsertMetrica(ctx context.Context, m *dispositivo.MetricaDispositivo) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	m.ID = "m-1"
 	f.inserted = append(f.inserted, *m)
 	return nil
+}
+
+// insertedCount devuelve la cantidad de métricas insertadas de forma segura.
+func (f *fakeDispositivoRepo) insertedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return len(f.inserted)
+}
+
+// insertedAt devuelve una copia de la métrica insertada en la posición i.
+func (f *fakeDispositivoRepo) insertedAt(i int) dispositivo.MetricaDispositivo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.inserted[i]
 }
 
 func (f *fakeDispositivoRepo) GetDispositivosConUltimaMetrica(ctx context.Context) ([]dispositivo.DispositivoConUltimaMetrica, error) {
@@ -38,9 +59,13 @@ func (f *fakeDispositivoRepo) GetDispositivoByID(ctx context.Context, id string)
 }
 
 func (f *fakeDispositivoRepo) GetMetricasByDispositivo(ctx context.Context, id string, page, pageSize int) (*dispositivo.PaginatedResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	items := append([]dispositivo.MetricaDispositivo(nil), f.inserted...)
 	return &dispositivo.PaginatedResult{
-		Items:    f.inserted,
-		Total:    len(f.inserted),
+		Items:    items,
+		Total:    len(items),
 		Page:     page,
 		PageSize: pageSize,
 	}, nil
@@ -157,14 +182,15 @@ func TestProcessPing_InsertsMetricaHistory(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for len(repo.inserted) == 0 && time.Now().Before(deadline) {
+	for repo.insertedCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(repo.inserted) != 1 {
-		t.Fatalf("expected 1 inserted metric in history, got %d", len(repo.inserted))
+	if repo.insertedCount() != 1 {
+		t.Fatalf("expected 1 inserted metric in history, got %d", repo.insertedCount())
 	}
-	if repo.inserted[0].CpuPct != 30 || repo.inserted[0].DispositivoID != "d1" {
-		t.Fatalf("unexpected inserted metric: %+v", repo.inserted[0])
+	inserted := repo.insertedAt(0)
+	if inserted.CpuPct != 30 || inserted.DispositivoID != "d1" {
+		t.Fatalf("unexpected inserted metric: %+v", inserted)
 	}
 }
 
@@ -227,7 +253,6 @@ func TestStartReaper_EmitsOfflineState(t *testing.T) {
 	}, 25*time.Second, time.Now().UTC())
 	broker := sse.NewBroker()
 	client := broker.Subscribe()
-	defer broker.Unsubscribe(client)
 
 	// El dispositivo queda con last_seen muy antiguo (1 min atrás) y online.
 	store.Update(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1"}, dispositivo.MetricaDispositivo{
@@ -237,8 +262,11 @@ func TestStartReaper_EmitsOfflineState(t *testing.T) {
 	svc := NewDispositivoService(repo, store, broker)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go svc.StartReaper(ctx, 20*time.Millisecond, 25*time.Second)
-	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.StartReaper(ctx, 20*time.Millisecond, 25*time.Second)
+	}()
 
 	types := drainEvents(client, 2*time.Second)
 	if !containsAll(types, "dispositivo.state") {
@@ -249,6 +277,12 @@ func TestStartReaper_EmitsOfflineState(t *testing.T) {
 	if estado.Estado != dispositivo.EstadoOffline {
 		t.Fatalf("expected d1 offline after reaper, got %q", estado.Estado)
 	}
+
+	// Detener el reaper y esperar a que termine antes de cerrar el canal del cliente,
+	// para garantizar que ningún Broadcast ocurra después del Unsubscribe.
+	cancel()
+	<-done
+	broker.Unsubscribe(client)
 }
 
 func containsAll(types []string, wanted ...string) bool {

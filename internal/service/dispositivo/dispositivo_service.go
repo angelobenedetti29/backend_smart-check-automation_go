@@ -50,7 +50,9 @@ func (s *DispositivoService) ProcessPing(ctx context.Context, req dispositivo.Pi
 	}
 
 	// Persistir historial de forma asíncrona: el estado online no depende de la DB.
-	go s.insertMetrica(&metrica)
+	// Se pasa una copia para que la goroutine pueda mutar m.ID sin correr contra el
+	// metrica original que store.Update lee a continuación.
+	go func(m dispositivo.MetricaDispositivo) { s.insertMetrica(&m) }(metrica)
 
 	prevState, currState, estado := s.store.Update(*d, metrica)
 
