@@ -227,3 +227,62 @@ Actualiza la temperatura del horno y aplica reglas de umbral:
 ```json
 { "id": "horno-01", "temperatura": 212.8 }
 ```
+
+---
+
+### POST /api/v1/dispositivos/ping
+
+Recibe el heartbeat de telemetría de una Raspberry Pi (cada ~10s): uso de CPU, memoria RAM disponible y temperatura interna del chip. Autenticado con header `X-API-Key`.
+
+**Body:**
+```json
+{
+  "dispositivoId": "b1c2d3e4-5678-90ab-cdef-1234567890ab",
+  "cpuPct": 42.5,
+  "memRamDisponibleMb": 512.0,
+  "tempChip": 58.3
+}
+```
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 200 | Ping procesado. `data.estado` indica `online`/`offline` actual |
+| 400 | JSON malformado o body > 1MB |
+| 401 | API key inválida o ausente |
+| 415 | Content-Type incorrecto |
+| 422 | Error de validación, o `dispositivoId` inexistente en el catálogo |
+| 500 | Error interno |
+
+---
+
+### GET /api/v1/dispositivos
+
+Devuelve el estado de salud actual (`online`/`offline`) de todos los dispositivos, con la última métrica y `lastSeen`.
+
+---
+
+### GET /api/v1/dispositivos/metricas?dispositivoId=...&page=1&pageSize=10
+
+Devuelve el historial paginado de métricas de un dispositivo, ordenado por `receivedAt` descendente.
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 200 | Historial paginado obtenido |
+| 400 | Falta el parámetro `dispositivoId` |
+| 404 | El dispositivo no existe en el catálogo |
+| 500 | Error de base de datos |
+
+---
+
+### GET /api/v1/dispositivos/events
+
+Stream SSE de telemetría de dispositivos. Eventos:
+- `dispositivo.metric`: se emite en cada ping con la última métrica.
+- `dispositivo.state`: se emite solo cuando un dispositivo transiciona `online`↔`offline`.
+
+```json
+event: dispositivo.state
+data: {"success":true,"message":"El estado del dispositivo cambió a offline","data":{...}}
+```
