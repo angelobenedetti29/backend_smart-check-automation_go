@@ -230,5 +230,58 @@ INSERT INTO parametros_producto (
 )
 ON CONFLICT (producto_id) DO NOTHING;
 
+-- ============================================================================
+-- TABLA 4: dispositivos (Catálogo de nodos Raspberry Pi / SBC de monitoreo)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS dispositivos (
+    id          UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+    nombre      VARCHAR(100)    NOT NULL,
+    ubicacion   VARCHAR(100),
+    created_at  TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  dispositivos     IS 'Catálogo de nodos Raspberry Pi que reportan telemetría al backend';
+COMMENT ON COLUMN dispositivos.id        IS 'Identificador UUID del dispositivo';
+COMMENT ON COLUMN dispositivos.nombre    IS 'Nombre descriptivo del dispositivo (ej: Raspberry Pi Horno 1)';
+COMMENT ON COLUMN dispositivos.ubicacion IS 'Ubicación física del dispositivo (ej: Línea A)';
+
+-- ============================================================================
+-- TABLA 5: metricas_dispositivo (Historial append-only de telemetría)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS metricas_dispositivo (
+    id                    UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+    dispositivo_id        UUID            NOT NULL,
+    cpu_pct               NUMERIC(5,2)    NOT NULL CHECK (cpu_pct BETWEEN 0 AND 100),
+    mem_ram_disponible_mb NUMERIC(10,2)   NOT NULL CHECK (mem_ram_disponible_mb >= 0),
+    temp_chip             NUMERIC(6,2)    NOT NULL,
+    received_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
+
+    -- FOREIGN KEY: garantiza integridad referencial con el catálogo de dispositivos
+    CONSTRAINT fk_metricas_dispositivo_dispositivo
+        FOREIGN KEY (dispositivo_id)
+        REFERENCES dispositivos (id)
+        ON DELETE CASCADE
+        ON UPDATE CASCADE
+);
+
+COMMENT ON TABLE  metricas_dispositivo            IS 'Historial append-only de telemetría reportada por cada dispositivo (CPU, RAM disponible y temperatura del chip)';
+COMMENT ON COLUMN metricas_dispositivo.id                    IS 'Identificador UUID del registro de métricas';
+COMMENT ON COLUMN metricas_dispositivo.dispositivo_id        IS 'FK al catálogo de dispositivos';
+COMMENT ON COLUMN metricas_dispositivo.cpu_pct               IS 'Uso de CPU en porcentaje (0-100)';
+COMMENT ON COLUMN metricas_dispositivo.mem_ram_disponible_mb IS 'Memoria RAM disponible en MB';
+COMMENT ON COLUMN metricas_dispositivo.temp_chip             IS 'Temperatura interna del chip en °C';
+COMMENT ON COLUMN metricas_dispositivo.received_at           IS 'Marca temporal en que el backend recibió la métrica';
+
+-- Índice para la consulta más frecuente: historial por dispositivo ordenado por tiempo
+CREATE INDEX IF NOT EXISTS idx_metricas_dispositivo_disp_received
+    ON metricas_dispositivo (dispositivo_id, received_at DESC);
+
+-- ============================================================================
+-- SEED: Dispositivo de referencia
+-- ============================================================================
+INSERT INTO dispositivos (id, nombre, ubicacion) VALUES
+    ('b1c2d3e4-5678-90ab-cdef-1234567890ab', 'Raspberry Pi Horno 1', 'Línea A')
+ON CONFLICT (id) DO NOTHING;
+
 COMMIT;
  

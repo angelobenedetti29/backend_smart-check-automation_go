@@ -61,12 +61,14 @@ test_backend_go/
 ├── cmd/server/main.go                          # Entry point, wiring de dependencias
 ├── internal/
 │   ├── controller/
+│   │   ├── dispositivo/                        # Handler POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
 │   │   ├── horno/                              # Handler GET /api/v1/horno, POST /api/v1/horno/temperatura
 │   │   ├── lote/                               # Handler POST /api/v1/lotes
 │   │   ├── lote_productivo/                    # Handler GET /api/v1/lotes-productivos
 │   │   └── parametros_producto/                # Handler GET/POST/PUT /api/v1/parametros-producto
 │   ├── domain/
 │   │   ├── alerta/                             # Modelo Alerta
+│   │   ├── dispositivo/                        # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo + PingRequest + validaciones + Repository/StateStore/Service interfaces
 │   │   ├── horno/                              # Modelo Horno
 │   │   ├── lote/                               # Modelo Lote + LoteRequest + validaciones + Repository/Service interfaces
 │   │   ├── lote_productivo/                    # Modelo LoteProductivo + PaginatedResult + Repository/Service interfaces
@@ -75,18 +77,21 @@ test_backend_go/
 │   │   ├── database/
 │   │   │   ├── postgres.go                     # NewPostgresPool — conexión pgxpool
 │   │   │   ├── postgres_repo.go                # Repo en memoria para Horno y Alerta (no toca DB)
-│   │   │   └── lote_productivo_repo.go         # Repo en memoria para lotes (solo para tests unitarios)
+│   │   │   ├── lote_productivo_repo.go         # Repo en memoria para lotes (solo para tests unitarios)
+│   │   │   └── dispositivo_state_store.go      # StateStore en memoria (estado actual online/offline, sin tocar DB)
 │   │   └── yolo_client/client.go               # Cliente simulado para inspección visual YOLO
 │   ├── repository/
 │   │   ├── postgres_repo.go                    # Repo real PostgreSQL — CREATE lote
 │   │   ├── lote_productivo_repo.go             # Repo real PostgreSQL — GET lotes (JOIN con productos)
-│   │   └── parametros_producto_repo.go         # Repo real PostgreSQL — GET/CREATE/UPDATE parametros_producto (JOIN con productos)
+│   │   ├── parametros_producto_repo.go         # Repo real PostgreSQL — GET/CREATE/UPDATE parametros_producto (JOIN con productos)
+│   │   └── dispositivo_repo.go                 # Repo real PostgreSQL — INSERT metricas, GET catálogo de dispositivos, historial paginado
 │   └── service/
+│       ├── dispositivo/                        # Lógica de ping, estado online/offline, reaper, emisión SSE
 │       ├── horno/                              # Lógica de umbrales térmicos y alertas
 │       ├── lote_productivo/                    # Lógica de paginación (límites, defaults)
 │       └── parametros_producto/                # Alta/consulta/actualización de parámetros por producto
 ├── pkg/response/response.go                    # Envelope JSON estándar {success, message, data, errors}
-├── database/schema.sql                         # DDL: tablas productos + lotes_productivos + parametros_producto, constraints, seed
+├── database/schema.sql                         # DDL: tablas productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo, constraints, seed
 ├── Dockerfile                                  # Multi-stage build: golang:1.25-alpine → alpine:3.19
 ├── docker-compose.yml                          # Servicios: db (PostgreSQL 16) + app (Go)
 ├── .env                                        # Variables de entorno locales (NO commitear)
@@ -146,6 +151,27 @@ CREATE TABLE parametros_producto (
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- Seed: valores por defecto para "Tostada Integral" (temp_min=160, temp_max=180, etc.)
+
+-- Catálogo de dispositivos Raspberry Pi
+CREATE TABLE dispositivos (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    nombre     VARCHAR(100) NOT NULL,
+    ubicacion  VARCHAR(100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Historial append-only de telemetría por dispositivo
+CREATE TABLE metricas_dispositivo (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    dispositivo_id        UUID NOT NULL REFERENCES dispositivos(id) ON DELETE CASCADE,
+    cpu_pct               NUMERIC(5,2)  NOT NULL CHECK (cpu_pct BETWEEN 0 AND 100),
+    mem_ram_disponible_mb NUMERIC(10,2) NOT NULL CHECK (mem_ram_disponible_mb >= 0),
+    temp_chip             NUMERIC(6,2)  NOT NULL,
+    received_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_metricas_dispositivo_disp_received
+    ON metricas_dispositivo (dispositivo_id, received_at DESC);
+-- Seed: "Raspberry Pi Horno 1" → id: b1c2d3e4-5678-90ab-cdef-1234567890ab
 ```
 
 **Importante:** `lotes_productivos` NO tiene columna `producto_nombre`.
@@ -162,6 +188,11 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - **Horno usa repo en memoria**: el dominio de horno/alerta aún no tiene persistencia real en PostgreSQL. El repo es simulado con datos seed en memoria.
 - **`parametros_producto` sin autenticación (por ahora)**: GET/POST/PUT quedan abiertos porque el login de usuarios (Google OAuth) todavía no existe; no se reusa `X-API-Key` (pensada para Raspberry Pi) para este caso de uso. Hay un TODO en el handler para restringir por rol Supervisor cuando OAuth esté implementado.
 - **PUT de `parametros_producto` identifica por body, no por path param**: un solo endpoint (`/api/v1/parametros-producto`) despacha GET/POST/PUT por `r.Method` dentro del handler, igual que el resto de las rutas del proyecto (sin wildcards de ruteo). El `productoId` va en el JSON del body, no en la URL.
+- **Estado de dispositivos en caché en memoria + historial en PostgreSQL**: el estado actual (última métrica + `last_seen`) vive en `MemoryDispositivoStateStore` (map + RWMutex) para lecturas rápidas sin tocar DB; el historial append-only se persiste en `metricas_dispositivo` de forma fire-and-forget (el estado online no depende de que la DB esté disponible). Al arrancar, el store se hidrata con `GetDispositivosConUltimaMetrica` (DISTINCT ON): recupera el catálogo + la última métrica por dispositivo de la DB y calcula el estado según antigüedad — así un dispositivo vivo antes de un restart vuelve `online`, y uno caído conserva su última métrica/last_seen.
+- **Detección de offline con reaper en background**: una goroutine (`StartReaper`) corre cada `DISPOSITIVO_REAPER_INTERVAL` (default 5s) y marca como `offline` a los dispositivos cuyo `last_seen` sea ≥ `DISPOSITIVO_OFFLINE_THRESHOLD` (default 25s). Se detiene limpiamente con `rootCancel()` en el graceful shutdown.
+- **Dos brokers SSE separados**: un broker dedicado (`dispositivoSSEBroker`) para telemetría de dispositivos evita ruido cruzado con los eventos de lotes. El `SSEHandler` es genérico (solo subscribe al broker), por eso se reutiliza la misma clase en dos rutas distintas.
+- **Eventos SSE de dispositivos**: `dispositivo.metric` se emite en cada ping (cada ~10s) con la última métrica; `dispositivo.state` se emite solo ante una transición online↔offline (detectada en el ping para offline→online y en el reaper para online→offline).
+- **`POST /api/v1/dispositivos/ping` autenticado con `X-API-Key`**: reusa el `API_KEY_SECRET` compartido (mismo patrón que `/api/v1/lotes`). Los GET de consulta quedan abiertos porque el login de usuarios (Google OAuth) todavía no existe.
 
 ## Endpoints implementados
 
@@ -175,6 +206,10 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 | GET | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — lista todos los sets de parámetros |
 | POST | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — alta, 409 si el producto ya tiene parámetros, 422 si el producto no existe |
 | PUT | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — modificación por `productoId` en el body, 404 si no existe |
+| POST | /api/v1/dispositivos/ping | X-API-Key | ✅ implementado (PostgreSQL real + caché en memoria) — recibe CPU/RAM/temp cada ~10s, actualiza estado online/offline y emite SSE |
+| GET | /api/v1/dispositivos | — | ✅ implementado (caché en memoria) — estado actual online/offline de todos los dispositivos |
+| GET | /api/v1/dispositivos/metricas | — | ✅ implementado (PostgreSQL real) — historial paginado por `dispositivoId` (query param) |
+| GET | /api/v1/dispositivos/events | — | ✅ implementado — SSE de telemetría: `dispositivo.metric` (cada ping) y `dispositivo.state` (transiciones) |
 
 ## Estado actual de tareas
 
@@ -186,6 +221,7 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - Infraestructura Docker completa (Dockerfile multi-stage + docker-compose con healthcheck)
 - SCA-115: Modelo de datos + migración de `parametros_producto` (peso, tolerancias, rangos de temperatura y velocidad de cinta por producto)
 - SCA-115: CRUD de parámetros por producto (GET/POST/PUT /api/v1/parametros-producto) con validaciones estrictas en servidor
+- SCA-172: Endpoint POST /api/v1/dispositivos/ping (X-API-Key) — recibe CPU/RAM/temp cada ~10s, persiste historial, calcula estado online/offline con reaper en background y emite SSE (`dispositivo.metric` + `dispositivo.state`)
 
 ### Pendientes
 - SCA-86: Tests para lote_productivo (handler + service)
@@ -199,5 +235,7 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 | `DATABASE_URL` | Conexión a PostgreSQL. En Docker la define el compose internamente. |
 | `API_KEY_SECRET` | Clave que deben enviar las Raspberry Pi en header `X-API-Key` |
 | `PORT` | Puerto HTTP (default 8080) |
+| `DISPOSITIVO_REAPER_INTERVAL` | Intervalo del reaper que detecta dispositivos offline (default 5s) |
+| `DISPOSITIVO_OFFLINE_THRESHOLD` | Umbral de inactividad para considerar un dispositivo offline (default 25s) |
 | `POSTGRES_USER/PASSWORD/DB` | Solo usadas por Docker Compose para crear el contenedor de DB |
 | `TEST_DATABASE_URL` | Opcional — activa tests de integración con DB real |

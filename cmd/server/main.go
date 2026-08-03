@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
+	dispositivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/dispositivo"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
 	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
@@ -21,6 +22,7 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
+	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
 	parametrosProductoService "github.com/angelobenedetti29/smart-check-automation/internal/service/parametros_producto"
@@ -59,14 +61,30 @@ func main() {
 	loteCreateRepo := repository.NewPostgresRepository(pgPool)
 	loteGetRepo := repository.NewLoteProductivoPostgresRepository(pgPool)
 	parametrosProductoRepo := repository.NewParametrosProductoPostgresRepository(pgPool)
+	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
 
 	// SSE broker for real-time event streaming
 	sseBroker := sse.NewBroker()
+
+	// Dedicated SSE broker for dispositivo telemetry events (no cross-noise with lotes)
+	dispositivoSSEBroker := sse.NewBroker()
 
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
 	loteProdSvc := loteProductivoService.NewLoteProductivoService(loteGetRepo)
 	parametrosProductoSvc := parametrosProductoService.NewParametrosProductoService(parametrosProductoRepo)
+	dispositivoStore := database.NewMemoryDispositivoStateStore()
+	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker)
+
+	reaperInterval := getEnvDuration("DISPOSITIVO_REAPER_INTERVAL", 5*time.Second)
+	offlineThreshold := getEnvDuration("DISPOSITIVO_OFFLINE_THRESHOLD", 25*time.Second)
+
+	// Preload device catalog + latest metric into the in-memory state store
+	if dispositivos, err := dispositivoRepo.GetDispositivosConUltimaMetrica(context.Background()); err != nil {
+		log.Printf("[DISPOSITIVO] Error al precargar catálogo de dispositivos: %v", err)
+	} else {
+		dispositivoStore.Hydrate(dispositivos, offlineThreshold, time.Now().UTC())
+	}
 
 	// 4. Instantiate Presentation HTTP Handlers
 	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
@@ -74,6 +92,8 @@ func main() {
 	loteProductivoHandler := loteProductivoController.NewLoteProductivoHandler(loteProdSvc)
 	parametrosProductoHandler := parametrosProductoController.NewParametrosProductoHandler(parametrosProductoSvc)
 	sseHandler := sseController.NewSSEHandler(sseBroker)
+	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc)
+	dispositivoSSEHandler := sseController.NewSSEHandler(dispositivoSSEBroker)
 
 	// 5. Setup routes
 	mux := http.NewServeMux()
@@ -88,11 +108,21 @@ func main() {
 	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteProductivoHandler.GetAll))
 	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(parametrosProductoHandler.Handle))
 	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(sseHandler.HandleSSE))
+	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(dispositivoHandler.HandlePing))
+	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(dispositivoHandler.HandleEstados))
+	mux.HandleFunc("/api/v1/dispositivos/metricas", loggingMiddleware(dispositivoHandler.HandleMetricas))
+	mux.HandleFunc("/api/v1/dispositivos/events", loggingMiddleware(dispositivoSSEHandler.HandleSSE))
 
 	// 6. Wrap mux with CORS middleware
 	handler := corsMiddleware(mux)
 
-	// 7. Launch server with graceful shutdown
+	// 7. Launch reaper goroutine: detects offline devices and emits SSE events
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	go dispositivoSvc.StartReaper(rootCtx, reaperInterval, offlineThreshold)
+
+	// 8. Launch server with graceful shutdown
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -119,6 +149,9 @@ func main() {
 
 	log.Println("Iniciando apagado graceful del servidor...")
 
+	// Detener el reaper de dispositivos antes de cerrar el servidor HTTP
+	rootCancel()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -135,7 +168,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE)\n"))
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE), POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas, GET /api/v1/dispositivos/events (SSE)\n"))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -161,6 +194,21 @@ func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 		log.Printf("[HTTP] %s %s finished in %v", r.Method, r.URL.Path, time.Since(start))
 	}
+}
+
+// getEnvDuration lee una variable de entorno en formato de duración Go,
+// devolviendo el valor por defecto si no está configurada o es inválida.
+func getEnvDuration(key string, def time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Printf("Advertencia: valor inválido para %s ('%s'), usando default %s", key, raw, def)
+		return def
+	}
+	return d
 }
 
 func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
