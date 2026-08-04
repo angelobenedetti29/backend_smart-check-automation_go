@@ -192,6 +192,7 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - **Detección de offline con reaper en background**: una goroutine (`StartReaper`) corre cada `DISPOSITIVO_REAPER_INTERVAL` (default 5s) y marca como `offline` a los dispositivos cuyo `last_seen` sea ≥ `DISPOSITIVO_OFFLINE_THRESHOLD` (default 25s). Se detiene limpiamente con `rootCancel()` en el graceful shutdown.
 - **Dos brokers SSE separados**: un broker dedicado (`dispositivoSSEBroker`) para telemetría de dispositivos evita ruido cruzado con los eventos de lotes. El `SSEHandler` es genérico (solo subscribe al broker), por eso se reutiliza la misma clase en dos rutas distintas.
 - **Eventos SSE de dispositivos**: `dispositivo.metric` se emite en cada ping (cada ~10s) con la última métrica; `dispositivo.state` se emite solo ante una transición online↔offline (detectada en el ping para offline→online y en el reaper para online→offline).
+- **`GET /api/v1/lotes-productivos` acepta `productoId` opcional como filtro**: sin el parámetro lista todos los lotes (comportamiento original); con `productoId` devuelve solo las corridas (lotes) de ese producto, ordenadas por `inicio_at` DESC y paginadas (mismo patrón que `/api/v1/dispositivos/metricas`). Si el `productoId` no existe en `productos` devuelve 404; si el producto existe pero no tiene lotes, devuelve 200 con `data: []`. Cada lote ya trae los valores reales usados en esa corrida (`temp_horno_1/2`, `temp_comb_horno_1/2`, `velocidad_cinta`) — el historial de corridas por producto sale de `lotes_productivos`, no de las recomendaciones (`parametros_producto`, que no se versiona).
 - **`POST /api/v1/dispositivos/ping` autenticado con `X-API-Key`**: reusa el `API_KEY_SECRET` compartido (mismo patrón que `/api/v1/lotes`). Los GET de consulta quedan abiertos porque el login de usuarios (Google OAuth) todavía no existe.
 
 ## Endpoints implementados
@@ -202,7 +203,7 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 | GET | /api/v1/horno | — | ✅ implementado (repo en memoria) |
 | POST | /api/v1/horno/temperatura | — | ✅ implementado (repo en memoria) |
 | POST | /api/v1/lotes | X-API-Key | ✅ implementado (PostgreSQL real) |
-| GET | /api/v1/lotes-productivos | — | ✅ implementado (PostgreSQL real) |
+| GET | /api/v1/lotes-productivos | — | ✅ implementado (PostgreSQL real) — lista todos los lotes o filtra por `productoId` (query param opcional), 404 si el producto no existe en el catálogo |
 | GET | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — lista todos los sets de parámetros |
 | POST | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — alta, 409 si el producto ya tiene parámetros, 422 si el producto no existe |
 | PUT | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — modificación por `productoId` en el body, 404 si no existe |

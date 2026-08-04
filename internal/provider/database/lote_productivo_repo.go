@@ -79,11 +79,22 @@ func NewLoteProductivoRepository() *LoteProductivoRepository {
 }
 
 // GetAll devuelve una página de lotes productivos ordenados por inicio_at descendente.
-func (r *LoteProductivoRepository) GetAll(page, pageSize int) (*lote.PaginatedResult, error) {
+// Si productoID no está vacío, filtra por ese producto.
+func (r *LoteProductivoRepository) GetAll(productoID string, page, pageSize int) (*lote.PaginatedResult, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	total := len(r.lotes)
+	filtered := r.lotes
+	if productoID != "" {
+		filtered = []lote.LoteProductivo{}
+		for _, l := range r.lotes {
+			if l.ProductoID == productoID {
+				filtered = append(filtered, l)
+			}
+		}
+	}
+
+	total := len(filtered)
 
 	start := (page - 1) * pageSize
 	if start >= total {
@@ -101,7 +112,7 @@ func (r *LoteProductivoRepository) GetAll(page, pageSize int) (*lote.PaginatedRe
 	}
 
 	return &lote.PaginatedResult{
-		Items:    r.lotes[start:end],
+		Items:    filtered[start:end],
 		Total:    total,
 		Page:     page,
 		PageSize: pageSize,

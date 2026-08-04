@@ -1,6 +1,12 @@
 package lote_productivo
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrProductoNoExiste indica que el producto_id referenciado no existe en el catálogo de productos.
+var ErrProductoNoExiste = errors.New("lote_productivo: el producto referenciado no existe")
 
 // LoteProductivo representa una tanda de producción registrada en el sistema.
 type LoteProductivo struct {
@@ -36,11 +42,11 @@ type PaginatedResult struct {
 
 // Repository define el contrato de persistencia para LoteProductivo.
 type Repository interface {
-	GetAll(page, pageSize int) (*PaginatedResult, error)
+	GetAll(productoID string, page, pageSize int) (*PaginatedResult, error)
 	GetByID(id string) (*LoteProductivo, error)
 }
 
 // Service define las operaciones de negocio para lotes productivos.
 type Service interface {
-	GetAll(page, pageSize int) (*PaginatedResult, error)
+	GetAll(productoID string, page, pageSize int) (*PaginatedResult, error)
 }

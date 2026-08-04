@@ -2,12 +2,19 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	lote "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_productivo"
 )
+
+// pgErrCodeInvalidTextRepresentation es el código de PostgreSQL para input inválido
+// (ej: un texto que no es un UUID válido comparado contra una columna uuid).
+const pgErrCodeInvalidTextRepresentation = "22P02"
 
 // LoteProductivoPostgresRepository implementa lote_productivo.Repository usando pgxpool.
 type LoteProductivoPostgresRepository struct {
@@ -20,28 +27,70 @@ func NewLoteProductivoPostgresRepository(db *pgxpool.Pool) *LoteProductivoPostgr
 }
 
 // GetAll devuelve una página de lotes productivos ordenados por inicio_at descendente.
-func (r *LoteProductivoPostgresRepository) GetAll(page, pageSize int) (*lote.PaginatedResult, error) {
+// Si productoID no está vacío, filtra por ese producto (devolviendo
+// lote.ErrProductoNoExiste si el producto no existe en el catálogo).
+func (r *LoteProductivoPostgresRepository) GetAll(productoID string, page, pageSize int) (*lote.PaginatedResult, error) {
 	ctx := context.Background()
 
-	var total int
-	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM lotes_productivos").Scan(&total); err != nil {
-		return nil, fmt.Errorf("failed to count lotes: %w", err)
+	if productoID != "" {
+		var exists bool
+		if err := r.db.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM productos WHERE id = $1)
+		`, productoID).Scan(&exists); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeInvalidTextRepresentation {
+				return nil, lote.ErrProductoNoExiste
+			}
+			return nil, fmt.Errorf("failed to check producto existence: %w", err)
+		}
+		if !exists {
+			return nil, lote.ErrProductoNoExiste
+		}
 	}
 
+	var total int
 	offset := (page - 1) * pageSize
 
-	rows, err := r.db.Query(ctx, `
-		SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
-		       lp.total_unidades, lp.correctos, lp.quemados, lp.crudas,
-		       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
-		       lp.temp_horno_1, lp.temp_comb_horno_1,
-		       lp.temp_horno_2, lp.temp_comb_horno_2,
-		       lp.velocidad_cinta, lp.created_at, lp.updated_at
-		FROM lotes_productivos lp
-		JOIN productos pr ON lp.producto_id = pr.id
-		ORDER BY lp.inicio_at DESC
-		LIMIT $1 OFFSET $2
-	`, pageSize, offset)
+	var rows pgx.Rows
+	var err error
+	if productoID == "" {
+		if err = r.db.QueryRow(ctx, "SELECT COUNT(*) FROM lotes_productivos").Scan(&total); err != nil {
+			return nil, fmt.Errorf("failed to count lotes: %w", err)
+		}
+		rows, err = r.db.Query(ctx, `
+			SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
+			       lp.total_unidades, lp.correctos, lp.quemados, lp.crudas,
+			       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
+			       lp.temp_horno_1, lp.temp_comb_horno_1,
+			       lp.temp_horno_2, lp.temp_comb_horno_2,
+			       lp.velocidad_cinta, lp.created_at, lp.updated_at
+			FROM lotes_productivos lp
+			JOIN productos pr ON lp.producto_id = pr.id
+			ORDER BY lp.inicio_at DESC
+			LIMIT $1 OFFSET $2
+		`, pageSize, offset)
+	} else {
+		if err = r.db.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM lotes_productivos
+			WHERE producto_id = $1
+		`, productoID).Scan(&total); err != nil {
+			return nil, fmt.Errorf("failed to count lotes: %w", err)
+		}
+		rows, err = r.db.Query(ctx, `
+			SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
+			       lp.total_unidades, lp.correctos, lp.quemados, lp.crudas,
+			       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
+			       lp.temp_horno_1, lp.temp_comb_horno_1,
+			       lp.temp_horno_2, lp.temp_comb_horno_2,
+			       lp.velocidad_cinta, lp.created_at, lp.updated_at
+			FROM lotes_productivos lp
+			JOIN productos pr ON lp.producto_id = pr.id
+			WHERE lp.producto_id = $1
+			ORDER BY lp.inicio_at DESC
+			LIMIT $2 OFFSET $3
+		`, productoID, pageSize, offset)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query lotes: %w", err)
 	}
