@@ -21,7 +21,8 @@ func NewLoteProductivoService(repo lote.Repository) *LoteProductivoService {
 }
 
 // GetAll recupera una página de lotes productivos aplicando límites de paginación.
-func (s *LoteProductivoService) GetAll(page, pageSize int) (*lote.PaginatedResult, error) {
+// Si productoID no está vacío, filtra por ese producto.
+func (s *LoteProductivoService) GetAll(productoID string, page, pageSize int) (*lote.PaginatedResult, error) {
 	if page < 1 {
 		page = defaultPage
 	}
@@ -32,5 +33,5 @@ func (s *LoteProductivoService) GetAll(page, pageSize int) (*lote.PaginatedResul
 		pageSize = maxPageSize
 	}
 
-	return s.repo.GetAll(page, pageSize)
+	return s.repo.GetAll(productoID, page, pageSize)
 }
