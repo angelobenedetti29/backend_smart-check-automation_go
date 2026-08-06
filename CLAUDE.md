@@ -61,6 +61,7 @@ test_backend_go/
 ├── cmd/server/main.go                          # Entry point, wiring de dependencias
 ├── internal/
 │   ├── controller/
+│   │   ├── consigna/                           # Handler POST /api/v1/horno/consigna, GET /api/v1/horno/consigna/historial (SCA-320)
 │   │   ├── dispositivo/                        # Handler POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
 │   │   ├── horno/                              # Handler GET /api/v1/horno, POST /api/v1/horno/temperatura
 │   │   ├── lote/                               # Handler POST /api/v1/lotes, POST /api/v1/lotes/inicio (SCA-142)
@@ -229,8 +230,9 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - **El setpoint automático es un valor puntual explícito, no el punto medio del rango**: `parametros_producto.temp_setpoint`/`velocidad_cinta_setpoint` (nullable) son los valores que se despachan en un envío automático. Si no están cargados para un producto, `DispatchAutomatico` devuelve `ErrParametrosNoExiste` — no se infiere un valor. El envío manual (SCA-320), en cambio, valida los valores que ingresa el operario contra el rango `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]`, no contra el setpoint puntual.
 - **`POST /api/v1/lotes/inicio` es el trigger de SCA-142, distinto de `POST /api/v1/lotes`**: `POST /api/v1/lotes` sigue siendo un resumen posterior al hecho (llega con `inicioAt` y `finAt` ya completos). `POST /api/v1/lotes/inicio` es lo que la Raspberry Pi llama apenas la IA identifica el producto, **antes** de que el lote termine; no inserta fila en `lotes_productivos` — solo genera un UUID de correlación (`crypto/rand`, sin dependencia externa) que se guarda en `historial_consignas.lote_id` sin FK, porque el lote real todavía no existe en ese momento. Usa el mismo esquema `X-API-Key` que `POST /api/v1/lotes` (helper `validateAPIKey` extraído para no duplicar el chequeo).
 - **`historial_consignas.lote_id` sin FK a propósito**: dado que el despacho automático ocurre antes de que el lote se persista, `lote_id` es una columna de correlación suelta (sin `REFERENCES`), a diferencia de `producto_id` que sí tiene FK real a `productos`.
-- **Broadcast SSE de consigna**: `ConsignaService` tiene su propio broker dedicado (`hornoSSEBroker`, mismo patrón que `dispositivoSSEBroker`) y emite `horno.consigna` (fire-and-forget, en goroutine) tras cada despacho, exitoso o fallido, para que el panel pueda reflejar el estado sin pollear `GET /api/v1/horno`. El handler SSE (`GET /api/v1/horno/events`) todavía no está expuesto en `main.go` — se agrega junto con el endpoint manual de SCA-320.
-- **Auth de los endpoints nuevos de consigna, pendiente de definición final**: `POST /api/v1/lotes/inicio` reusa `X-API-Key` (origen Raspberry Pi/IA, mismo criterio que `POST /api/v1/lotes`). El futuro `POST /api/v1/horno/consigna` manual (SCA-320) todavía no está implementado; se evaluará si queda abierto (como `parametros_producto`) o si amerita un mínimo de protección dado que es una escritura con efecto físico real.
+- **Broadcast SSE de consigna**: `ConsignaService` tiene su propio broker dedicado (`hornoSSEBroker`, mismo patrón que `dispositivoSSEBroker`) y emite `horno.consigna` (fire-and-forget, en goroutine) tras cada despacho, exitoso o fallido, para que el panel pueda reflejar el estado sin pollear `GET /api/v1/horno`. Expuesto como `GET /api/v1/horno/events` reutilizando el `SSEHandler` genérico (sin código nuevo, solo wiring).
+- **`POST /api/v1/horno/consigna` (manual, SCA-320) sin autenticación por ahora**: mismo criterio que `parametros_producto` — el login de usuarios (Google OAuth) todavía no existe, así que queda abierto con un TODO para restringirlo a Operario/Supervisor cuando exista. `POST /api/v1/lotes/inicio` (automático, SCA-142) sí mantiene `X-API-Key` porque su origen es la Raspberry Pi, no un usuario del panel.
+- **`ConsignaManualRequest.ProductoID` es obligatorio**: a diferencia de otros diseños posibles (límites de seguridad globales hardcodeados), el envío manual siempre valida contra el rango real `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` cargado en `parametros_producto` para el producto indicado — no hay una segunda fuente de verdad de "qué es seguro".
 
 ## Endpoints implementados
 
@@ -249,6 +251,9 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 | GET | /api/v1/dispositivos | — | ✅ implementado (caché en memoria) — estado actual online/offline de todos los dispositivos |
 | GET | /api/v1/dispositivos/metricas | — | ✅ implementado (PostgreSQL real) — historial paginado por `dispositivoId` (query param) |
 | GET | /api/v1/dispositivos/events | — | ✅ implementado — SSE de telemetría: `dispositivo.metric` (cada ping) y `dispositivo.state` (transiciones) |
+| POST | /api/v1/horno/consigna | — | ✅ implementado (SCA-320) — envío manual de consigna: valida rango seguro del producto, 422 si el producto no tiene parámetros o si los valores están fuera de rango, 404 si el horno no existe, 502 si el controlador físico rechaza la consigna |
+| GET | /api/v1/horno/consigna/historial | — | ✅ implementado — historial de auditoría de consignas (automáticas y manuales) por `loteId` (query param requerido) |
+| GET | /api/v1/horno/events | — | ✅ implementado — SSE de horno: `horno.consigna` tras cada despacho (automático o manual, exitoso o fallido) |
 
 ## Estado actual de tareas
 
@@ -262,9 +267,9 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - SCA-115: CRUD de parámetros por producto (GET/POST/PUT /api/v1/parametros-producto) con validaciones estrictas en servidor
 - SCA-172: Endpoint POST /api/v1/dispositivos/ping (X-API-Key) — recibe CPU/RAM/temp cada ~10s, persiste historial, calcula estado online/offline con reaper en background y emite SSE (`dispositivo.metric` + `dispositivo.state`)
 - SCA-142: Envío automático de parámetros de cocción y consigna térmica al horno — mecanismo compartido `internal/service/consigna` (usado también por SCA-320), tabla `historial_consignas` (auditoría), cliente simulado `oven_controller`, setpoints puntuales en `parametros_producto`, endpoint `POST /api/v1/lotes/inicio` como trigger, broadcast SSE `horno.consigna`
+- SCA-320: Envío de consigna térmica manual al horno — `POST /api/v1/horno/consigna` (valida rango seguro del producto, sin auth por ahora) + `GET /api/v1/horno/consigna/historial` + `GET /api/v1/horno/events` (SSE), reusando el mismo `ConsignaService` de SCA-142
 
 ### Pendientes
-- SCA-320: Envío de consigna térmica manual al horno — falta el endpoint `POST /api/v1/horno/consigna` (`ConsignaService.DispatchManual` ya implementado y testeado) + `GET /api/v1/horno/consigna/historial` + exponer `GET /api/v1/horno/events` (SSE) en `main.go`; queda pendiente definir si lleva auth
 - SCA-86: Tests para lote_productivo (handler + service)
 - Persistencia real de Horno y Alerta en PostgreSQL (actualmente en memoria)
 - Autenticación Google OAuth 2.0 para el frontend (y, con eso, restringir `parametros_producto` a rol Supervisor)
