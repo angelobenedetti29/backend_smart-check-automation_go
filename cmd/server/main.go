@@ -20,8 +20,10 @@ import (
 	parametrosProductoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/parametros_producto"
 	sseController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sse"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
+	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
+	consignaService "github.com/angelobenedetti29/smart-check-automation/internal/service/consigna"
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
@@ -56,12 +58,14 @@ func main() {
 	// 2. Instantiate Infrastructure Adapters (Providers Layer)
 	dbRepo := database.NewPostgresRepository()
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500/yolo/conveyor")
+	ovenController := oven_controller.NewOvenControllerClient("http://localhost:8600/plc/horno")
 
 	// Real PostgreSQL repositories
 	loteCreateRepo := repository.NewPostgresRepository(pgPool)
 	loteGetRepo := repository.NewLoteProductivoPostgresRepository(pgPool)
 	parametrosProductoRepo := repository.NewParametrosProductoPostgresRepository(pgPool)
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
+	consignaRepo := repository.NewConsignaPostgresRepository(pgPool)
 
 	// SSE broker for real-time event streaming
 	sseBroker := sse.NewBroker()
@@ -69,12 +73,16 @@ func main() {
 	// Dedicated SSE broker for dispositivo telemetry events (no cross-noise with lotes)
 	dispositivoSSEBroker := sse.NewBroker()
 
+	// Dedicated SSE broker for horno/consigna events (no cross-noise con lotes/dispositivos)
+	hornoSSEBroker := sse.NewBroker()
+
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
 	loteProdSvc := loteProductivoService.NewLoteProductivoService(loteGetRepo)
 	parametrosProductoSvc := parametrosProductoService.NewParametrosProductoService(parametrosProductoRepo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker)
+	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, parametrosProductoRepo, ovenController, hornoSSEBroker)
 
 	reaperInterval := getEnvDuration("DISPOSITIVO_REAPER_INTERVAL", 5*time.Second)
 	offlineThreshold := getEnvDuration("DISPOSITIVO_OFFLINE_THRESHOLD", 25*time.Second)
@@ -88,12 +96,15 @@ func main() {
 
 	// 4. Instantiate Presentation HTTP Handlers
 	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
-	loteHandler := loteController.NewLoteHandler(loteCreateRepo, sseBroker, loteGetRepo)
+	loteHandler := loteController.NewLoteHandler(loteCreateRepo, sseBroker, loteGetRepo, consignaSvc)
 	loteProductivoHandler := loteProductivoController.NewLoteProductivoHandler(loteProdSvc)
 	parametrosProductoHandler := parametrosProductoController.NewParametrosProductoHandler(parametrosProductoSvc)
 	sseHandler := sseController.NewSSEHandler(sseBroker)
 	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc)
 	dispositivoSSEHandler := sseController.NewSSEHandler(dispositivoSSEBroker)
+	// NOTA: el handler HTTP de consigna manual (POST /api/v1/horno/consigna, SCA-320)
+	// y el SSE opcional de horno se agregan en esa rama; consignaSvc/hornoSSEBroker
+	// ya quedan disponibles acá porque los consume internamente HandleIniciarLote (SCA-142).
 
 	// 5. Setup routes
 	mux := http.NewServeMux()
@@ -105,6 +116,7 @@ func main() {
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(hornoHandler.GetHornoStatus))
 	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
 	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
+	mux.HandleFunc("/api/v1/lotes/inicio", loggingMiddleware(loteHandler.HandleIniciarLote))
 	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteProductivoHandler.GetAll))
 	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(parametrosProductoHandler.Handle))
 	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(sseHandler.HandleSSE))
@@ -168,7 +180,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE), POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas, GET /api/v1/dispositivos/events (SSE)\n"))
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, POST /api/v1/lotes/inicio, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE), POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas, GET /api/v1/dispositivos/events (SSE)\n"))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

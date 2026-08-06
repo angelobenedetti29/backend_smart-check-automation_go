@@ -10,10 +10,28 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote"
 	loteProductivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_productivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
+
+// mockConsignaService implements consigna.Service (domain interface) for controlled testing.
+type mockConsignaService struct {
+	dispatchAutomaticoFunc func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error)
+}
+
+func (m *mockConsignaService) DispatchAutomatico(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+	return m.dispatchAutomaticoFunc(ctx, hornoID, loteID, productoID)
+}
+
+func (m *mockConsignaService) DispatchManual(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
+	return nil, nil
+}
+
+func (m *mockConsignaService) GetHistorialByLote(ctx context.Context, loteID string) ([]consigna.Consigna, error) {
+	return nil, nil
+}
 
 // mockLoteRepo implements lote.Repository (domain interface) for controlled testing.
 type mockLoteRepo struct {
@@ -61,7 +79,12 @@ func (m *mockLoteProductivoFetcher) GetByID(id string) (*loteProductivo.LoteProd
 func setupHandlerTest(t *testing.T, repo lote.Repository) *LoteHandler {
 	t.Helper()
 	t.Setenv("API_KEY_SECRET", "test-key-fermar")
-	return NewLoteHandler(repo, sse.NewBroker(), &mockLoteProductivoFetcher{})
+	consignaSvc := &mockConsignaService{
+		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+			return &consigna.Consigna{HornoID: hornoID, Origen: consigna.OrigenAutomatico, Exitosa: true}, nil
+		},
+	}
+	return NewLoteHandler(repo, sse.NewBroker(), &mockLoteProductivoFetcher{}, consignaSvc)
 }
 
 func executeRequest(t *testing.T, handler *LoteHandler, method string, body []byte, apiKey string) *httptest.ResponseRecorder {
@@ -182,4 +205,110 @@ func TestHandleCreateLote_RepoError(t *testing.T) {
 	err := json.Unmarshal(rr.Body.Bytes(), &resp)
 	assert.NoError(t, err)
 	assert.False(t, resp["success"].(bool))
+}
+
+func executeIniciarLoteRequest(t *testing.T, handler *LoteHandler, method string, body []byte, apiKey string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, "/api/v1/lotes/inicio", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+	rr := httptest.NewRecorder()
+	handler.HandleIniciarLote(rr, req)
+	return rr
+}
+
+func TestHandleIniciarLote_Success(t *testing.T) {
+	t.Setenv("API_KEY_SECRET", "test-key-fermar")
+	consignaSvc := &mockConsignaService{
+		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+			assert.Equal(t, "horno-01", hornoID)
+			assert.Equal(t, "a1b2c3d4-5678-90ab-cdef-1234567890ab", productoID)
+			assert.NotEmpty(t, loteID)
+			return &consigna.Consigna{HornoID: hornoID, Origen: consigna.OrigenAutomatico, Exitosa: true}, nil
+		},
+	}
+	handler := NewLoteHandler(&mockLoteRepo{}, sse.NewBroker(), &mockLoteProductivoFetcher{}, consignaSvc)
+
+	body := []byte(`{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}`)
+	rr := executeIniciarLoteRequest(t, handler, http.MethodPost, body, "test-key-fermar")
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	var resp map[string]interface{}
+	err := json.Unmarshal(rr.Body.Bytes(), &resp)
+	assert.NoError(t, err)
+	assert.True(t, resp["success"].(bool))
+}
+
+func TestHandleIniciarLote_ParametrosNoExiste(t *testing.T) {
+	t.Setenv("API_KEY_SECRET", "test-key-fermar")
+	consignaSvc := &mockConsignaService{
+		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+			return nil, consigna.ErrParametrosNoExiste
+		},
+	}
+	handler := NewLoteHandler(&mockLoteRepo{}, sse.NewBroker(), &mockLoteProductivoFetcher{}, consignaSvc)
+
+	body := []byte(`{"hornoId":"horno-01","productoId":"producto-sin-setpoint"}`)
+	rr := executeIniciarLoteRequest(t, handler, http.MethodPost, body, "test-key-fermar")
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+}
+
+func TestHandleIniciarLote_HornoNoExiste(t *testing.T) {
+	t.Setenv("API_KEY_SECRET", "test-key-fermar")
+	consignaSvc := &mockConsignaService{
+		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+			return nil, consigna.ErrHornoNoExiste
+		},
+	}
+	handler := NewLoteHandler(&mockLoteRepo{}, sse.NewBroker(), &mockLoteProductivoFetcher{}, consignaSvc)
+
+	body := []byte(`{"hornoId":"horno-inexistente","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}`)
+	rr := executeIniciarLoteRequest(t, handler, http.MethodPost, body, "test-key-fermar")
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestHandleIniciarLote_MissingFields(t *testing.T) {
+	t.Setenv("API_KEY_SECRET", "test-key-fermar")
+	consignaSvc := &mockConsignaService{
+		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+			t.Error("DispatchAutomatico should not be called with missing fields")
+			return nil, nil
+		},
+	}
+	handler := NewLoteHandler(&mockLoteRepo{}, sse.NewBroker(), &mockLoteProductivoFetcher{}, consignaSvc)
+
+	body := []byte(`{"hornoId":""}`)
+	rr := executeIniciarLoteRequest(t, handler, http.MethodPost, body, "test-key-fermar")
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+}
+
+func TestHandleIniciarLote_Unauthorized(t *testing.T) {
+	t.Setenv("API_KEY_SECRET", "test-key-fermar")
+	consignaSvc := &mockConsignaService{
+		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+			t.Error("DispatchAutomatico should not be called without API key")
+			return nil, nil
+		},
+	}
+	handler := NewLoteHandler(&mockLoteRepo{}, sse.NewBroker(), &mockLoteProductivoFetcher{}, consignaSvc)
+
+	body := []byte(`{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}`)
+	rr := executeIniciarLoteRequest(t, handler, http.MethodPost, body, "")
+
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+}
+
+func TestHandleIniciarLote_WrongMethod(t *testing.T) {
+	t.Setenv("API_KEY_SECRET", "test-key-fermar")
+	handler := NewLoteHandler(&mockLoteRepo{}, sse.NewBroker(), &mockLoteProductivoFetcher{}, &mockConsignaService{})
+
+	rr := executeIniciarLoteRequest(t, handler, http.MethodGet, nil, "test-key-fermar")
+
+	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
