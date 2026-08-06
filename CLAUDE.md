@@ -63,35 +63,39 @@ test_backend_go/
 │   ├── controller/
 │   │   ├── dispositivo/                        # Handler POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
 │   │   ├── horno/                              # Handler GET /api/v1/horno, POST /api/v1/horno/temperatura
-│   │   ├── lote/                               # Handler POST /api/v1/lotes
+│   │   ├── lote/                               # Handler POST /api/v1/lotes, POST /api/v1/lotes/inicio (SCA-142)
 │   │   ├── lote_productivo/                    # Handler GET /api/v1/lotes-productivos
 │   │   └── parametros_producto/                # Handler GET/POST/PUT /api/v1/parametros-producto
 │   ├── domain/
 │   │   ├── alerta/                             # Modelo Alerta
+│   │   ├── consigna/                           # Modelo Consigna (auditoría) + ConsignaManualRequest + validaciones + Repository/Service interfaces (SCA-142/SCA-320)
 │   │   ├── dispositivo/                        # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo + PingRequest + validaciones + Repository/StateStore/Service interfaces
-│   │   ├── horno/                              # Modelo Horno
+│   │   ├── horno/                              # Modelo Horno (+VelocidadCinta/ProductoID/LoteID)
 │   │   ├── lote/                               # Modelo Lote + LoteRequest + validaciones + Repository/Service interfaces
 │   │   ├── lote_productivo/                    # Modelo LoteProductivo + PaginatedResult + Repository/Service interfaces
-│   │   └── parametros_producto/                # Modelo ParametroProducto + Request + validaciones + Repository/Service interfaces
+│   │   └── parametros_producto/                # Modelo ParametroProducto (+TempSetpoint/VelocidadCintaSetpoint) + Request + validaciones + Repository/Service interfaces
 │   ├── provider/
 │   │   ├── database/
 │   │   │   ├── postgres.go                     # NewPostgresPool — conexión pgxpool
 │   │   │   ├── postgres_repo.go                # Repo en memoria para Horno y Alerta (no toca DB)
 │   │   │   ├── lote_productivo_repo.go         # Repo en memoria para lotes (solo para tests unitarios)
 │   │   │   └── dispositivo_state_store.go      # StateStore en memoria (estado actual online/offline, sin tocar DB)
+│   │   ├── oven_controller/client.go           # Cliente simulado del controlador físico del horno (PLC), análogo a yolo_client
 │   │   └── yolo_client/client.go               # Cliente simulado para inspección visual YOLO
 │   ├── repository/
 │   │   ├── postgres_repo.go                    # Repo real PostgreSQL — CREATE lote
 │   │   ├── lote_productivo_repo.go             # Repo real PostgreSQL — GET lotes (JOIN con productos)
 │   │   ├── parametros_producto_repo.go         # Repo real PostgreSQL — GET/CREATE/UPDATE parametros_producto (JOIN con productos)
-│   │   └── dispositivo_repo.go                 # Repo real PostgreSQL — INSERT metricas, GET catálogo de dispositivos, historial paginado
+│   │   ├── dispositivo_repo.go                 # Repo real PostgreSQL — INSERT metricas, GET catálogo de dispositivos, historial paginado
+│   │   └── consigna_repo.go                    # Repo real PostgreSQL — INSERT/GET historial_consignas (auditoría)
 │   └── service/
+│       ├── consigna/                           # Despacho de consigna al horno (automático y manual), actualización de estado activo, auditoría, broadcast SSE
 │       ├── dispositivo/                        # Lógica de ping, estado online/offline, reaper, emisión SSE
 │       ├── horno/                              # Lógica de umbrales térmicos y alertas
 │       ├── lote_productivo/                    # Lógica de paginación (límites, defaults)
 │       └── parametros_producto/                # Alta/consulta/actualización de parámetros por producto
 ├── pkg/response/response.go                    # Envelope JSON estándar {success, message, data, errors}
-├── database/schema.sql                         # DDL: tablas productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo, constraints, seed
+├── database/schema.sql                         # DDL: tablas productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo + historial_consignas, constraints, seed
 ├── Dockerfile                                  # Multi-stage build: golang:1.25-alpine → alpine:3.19
 ├── docker-compose.yml                          # Servicios: db (PostgreSQL 16) + app (Go)
 ├── .env                                        # Variables de entorno locales (NO commitear)
@@ -172,6 +176,33 @@ CREATE TABLE metricas_dispositivo (
 CREATE INDEX idx_metricas_dispositivo_disp_received
     ON metricas_dispositivo (dispositivo_id, received_at DESC);
 -- Seed: "Raspberry Pi Horno 1" → id: b1c2d3e4-5678-90ab-cdef-1234567890ab
+
+-- Setpoints puntuales de cocción (dentro del rango min/max ya existente),
+-- usados por el envío automático/manual de consigna al horno (SCA-142/SCA-320)
+ALTER TABLE parametros_producto
+    ADD COLUMN temp_setpoint           NUMERIC(6,2), -- dentro de [temp_min, temp_max]
+    ADD COLUMN velocidad_cinta_setpoint NUMERIC(6,2); -- dentro de [velocidad_cinta_min, velocidad_cinta_max]
+-- Seed: Tostada Integral → temp_setpoint=170.00, velocidad_cinta_setpoint=0.20
+
+-- Auditoría de toda consigna térmica/velocidad despachada (o intentada) al
+-- controlador físico del horno, de origen automático o manual
+CREATE TABLE historial_consignas (
+    id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    horno_id                  VARCHAR(50) NOT NULL,  -- horno vive en memoria, sin FK real
+    lote_id                   UUID,                   -- sin FK: el lote puede no estar persistido aún (despacho automático)
+    producto_id               UUID REFERENCES productos(id) ON DELETE SET NULL,
+    temperatura_objetivo      NUMERIC(6,2) NOT NULL,
+    velocidad_cinta_objetivo  NUMERIC(6,2) NOT NULL,
+    origen                    VARCHAR(12) NOT NULL CHECK (origen IN ('AUTOMATICO', 'MANUAL')),
+    usuario                   VARCHAR(150),           -- TODO(OAuth): reemplazar por FK real
+    exitosa                   BOOLEAN NOT NULL,
+    motivo_error              TEXT,
+    temperatura_previa        NUMERIC(6,2),
+    velocidad_cinta_previa    NUMERIC(6,2),
+    creada_en                 TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_historial_consignas_lote_id ON historial_consignas (lote_id);
+CREATE INDEX idx_historial_consignas_horno_id ON historial_consignas (horno_id, creada_en DESC);
 ```
 
 **Importante:** `lotes_productivos` NO tiene columna `producto_nombre`.
@@ -194,6 +225,12 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - **Eventos SSE de dispositivos**: `dispositivo.metric` se emite en cada ping (cada ~10s) con la última métrica; `dispositivo.state` se emite solo ante una transición online↔offline (detectada en el ping para offline→online y en el reaper para online→offline).
 - **`GET /api/v1/lotes-productivos` acepta `productoId` opcional como filtro**: sin el parámetro lista todos los lotes (comportamiento original); con `productoId` devuelve solo las corridas (lotes) de ese producto, ordenadas por `inicio_at` DESC y paginadas (mismo patrón que `/api/v1/dispositivos/metricas`). Si el `productoId` no existe en `productos` devuelve 404; si el producto existe pero no tiene lotes, devuelve 200 con `data: []`. Cada lote ya trae los valores reales usados en esa corrida (`temp_horno_1/2`, `temp_comb_horno_1/2`, `velocidad_cinta`) — el historial de corridas por producto sale de `lotes_productivos`, no de las recomendaciones (`parametros_producto`, que no se versiona).
 - **`POST /api/v1/dispositivos/ping` autenticado con `X-API-Key`**: reusa el `API_KEY_SECRET` compartido (mismo patrón que `/api/v1/lotes`). Los GET de consulta quedan abiertos porque el login de usuarios (Google OAuth) todavía no existe.
+- **Mecanismo de consigna compartido entre SCA-142 (automático) y SCA-320 (manual)**: `internal/service/consigna` centraliza en un único método `dispatch()` la resolución de la consigna, el despacho al controlador físico simulado (`internal/provider/oven_controller`, análogo a `yolo_client`), la actualización del estado activo de `horno.Horno` y el registro de auditoría en `historial_consignas` — tanto si el despacho fue exitoso como si falló. `DispatchAutomatico` y `DispatchManual` son las dos puertas de entrada; ambas terminan en el mismo `dispatch()`.
+- **El setpoint automático es un valor puntual explícito, no el punto medio del rango**: `parametros_producto.temp_setpoint`/`velocidad_cinta_setpoint` (nullable) son los valores que se despachan en un envío automático. Si no están cargados para un producto, `DispatchAutomatico` devuelve `ErrParametrosNoExiste` — no se infiere un valor. El envío manual (SCA-320), en cambio, valida los valores que ingresa el operario contra el rango `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]`, no contra el setpoint puntual.
+- **`POST /api/v1/lotes/inicio` es el trigger de SCA-142, distinto de `POST /api/v1/lotes`**: `POST /api/v1/lotes` sigue siendo un resumen posterior al hecho (llega con `inicioAt` y `finAt` ya completos). `POST /api/v1/lotes/inicio` es lo que la Raspberry Pi llama apenas la IA identifica el producto, **antes** de que el lote termine; no inserta fila en `lotes_productivos` — solo genera un UUID de correlación (`crypto/rand`, sin dependencia externa) que se guarda en `historial_consignas.lote_id` sin FK, porque el lote real todavía no existe en ese momento. Usa el mismo esquema `X-API-Key` que `POST /api/v1/lotes` (helper `validateAPIKey` extraído para no duplicar el chequeo).
+- **`historial_consignas.lote_id` sin FK a propósito**: dado que el despacho automático ocurre antes de que el lote se persista, `lote_id` es una columna de correlación suelta (sin `REFERENCES`), a diferencia de `producto_id` que sí tiene FK real a `productos`.
+- **Broadcast SSE de consigna**: `ConsignaService` tiene su propio broker dedicado (`hornoSSEBroker`, mismo patrón que `dispositivoSSEBroker`) y emite `horno.consigna` (fire-and-forget, en goroutine) tras cada despacho, exitoso o fallido, para que el panel pueda reflejar el estado sin pollear `GET /api/v1/horno`. El handler SSE (`GET /api/v1/horno/events`) todavía no está expuesto en `main.go` — se agrega junto con el endpoint manual de SCA-320.
+- **Auth de los endpoints nuevos de consigna, pendiente de definición final**: `POST /api/v1/lotes/inicio` reusa `X-API-Key` (origen Raspberry Pi/IA, mismo criterio que `POST /api/v1/lotes`). El futuro `POST /api/v1/horno/consigna` manual (SCA-320) todavía no está implementado; se evaluará si queda abierto (como `parametros_producto`) o si amerita un mínimo de protección dado que es una escritura con efecto físico real.
 
 ## Endpoints implementados
 
@@ -203,6 +240,7 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 | GET | /api/v1/horno | — | ✅ implementado (repo en memoria) |
 | POST | /api/v1/horno/temperatura | — | ✅ implementado (repo en memoria) |
 | POST | /api/v1/lotes | X-API-Key | ✅ implementado (PostgreSQL real) |
+| POST | /api/v1/lotes/inicio | X-API-Key | ✅ implementado (SCA-142) — trigger de despacho automático de consigna al horno cuando la IA identifica el producto; no persiste fila en `lotes_productivos`, solo genera un ID de correlación |
 | GET | /api/v1/lotes-productivos | — | ✅ implementado (PostgreSQL real) — lista todos los lotes o filtra por `productoId` (query param opcional), 404 si el producto no existe en el catálogo |
 | GET | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — lista todos los sets de parámetros |
 | POST | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — alta, 409 si el producto ya tiene parámetros, 422 si el producto no existe |
@@ -223,8 +261,10 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - SCA-115: Modelo de datos + migración de `parametros_producto` (peso, tolerancias, rangos de temperatura y velocidad de cinta por producto)
 - SCA-115: CRUD de parámetros por producto (GET/POST/PUT /api/v1/parametros-producto) con validaciones estrictas en servidor
 - SCA-172: Endpoint POST /api/v1/dispositivos/ping (X-API-Key) — recibe CPU/RAM/temp cada ~10s, persiste historial, calcula estado online/offline con reaper en background y emite SSE (`dispositivo.metric` + `dispositivo.state`)
+- SCA-142: Envío automático de parámetros de cocción y consigna térmica al horno — mecanismo compartido `internal/service/consigna` (usado también por SCA-320), tabla `historial_consignas` (auditoría), cliente simulado `oven_controller`, setpoints puntuales en `parametros_producto`, endpoint `POST /api/v1/lotes/inicio` como trigger, broadcast SSE `horno.consigna`
 
 ### Pendientes
+- SCA-320: Envío de consigna térmica manual al horno — falta el endpoint `POST /api/v1/horno/consigna` (`ConsignaService.DispatchManual` ya implementado y testeado) + `GET /api/v1/horno/consigna/historial` + exponer `GET /api/v1/horno/events` (SSE) en `main.go`; queda pendiente definir si lleva auth
 - SCA-86: Tests para lote_productivo (handler + service)
 - Persistencia real de Horno y Alerta en PostgreSQL (actualmente en memoria)
 - Autenticación Google OAuth 2.0 para el frontend (y, con eso, restringir `parametros_producto` a rol Supervisor)
