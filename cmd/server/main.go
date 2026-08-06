@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
+	consignaController "github.com/angelobenedetti29/smart-check-automation/internal/controller/consigna"
 	dispositivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/dispositivo"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
@@ -102,9 +103,8 @@ func main() {
 	sseHandler := sseController.NewSSEHandler(sseBroker)
 	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc)
 	dispositivoSSEHandler := sseController.NewSSEHandler(dispositivoSSEBroker)
-	// NOTA: el handler HTTP de consigna manual (POST /api/v1/horno/consigna, SCA-320)
-	// y el SSE opcional de horno se agregan en esa rama; consignaSvc/hornoSSEBroker
-	// ya quedan disponibles acá porque los consume internamente HandleIniciarLote (SCA-142).
+	consignaHandler := consignaController.NewConsignaHandler(consignaSvc)
+	hornoSSEHandler := sseController.NewSSEHandler(hornoSSEBroker)
 
 	// 5. Setup routes
 	mux := http.NewServeMux()
@@ -124,6 +124,9 @@ func main() {
 	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(dispositivoHandler.HandleEstados))
 	mux.HandleFunc("/api/v1/dispositivos/metricas", loggingMiddleware(dispositivoHandler.HandleMetricas))
 	mux.HandleFunc("/api/v1/dispositivos/events", loggingMiddleware(dispositivoSSEHandler.HandleSSE))
+	mux.HandleFunc("/api/v1/horno/consigna", loggingMiddleware(consignaHandler.DispatchManual))
+	mux.HandleFunc("/api/v1/horno/consigna/historial", loggingMiddleware(consignaHandler.GetHistorial))
+	mux.HandleFunc("/api/v1/horno/events", loggingMiddleware(hornoSSEHandler.HandleSSE))
 
 	// 6. Wrap mux with CORS middleware
 	handler := corsMiddleware(mux)
@@ -180,7 +183,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, POST /api/v1/lotes/inicio, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE), POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas, GET /api/v1/dispositivos/events (SSE)\n"))
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, POST /api/v1/lotes/inicio, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE), POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas, GET /api/v1/dispositivos/events (SSE), POST /api/v1/horno/consigna, GET /api/v1/horno/consigna/historial, GET /api/v1/horno/events (SSE)\n"))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
