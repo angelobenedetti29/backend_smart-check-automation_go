@@ -136,8 +136,9 @@ CREATE TABLE lotes_productivos (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- Seed: único producto disponible actualmente
--- id: a1b2c3d4-5678-90ab-cdef-1234567890ab → "Tostada Integral"
+-- Seed: catálogo de 6 variedades de panificados
+-- id: a1b2c3d4-5678-90ab-cdef-1234567890ab → "Tostada Integral" (producto de referencia original)
+-- + Pan Lactal, Pan Francés, Pan de Salvado, Medialunas, Pan Dulce (SCA-142)
 
 -- Parámetros y umbrales de control ideales de horneado por producto (ABM del Supervisor)
 CREATE TABLE parametros_producto (
@@ -156,6 +157,7 @@ CREATE TABLE parametros_producto (
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- Seed: valores por defecto para "Tostada Integral" (temp_min=160, temp_max=180, etc.)
+-- + matriz completa de las otras 5 variedades (rango + setpoint puntual cada una)
 
 -- Catálogo de dispositivos Raspberry Pi
 CREATE TABLE dispositivos (
@@ -234,6 +236,8 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - **`POST /api/v1/horno/consigna` (manual, SCA-320) sin autenticación por ahora**: mismo criterio que `parametros_producto` — el login de usuarios (Google OAuth) todavía no existe, así que queda abierto con un TODO para restringirlo a Operario/Supervisor cuando exista. `POST /api/v1/lotes/inicio` (automático, SCA-142) sí mantiene `X-API-Key` porque su origen es la Raspberry Pi, no un usuario del panel.
 - **`ConsignaManualRequest.ProductoID` es obligatorio**: a diferencia de otros diseños posibles (límites de seguridad globales hardcodeados), el envío manual siempre valida contra el rango real `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` cargado en `parametros_producto` para el producto indicado — no hay una segunda fuente de verdad de "qué es seguro".
 - **`ConsignaManualRequest.LoteID` es opcional**: permite correlacionar un ajuste manual con el `loteId` de correlación generado por `POST /api/v1/lotes/inicio` (SCA-142), para que ambos queden en el mismo historial de auditoría del lote. Si se omite, la consigna manual se audita igual, sin lote asociado.
+- **Fallo de enlace con el controlador físico → `horno.EstadoControlManual` + alerta CRITICAL**: cuando `OvenController.SendSetpoint` devuelve `Aplicada: false` (hoy simulado con ~5% de probabilidad; el día que haya driver real será un timeout/nack real), `ConsignaService.handleFalloDeEnlace` fuerza el `Estado` del horno a `"CONTROL_MANUAL"` y guarda una `Alerta` de nivel `CRITICAL` (reusa el dominio `alerta` ya existente para umbrales térmicos). Mientras el horno esté en ese estado, `DispatchAutomatico` lo rechaza con `ErrHornoEnControlManual` (409 en `POST /api/v1/lotes/inicio`) — **`DispatchManual` nunca se bloquea**, es la vía de escape segura. Un despacho exitoso (de cualquier origen) restaura `Estado = "ACTIVO"`, reactivando el control automático.
+- **`OvenController` es una interfaz, no el struct concreto de `oven_controller`**: `ConsignaService` depende de `OvenController{ SendSetpoint(...) DispatchResult }`, satisfecha hoy por `*oven_controller.OvenControllerClient` (simulado). Esto permite inyectar dobles de prueba deterministas en los tests (en vez de depender del ~5% de fallo aleatorio) y es también el punto de swap para un driver real (Modbus/MQTT/API local) cuando exista.
 
 ## Endpoints implementados
 
@@ -269,11 +273,13 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - SCA-172: Endpoint POST /api/v1/dispositivos/ping (X-API-Key) — recibe CPU/RAM/temp cada ~10s, persiste historial, calcula estado online/offline con reaper en background y emite SSE (`dispositivo.metric` + `dispositivo.state`)
 - SCA-142: Envío automático de parámetros de cocción y consigna térmica al horno — mecanismo compartido `internal/service/consigna` (usado también por SCA-320), tabla `historial_consignas` (auditoría), cliente simulado `oven_controller`, setpoints puntuales en `parametros_producto`, endpoint `POST /api/v1/lotes/inicio` como trigger, broadcast SSE `horno.consigna`
 - SCA-320: Envío de consigna térmica manual al horno — `POST /api/v1/horno/consigna` (valida rango seguro del producto, sin auth por ahora) + `GET /api/v1/horno/consigna/historial` + `GET /api/v1/horno/events` (SSE), reusando el mismo `ConsignaService` de SCA-142
+- SCA-142 (subtareas 1 y 4 del backlog): catálogo completo de las 6 variedades de panificados cargado en `parametros_producto` con rango + setpoint puntual cada una; manejo de excepciones ante fallo de enlace con el controlador del horno — alerta CRITICAL + `horno.EstadoControlManual` que bloquea el control automático hasta que un envío manual exitoso lo reactive
 
 ### Pendientes
 - SCA-86: Tests para lote_productivo (handler + service)
 - Persistencia real de Horno y Alerta en PostgreSQL (actualmente en memoria)
 - Autenticación Google OAuth 2.0 para el frontend (y, con eso, restringir `parametros_producto` a rol Supervisor)
+- SCA-142 (subtareas 2 y 3 del backlog, **bloqueadas por dependencia externa**): driver de red real (Modbus/MQTT/API local) hacia el PLC del horno, y el handshake de confirmación real contra ese hardware. Hoy `OvenController` (interfaz) solo tiene una implementación simulada (`oven_controller.OvenControllerClient`) — es el punto de swap ya preparado, pero requiere que el equipo de hardware defina protocolo y topología (¿el backend le habla directo al PLC por red, o la Raspberry Pi actúa de puente?) antes de poder implementarlo.
 
 ## Variables de entorno
 

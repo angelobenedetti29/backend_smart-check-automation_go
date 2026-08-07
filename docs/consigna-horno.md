@@ -53,9 +53,52 @@ parametros_producto           oven_controller              horno.Repository
 
 ### Piezas existentes que se extendieron (no se reescribieron)
 
-- `internal/domain/horno/horno.go` — se agregaron `VelocidadCinta`, `ProductoID`, `LoteID`. El horno **sigue en memoria** (decisión de arquitectura previa, documentada en `CLAUDE.md`); no hay hardware ni Postgres real detrás todavía.
+- `internal/domain/horno/horno.go` — se agregaron `VelocidadCinta`, `ProductoID`, `LoteID`, y la constante `EstadoControlManual`. El horno **sigue en memoria** (decisión de arquitectura previa, documentada en `CLAUDE.md`); no hay hardware ni Postgres real detrás todavía.
 - `internal/domain/parametros_producto/parametros_producto.go` — se agregaron `TempSetpoint`/`VelocidadCintaSetpoint` (nullable), leídos por `internal/repository/parametros_producto_repo.go`.
-- `database/schema.sql` — tabla nueva `historial_consignas` + columnas nuevas en `parametros_producto`.
+- `database/schema.sql` — tabla nueva `historial_consignas` + columnas nuevas en `parametros_producto` + catálogo completo de las 6 variedades de panificados.
+
+## 2.1 Catálogo de las 6 variedades (subtarea "matriz de parámetros óptimos")
+
+`database/schema.sql` siembra las 6 variedades con su matriz completa (rango + setpoint puntual):
+
+| Producto | Temp (min–setpoint–max) | Velocidad cinta (min–setpoint–max) |
+|---|---|---|
+| Tostada Integral | 160 – **170** – 180 °C | 0.10 – **0.20** – 0.30 m/s |
+| Pan Lactal | 180 – **190** – 200 °C | 0.15 – **0.25** – 0.35 m/s |
+| Pan Francés | 200 – **210** – 220 °C | 0.20 – **0.30** – 0.40 m/s |
+| Pan de Salvado | 170 – **180** – 190 °C | 0.15 – **0.25** – 0.35 m/s |
+| Medialunas | 190 – **200** – 210 °C | 0.25 – **0.35** – 0.45 m/s |
+| Pan Dulce | 150 – **160** – 170 °C | 0.08 – **0.14** – 0.20 m/s |
+
+El mecanismo (`ConsignaService.DispatchAutomatico`/`DispatchManual` + `parametros_producto.GetByProductoID`) ya era genérico desde SCA-142 — esto fue únicamente carga de datos, sin cambios de código en el servicio. Valores de referencia, ajustables por el equipo de Producción vía `PUT /api/v1/parametros-producto` (que hoy solo actualiza rangos min/max, no los setpoints puntuales — ver nota en `CLAUDE.md`).
+
+## 2.2 Manejo de fallo de enlace: alerta crítica + CONTROL_MANUAL
+
+Cuando `OvenController.SendSetpoint` devuelve `Aplicada: false` (hoy simulado con ~5% de probabilidad), además de auditar el intento fallido (como ya hacía SCA-142/320), `ConsignaService.handleFalloDeEnlace` hace dos cosas más:
+
+1. **Fuerza `horno.Estado = "CONTROL_MANUAL"`** — un estado nuevo, distinto de `ACTIVO/ATENCION/MANTENIMIENTO`.
+2. **Genera una `Alerta` de nivel `CRITICAL`** (reusa el dominio `alerta` ya existente para umbrales térmicos), visible en `GET /api/v1/horno` (`alertas_recientes`).
+
+Mientras el horno esté en `CONTROL_MANUAL`:
+- `DispatchAutomatico` (SCA-142, `POST /api/v1/lotes/inicio`) lo **rechaza** con `consigna.ErrHornoEnControlManual` → `409 Conflict`. El control automático deja de insistir.
+- `DispatchManual` (SCA-320, `POST /api/v1/horno/consigna`) **sigue funcionando sin restricciones** — es la vía de escape segura para que un operario reactive el horno a mano.
+- Un despacho **exitoso**, de cualquier origen, restaura `Estado = "ACTIVO"` — el control automático se reanuda solo, sin pasos manuales extra más allá de que la próxima consigna se aplique bien.
+
+```
+Fallo de enlace (Aplicada: false)
+        │
+        ├─► historial_consignas.exitosa = false, motivo_error   (ya existía)
+        ├─► Alerta{Nivel: CRITICAL, ...}                         (nuevo)
+        └─► horno.Estado = "CONTROL_MANUAL"                      (nuevo)
+                     │
+                     ├─► POST /api/v1/lotes/inicio  → 409 (bloqueado)
+                     └─► POST /api/v1/horno/consigna → sigue funcionando
+                                  │
+                                  ▼ (éxito)
+                          horno.Estado = "ACTIVO"  (se reanuda el automático)
+```
+
+`ConsignaService` depende de una interfaz `OvenController` (no del struct concreto `oven_controller.OvenControllerClient`), lo que permitió agregar tests deterministas del escenario de fallo sin depender del ~5% aleatorio (`internal/service/consigna/consigna_service_test.go`, `fakeController`). Es también el punto de swap para cuando exista un driver real.
 
 ## 3. Por qué está diseñado así (decisiones clave)
 
@@ -155,7 +198,34 @@ curl "http://localhost:8080/api/v1/horno/consigna/historial?loteId=<loteId devue
 
 El `loteId` es generado por `POST /api/v1/lotes/inicio` (despacho automático). Si además se manda ese mismo `loteId` en un `POST /api/v1/horno/consigna` manual posterior (campo opcional `loteId` del request), ambos quedan en el mismo historial — así el panel puede mostrar "todo lo que le pasó a este lote": la consigna automática inicial más cualquier corrección manual posterior.
 
-### 4.8 Casos de error — tabla resumen
+### 4.8 Fallo de enlace: alerta crítica + CONTROL_MANUAL
+
+Como el fallo es simulado con ~5% de probabilidad, hay que insistir hasta capturarlo:
+
+```bash
+for i in $(seq 1 40); do
+  curl -s -o /dev/null -w "%{http_code} " -X POST http://localhost:8080/api/v1/horno/consigna \
+    -H "Content-Type: application/json" \
+    -d '{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab","temperaturaObjetivo":170,"velocidadCintaObjetivo":0.20}'
+done
+```
+Apenas veas un `502` en la salida, verificá **inmediatamente** (antes de mandar otro request, porque un éxito subsiguiente restaura el estado):
+
+```bash
+curl -s http://localhost:8080/api/v1/horno?id=horno-01
+```
+Esperado: `estado: "CONTROL_MANUAL"` y una `Alerta` nueva en `alertas_recientes` con `nivel: "CRITICAL"`.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/lotes/inicio \
+  -H "Content-Type: application/json" -H "X-API-Key: <API_KEY_SECRET>" \
+  -d '{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}'
+```
+Esperado: `409` "El horno está en modo CONTROL_MANUAL...". El envío manual, en cambio, sigue aceptando requests con normalidad — reintentando `POST /api/v1/horno/consigna` hasta que salga exitoso, `estado` vuelve a `"ACTIVO"` y el automático vuelve a responder `200`.
+
+> Para probar esto de forma determinista sin depender del azar, ver los tests `TestDispatch_Fallido_GeneraAlertaCriticaYPasaAControlManual`, `TestDispatchAutomatico_BloqueadoSiHornoEnControlManual`, `TestDispatchManual_NoSeBloqueaAunqueHornoEsteEnControlManual` y `TestDispatchManual_ExitosoTrasFalloRestauraEstadoActivo` en `internal/service/consigna/consigna_service_test.go` (usan un `fakeController` inyectable en vez del cliente simulado real).
+
+### 4.9 Casos de error — tabla resumen
 
 | Escenario | Endpoint | Esperado |
 |---|---|---|
@@ -166,3 +236,4 @@ El `loteId` es generado por `POST /api/v1/lotes/inicio` (despacho automático). 
 | Body incompleto | ambos | `422` |
 | Método incorrecto | ambos | `405` |
 | `loteId` faltante | `/api/v1/horno/consigna/historial` | `400` |
+| Horno en `CONTROL_MANUAL` | `/api/v1/lotes/inicio` | `409` |
