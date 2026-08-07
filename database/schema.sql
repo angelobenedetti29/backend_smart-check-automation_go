@@ -1,16 +1,16 @@
 -- ============================================================================
 -- Smart-Check Automation — Fermar S.A.
 -- Esquema de Base de Datos PostgreSQL (MVP)
--- Versión: 1.0
+-- Versión: 1.1
 -- Motor:  PostgreSQL 15+ (Aiven Cloud, AWS sa-east-1)
 -- ============================================================================
--- Este script crea la estructura completa del modelo de datos para la
--- User Story "Persistir lotes productivos".
--- 
--- Orden de ejecución:
---   1. Tabla maestra: productos
---   2. Tabla transaccional: lotes_productivos (depende de productos vía FK)
---   3. Seed de datos de catálogo
+-- Este script crea la estructura completa del modelo de datos del MVP:
+--
+--   1. Tabla maestra:      productos
+--   2. Tabla transaccional: lotes_productivos  (depende de productos vía FK)
+--   3. Tabla de acceso:    usuarios            (autenticación y RBAC)
+--
+-- Orden de ejecución: productos → lotes_productivos → usuarios → seeds
 -- ============================================================================
 
 BEGIN;
@@ -138,5 +138,50 @@ INSERT INTO productos (id, nombre) VALUES
     ('a1b2c3d4-5678-90ab-cdef-1234567890ab', 'Tostada Integral')
 ON CONFLICT (id) DO NOTHING;
 
+-- ============================================================================
+-- TABLA 3: usuarios (Usuarios corporativos autorizados para la plataforma)
+-- ============================================================================
+-- Solo los usuarios registrados aquí con activo=true pueden autenticarse.
+-- El rol determina los permisos en el frontend (Administrador > Supervisor > Operario).
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS usuarios (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         VARCHAR(254) NOT NULL UNIQUE,
+    nombre        VARCHAR(150) NOT NULL,
+    rol           VARCHAR(20)  NOT NULL,
+    password_hash VARCHAR(255),
+    activo        BOOLEAN      NOT NULL DEFAULT true,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+
+    -- Solo roles válidos del sistema
+    CONSTRAINT chk_usuarios_rol
+        CHECK (rol IN ('Administrador', 'Supervisor', 'Operario')),
+
+    -- Validación de formato de email (segunda línea de defensa)
+    CONSTRAINT chk_usuarios_email_formato
+        CHECK (email ~* '^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$')
+);
+
+COMMENT ON TABLE  usuarios               IS 'Usuarios corporativos autorizados para acceder a la plataforma Smart-Check.';
+COMMENT ON COLUMN usuarios.email         IS 'Correo corporativo. Debe existir aquí para poder autenticarse.';
+COMMENT ON COLUMN usuarios.rol           IS 'Nivel de acceso: Administrador, Supervisor u Operario.';
+COMMENT ON COLUMN usuarios.password_hash IS 'Hash bcrypt de la contraseña para autenticación local (nullable si solo usa OAuth).';
+COMMENT ON COLUMN usuarios.activo        IS 'Revocar acceso sin eliminar el registro: UPDATE usuarios SET activo=false WHERE email=...';
+
+-- Índice para la búsqueda por email en cada login (operación más frecuente)
+CREATE INDEX IF NOT EXISTS idx_usuarios_email ON usuarios (email);
+
+-- ============================================================================
+-- SEED: Usuarios de prueba (modificar con emails corporativos reales)
+-- Contraseña por defecto para usuarios seed: password123 ($2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy)
+-- ============================================================================
+INSERT INTO usuarios (email, nombre, rol, password_hash) VALUES
+    ('admin@fermar.com.ar',      'Administrador Fermar',  'Administrador', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'),
+    ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'),
+    ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy')
+ON CONFLICT (email) DO NOTHING;
+
 COMMIT;
+
  

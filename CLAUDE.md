@@ -7,16 +7,16 @@ Los datos son enviados por nodos Raspberry Pi via HTTP.
 
 ## Stack
 - Lenguaje: Go 1.25
-- Base de datos: PostgreSQL 16
+- Base de datos: PostgreSQL 16 (Aiven Cloud)
 - Infraestructura: Docker + Docker Compose
 - Frontend: Next.js (React) — consumidor de esta API
+- Autenticación (usuarios): Google OAuth 2.0 + credenciales locales (bcrypt) → JWT HttpOnly cookie
 - Autenticación (Raspberry Pi → API): API Key via header `X-API-Key`
-- Autenticación (usuarios → frontend): Google OAuth 2.0 (pendiente)
 
 ## Convenciones del equipo
 - Nombres de structs: PascalCase
 - Nombres de variables y funciones: camelCase
-- Comentario breve por cada función
+- Comentario breve por cada función exportada
 - Un archivo por componente/entidad
 - Patrón: Handler → Service → Repository → PostgreSQL
 
@@ -25,7 +25,7 @@ Los datos son enviados por nodos Raspberry Pi via HTTP.
 Formato obligatorio:
 
 ```
-<tipo>(SMA19-XXX): <descripción en imperativo, minúscula, sin punto final>
+<tipo>(SCA-XXX): <descripción en imperativo, minúscula, sin punto final>
 ```
 
 | Tipo | Cuándo usarlo |
@@ -39,7 +39,7 @@ Formato obligatorio:
 | `style` | Formato, linting, sin cambio de lógica |
 | `perf` | Mejora de rendimiento |
 
-El identificador `SMA19-XXX` es obligatorio — permite la vinculación automática con Jira.
+El identificador `SCA-XXX` es obligatorio — permite la vinculación automática con Jira.
 
 ## Ramas
 
@@ -51,42 +51,57 @@ feature/    ← nueva funcionalidad (se crea desde develop)
 bugfix/     ← corrección de bug (se crea desde develop)
 ```
 
-Nombrado: `feature/SMA19-042-clasificacion-imagenes`, `bugfix/SMA19-067-validacion-jwt`
+Nombrado: `feature/SCA-042-clasificacion-imagenes`, `bugfix/SCA-067-validacion-jwt`
 
 **Prohibido** hacer commit directo a `main`, `staging` o `develop`.
 
-## Estructura de carpetas actual
+## Estructura de carpetas
+
 ```
-test_backend_go/
-├── cmd/server/main.go                          # Entry point, wiring de dependencias
+backend_smart-check-automation_go/
+├── cmd/server/main.go                               # Entry point: wiring de dependencias y setup de rutas
 ├── internal/
 │   ├── controller/
-│   │   ├── horno/                              # Handler GET /api/v1/horno, POST /api/v1/horno/temperatura
-│   │   ├── lote/                               # Handler POST /api/v1/lotes
-│   │   └── lote_productivo/                    # Handler GET /api/v1/lotes-productivos
+│   │   ├── auth/
+│   │   │   ├── auth_handler.go                      # POST /api/v1/auth/login|google|logout
+│   │   │   ├── auth_handler_test.go
+│   │   │   ├── middleware.go                        # JWTMiddleware + RequireRole (RBAC)
+│   │   │   └── middleware_test.go
+│   │   ├── horno/                                   # GET /api/v1/horno, POST /api/v1/horno/temperatura
+│   │   ├── lote/                                    # POST /api/v1/lotes
+│   │   ├── lote_productivo/                         # GET /api/v1/lotes-productivos
+│   │   └── user/
+│   │       └── user_handler.go                      # GET|POST /api/v1/admin/usuarios, PATCH .../usuarios/{id}
 │   ├── domain/
-│   │   ├── alerta/                             # Modelo Alerta
-│   │   ├── horno/                              # Modelo Horno
-│   │   ├── lote/                               # Modelo Lote + LoteRequest + validaciones + Repository/Service interfaces
-│   │   └── lote_productivo/                    # Modelo LoteProductivo + PaginatedResult + Repository/Service interfaces
+│   │   ├── alerta/                                  # Modelo Alerta
+│   │   ├── horno/                                   # Modelo Horno
+│   │   ├── lote/                                    # Modelo Lote + interfaces Repository/Service
+│   │   ├── lote_productivo/                         # Modelo LoteProductivo + PaginatedResult
+│   │   └── user/
+│   │       └── user.go                              # Entidad User, constantes de roles, errores centinela
 │   ├── provider/
-│   │   ├── database/
-│   │   │   ├── postgres.go                     # NewPostgresPool — conexión pgxpool
-│   │   │   ├── postgres_repo.go                # Repo en memoria para Horno y Alerta (no toca DB)
-│   │   │   └── lote_productivo_repo.go         # Repo en memoria para lotes (solo para tests unitarios)
-│   │   └── yolo_client/client.go               # Cliente simulado para inspección visual YOLO
+│   │   ├── database/                                # NewPostgresPool + repos en memoria (horno/alerta)
+│   │   ├── google/
+│   │   │   └── oauth_provider.go                    # Implementa user.GoogleVerifier vía google/api/idtoken
+│   │   └── yolo_client/                             # Cliente HTTP para servicio YOLO de inspección visual
 │   ├── repository/
-│   │   ├── postgres_repo.go                    # Repo real PostgreSQL — CREATE lote
-│   │   └── lote_productivo_repo.go             # Repo real PostgreSQL — GET lotes (JOIN con productos)
+│   │   ├── postgres_repo.go                         # PostgreSQL — CREATE lote
+│   │   ├── lote_productivo_repo.go                  # PostgreSQL — GET lotes (JOIN productos)
+│   │   └── user_postgres_repository.go              # PostgreSQL — CRUD usuarios
 │   └── service/
-│       ├── horno/                              # Lógica de umbrales térmicos y alertas
-│       └── lote_productivo/                    # Lógica de paginación (límites, defaults)
-├── pkg/response/response.go                    # Envelope JSON estándar {success, message, data, errors}
-├── database/schema.sql                         # DDL: tablas productos + lotes_productivos, constraints, seed
-├── Dockerfile                                  # Multi-stage build: golang:1.25-alpine → alpine:3.19
-├── docker-compose.yml                          # Servicios: db (PostgreSQL 16) + app (Go)
-├── .env                                        # Variables de entorno locales (NO commitear)
-├── .env.example                                # Plantilla de variables de entorno
+│       ├── auth/
+│       │   ├── auth_service.go                      # LoginWithGoogle, LoginWithCredentials, generateJWT
+│       │   └── auth_service_test.go
+│       ├── horno/                                   # Lógica de umbrales térmicos y alertas
+│       ├── lote_productivo/                         # Lógica de paginación
+│       └── user/
+│           ├── user_service.go                      # ListUsers, CreateUser, UpdateUser (con bcrypt)
+│           └── user_service_test.go
+├── pkg/response/response.go                         # Envelope JSON estándar {success, message, data, errors}
+├── database/schema.sql                              # DDL: productos + lotes_productivos + usuarios + seeds
+├── Dockerfile                                       # Multi-stage build: golang:1.25-alpine → alpine
+├── docker-compose.yml
+├── .env.example                                     # Plantilla de variables (copiar como .env, NO commitear .env)
 └── go.mod / go.sum
 ```
 
@@ -102,71 +117,62 @@ CREATE TABLE productos (
 
 -- Registro de lotes productivos
 CREATE TABLE lotes_productivos (
-    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    producto_id       UUID NOT NULL REFERENCES productos(id),
-    turno             VARCHAR(10) NOT NULL CHECK (turno IN ('mañana', 'tarde', 'noche')),
-    inicio_at         TIMESTAMPTZ NOT NULL,
-    fin_at            TIMESTAMPTZ NOT NULL,
-    total_unidades    INTEGER NOT NULL,
-    correctos         INTEGER NOT NULL,
-    quemados          INTEGER NOT NULL,
-    crudas            INTEGER,
-    correctos_kg      NUMERIC(10,2) NOT NULL,
-    quemados_kg       NUMERIC(10,2) NOT NULL,
-    crudos_kg         NUMERIC(10,2),
-    temp_horno_1      NUMERIC(6,2),
-    temp_comb_horno_1 NUMERIC(6,2),
-    temp_horno_2      NUMERIC(6,2),
-    temp_comb_horno_2 NUMERIC(6,2),
-    velocidad_cinta   NUMERIC(6,2),
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    producto_id UUID NOT NULL REFERENCES productos(id),
+    turno VARCHAR(10) NOT NULL CHECK (turno IN ('mañana', 'tarde', 'noche')),
+    -- ... (ver schema.sql completo)
 );
--- Seed: único producto disponible actualmente
--- id: a1b2c3d4-5678-90ab-cdef-1234567890ab → "Tostada Integral"
+
+-- Usuarios corporativos autorizados (autenticación + RBAC)
+CREATE TABLE usuarios (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         VARCHAR(254) NOT NULL UNIQUE,
+    nombre        VARCHAR(150) NOT NULL,
+    rol           VARCHAR(20)  NOT NULL CHECK (rol IN ('Administrador', 'Supervisor', 'Operario')),
+    password_hash VARCHAR(255),          -- nullable: si solo usa Google OAuth
+    activo        BOOLEAN      NOT NULL DEFAULT true,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
 ```
 
-**Importante:** `lotes_productivos` NO tiene columna `producto_nombre`.
-El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los POSTs de prueba.
-`crudas` y `crudos_kg` son nullable. La validación exige `correctos + quemados + crudas <= total_unidades`.
-
-## Decisiones de arquitectura tomadas
-
-- **Repos en memoria vs repos reales**: `internal/provider/database/` tiene repos en memoria usados por los tests unitarios de horno. Los repos reales contra PostgreSQL están en `internal/repository/` y son los que usa `main.go` en producción.
-- **`producto_nombre` en el GET**: se resuelve con JOIN (`lotes_productivos lp JOIN productos pr ON lp.producto_id = pr.id`), no está desnormalizado en la tabla de lotes.
-- **Docker como infraestructura del MVP**: el proyecto corre íntegramente con `docker compose up --build`. No se requiere Go ni PostgreSQL instalados localmente.
-- **Horno usa repo en memoria**: el dominio de horno/alerta aún no tiene persistencia real en PostgreSQL. El repo es simulado con datos seed en memoria.
+**Seed de desarrollo:** `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario@fermar.com.ar`
+Contraseña seed: `password123` — **cambiar antes de producción**.
 
 ## Endpoints implementados
 
-| Método | Ruta | Auth | Estado |
+| Método | Ruta | Auth | Rol mínimo |
 |---|---|---|---|
-| GET | /health | — | ✅ implementado |
-| GET | /api/v1/horno | — | ✅ implementado (repo en memoria) |
-| POST | /api/v1/horno/temperatura | — | ✅ implementado (repo en memoria) |
-| POST | /api/v1/lotes | X-API-Key | ✅ implementado (PostgreSQL real) |
-| GET | /api/v1/lotes-productivos | — | ✅ implementado (PostgreSQL real) |
+| GET | /health | — | — |
+| POST | /api/v1/auth/login | — | — |
+| POST | /api/v1/auth/google | — | — |
+| POST | /api/v1/auth/logout | — | — |
+| GET | /api/v1/admin/usuarios | JWT cookie | Administrador |
+| POST | /api/v1/admin/usuarios | JWT cookie | Administrador |
+| PATCH | /api/v1/admin/usuarios/{id} | JWT cookie | Administrador |
+| GET | /api/v1/horno | JWT cookie | cualquier rol |
+| POST | /api/v1/horno/temperatura | JWT cookie | Supervisor, Admin |
+| POST | /api/v1/lotes | X-API-Key | — |
+| GET | /api/v1/lotes-productivos | JWT cookie | cualquier rol |
 
-## Estado actual de tareas
+## Decisiones de arquitectura
 
-### Completadas
-- SCA-60: Persistencia de lotes productivos (POST /api/v1/lotes → PostgreSQL)
-- SCA-61: Consulta de lotes productivos (GET /api/v1/lotes-productivos → PostgreSQL con paginación)
-- SCA-83: Service GetAll con paginación (defaults: page=1, pageSize=10, max=100)
-- SCA-84: Handler HTTP GET /lotes-productivos
-- Infraestructura Docker completa (Dockerfile multi-stage + docker-compose con healthcheck)
-
-### Pendientes
-- SCA-86: Tests para lote_productivo (handler + service)
-- Persistencia real de Horno y Alerta en PostgreSQL (actualmente en memoria)
-- Autenticación Google OAuth 2.0 para el frontend
+- **Repos en memoria vs repos reales**: `internal/provider/database/` tiene repos en memoria usados por horno/alerta (aún sin persistencia real). Los repos reales contra PostgreSQL están en `internal/repository/`.
+- **JWT en cookie HttpOnly**: `session_token` — HttpOnly+Secure+SameSite=Strict. El frontend no accede al token desde JS.
+- **RBAC en middleware**: `RequireRole([]string{...})` se encadena después de `JWTMiddleware`. Los roles son `Administrador > Supervisor > Operario`.
+- **Bcrypt para contraseñas locales**: `DefaultCost`. Los usuarios Google-only tienen `password_hash = NULL`.
+- **Errores centinela en domain/user**: usar `errors.Is()` en servicios y handlers para mapear a códigos HTTP correctos sin filtrar información.
+- **Docker como infraestructura del MVP**: el proyecto corre con `docker compose up --build`.
 
 ## Variables de entorno
 
 | Variable | Descripción |
 |---|---|
-| `DATABASE_URL` | Conexión a PostgreSQL. En Docker la define el compose internamente. |
-| `API_KEY_SECRET` | Clave que deben enviar las Raspberry Pi en header `X-API-Key` |
+| `DATABASE_URL` | Conexión a PostgreSQL (Aiven o Docker local) |
+| `JWT_SECRET` | Clave de firma del JWT. Mínimo 32 chars. `openssl rand -hex 32` |
+| `GOOGLE_CLIENT_ID` | Client ID de Google Cloud Console |
+| `API_KEY_SECRET` | Clave para Raspberry Pi (`X-API-Key` header) |
 | `PORT` | Puerto HTTP (default 8080) |
-| `POSTGRES_USER/PASSWORD/DB` | Solo usadas por Docker Compose para crear el contenedor de DB |
-| `TEST_DATABASE_URL` | Opcional — activa tests de integración con DB real |
+| `TEST_DATABASE_URL` | Solo para tests de integración. Nunca apuntar a producción. |
+
+Ver `.env.example` para la plantilla completa.

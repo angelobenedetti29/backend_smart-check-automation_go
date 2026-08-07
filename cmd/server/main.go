@@ -13,14 +13,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
+	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
 	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
+	userController "github.com/angelobenedetti29/smart-check-automation/internal/controller/user"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
+	googleProvider "github.com/angelobenedetti29/smart-check-automation/internal/provider/google"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
+	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
+	userService "github.com/angelobenedetti29/smart-check-automation/internal/service/user"
 )
 
 func main() {
@@ -31,6 +37,13 @@ func main() {
 	// 0. Load environment variables from .env file
 	if err := godotenv.Load(); err != nil {
 		log.Println("Advertencia: archivo .env no encontrado, se usarán variables de entorno del sistema")
+	}
+
+	// Validar variables de entorno requeridas para auth antes de iniciar el servidor
+	googleClientID := os.Getenv("GOOGLE_CLIENT_ID")
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if googleClientID == "" || jwtSecret == "" {
+		log.Fatal("GOOGLE_CLIENT_ID y JWT_SECRET son requeridos. Verifica el archivo .env")
 	}
 
 	// 1. Initialize PostgreSQL connection pool
@@ -54,15 +67,24 @@ func main() {
 	// Real PostgreSQL repositories
 	loteCreateRepo := repository.NewPostgresRepository(pgPool)
 	loteGetRepo := repository.NewLoteProductivoPostgresRepository(pgPool)
+	userRepo := repository.NewUserPostgresRepository(pgPool)
+
+	// Auth provider (Google)
+	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
 
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
 	loteProdSvc := loteProductivoService.NewLoteProductivoService(loteGetRepo)
+	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
+	userSvc := userService.NewService(userRepo)
 
 	// 4. Instantiate Presentation HTTP Handlers
 	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
 	loteHandler := loteController.NewLoteHandler(loteCreateRepo)
 	loteProductivoHandler := loteProductivoController.NewLoteProductivoHandler(loteProdSvc)
+	authHandler := authController.NewAuthHandler(authSvc)
+	userHandler := userController.NewUserHandler(userSvc)
+	jwtSecretBytes := []byte(jwtSecret)
 
 	// 5. Setup routes
 	mux := http.NewServeMux()
@@ -71,10 +93,20 @@ func main() {
 	mux.HandleFunc("/health", healthHandler(pgPool))
 	mux.HandleFunc("/healthz", healthHandler(pgPool))
 
-	mux.HandleFunc("/api/v1/horno", loggingMiddleware(hornoHandler.GetHornoStatus))
-	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
+	// Auth — rutas públicas (no requieren JWT)
+	mux.HandleFunc("/api/v1/auth/login", loggingMiddleware(authHandler.Login))
+	mux.HandleFunc("/api/v1/auth/google", loggingMiddleware(authHandler.LoginWithGoogle))
+	mux.HandleFunc("/api/v1/auth/logout", loggingMiddleware(authHandler.Logout))
+
+	// Rutas de Administración de Usuarios (Solo Administrador)
+	mux.HandleFunc("/api/v1/admin/usuarios", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleAdmin}, userHandler.HandleUsers))))
+	mux.HandleFunc("/api/v1/admin/usuarios/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleAdmin}, userHandler.HandleUserByID))))
+
+	// Rutas del dominio industrial (protegidas con JWT via cookie HttpOnly y RBAC)
+	mux.HandleFunc("/api/v1/horno", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoHandler.GetHornoStatus)))
+	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleSupervisor, user.RoleAdmin}, hornoHandler.UpdateTemperature))))
 	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
-	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteProductivoHandler.GetAll))
+	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteProductivoHandler.GetAll)))
 
 	// 6. Launch server with graceful shutdown
 	port := os.Getenv("PORT")
@@ -119,7 +151,12 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, GET /api/v1/lotes-productivos\n"))
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\n" +
+		"Auth:    POST /api/v1/auth/login, POST /api/v1/auth/google, POST /api/v1/auth/logout\n" +
+		"Admin:   GET|POST /api/v1/admin/usuarios, PATCH /api/v1/admin/usuarios/{id}\n" +
+		"Horno:   GET /api/v1/horno, POST /api/v1/horno/temperatura\n" +
+		"Lotes:   POST /api/v1/lotes, GET /api/v1/lotes-productivos\n" +
+		"Health:  GET /health\n"))
 }
 
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {

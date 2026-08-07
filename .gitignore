@@ -1,9 +1,10 @@
 # Environment variables (contain credentials for Aiven PostgreSQL)
 .env
 
-# Claude Code
+# AI tool files — generados por/para agentes de IA, no para el equipo
 .claude/
-CLAUDE.md
+.agents/
+skills-lock.json
 
 # OS files
 Thumbs.db
