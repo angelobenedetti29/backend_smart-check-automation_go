@@ -211,3 +211,58 @@ func TestDispatchManual_DentroDeRango_ActualizaHornoYAudita(t *testing.T) {
 		}
 	}
 }
+
+func TestDispatchManual_ConLoteID_QuedaCorrelacionadoEnHistorial(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	svc, _, consignaRepo := newTestService(paramRepo)
+
+	loteID := "lote-correlacion-1"
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-01",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+		LoteID:                 &loteID,
+	}
+
+	rec, err := svc.DispatchManual(context.Background(), req)
+	if err != nil && !errors.Is(err, consigna.ErrDispatchFallido) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.LoteID == nil || *rec.LoteID != loteID {
+		t.Fatalf("expected LoteID %q en el registro, got %v", loteID, rec.LoteID)
+	}
+
+	historial, err := consignaRepo.GetByLoteID(context.Background(), loteID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(historial) != 1 {
+		t.Fatalf("expected 1 registro en el historial del lote, got %d", len(historial))
+	}
+	if historial[0].Origen != consigna.OrigenManual {
+		t.Errorf("expected origen MANUAL en el historial, got %s", historial[0].Origen)
+	}
+}
+
+func TestDispatchManual_SinLoteID_NoQuedaAsociadoANingunLote(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	svc, _, _ := newTestService(paramRepo)
+
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-01",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+	}
+
+	rec, err := svc.DispatchManual(context.Background(), req)
+	if err != nil && !errors.Is(err, consigna.ErrDispatchFallido) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.LoteID != nil {
+		t.Errorf("expected LoteID nil cuando no se especifica en el request, got %v", *rec.LoteID)
+	}
+}

@@ -78,6 +78,11 @@ type ConsignaManualRequest struct {
 	TemperaturaObjetivo    float64 `json:"temperaturaObjetivo"`
 	VelocidadCintaObjetivo float64 `json:"velocidadCintaObjetivo"`
 	Usuario                string  `json:"usuario,omitempty"` // TODO(OAuth): tomar de la sesión/JWT una vez exista auth de usuarios
+	// LoteID es opcional: permite correlacionar un ajuste manual con el lote
+	// en curso (por ejemplo, el loteId de correlación devuelto por
+	// POST /api/v1/lotes/inicio) para que aparezca en su historial de
+	// auditoría. Si se omite, la consigna manual queda auditada sin lote asociado.
+	LoteID *string `json:"loteId,omitempty"`
 }
 
 // Validate aplica las reglas de forma básicas del request (presencia, valores

@@ -64,6 +64,7 @@ parametros_producto           oven_controller              horno.Repository
 - **`historial_consignas.lote_id` no tiene FK** a propósito: en el despacho automático el lote todavía no está persistido en ese momento. `producto_id` sí tiene FK real.
 - **El controlador físico es 100% simulado**, mismo patrón que `yolo_client`: no hay red, PLC ni hardware de por medio. El día que exista hardware real, se reemplaza `OvenControllerClient.SendSetpoint(...)` por un cliente real con la misma firma — nada más en el flujo cambia.
 - **`ConsignaManualRequest.ProductoID` es obligatorio** en el envío manual: siempre se valida contra el rango real cargado en `parametros_producto`, para no tener una segunda fuente de verdad de "qué es seguro" (límites hardcodeados).
+- **`ConsignaManualRequest.LoteID` es opcional**: si el panel conoce el `loteId` del lote en curso (por ejemplo, el que devolvió `POST /api/v1/lotes/inicio`), puede mandarlo en el request manual para que ese ajuste quede correlacionado en el mismo historial de auditoría del lote. Si se omite, la consigna manual queda auditada igual, solo que sin lote asociado.
 - **Auditoría incluso en fallos**: si el controlador simulado rechaza la consigna (~5% de las veces), igual se guarda la fila en `historial_consignas` con `exitosa=false` y `motivo_error`.
 
 ## 4. Cómo probarlo
@@ -110,10 +111,11 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
     "temperaturaObjetivo": 175,
     "velocidadCintaObjetivo": 0.25,
-    "usuario": "operario-demo"
+    "usuario": "operario-demo",
+    "loteId": "<opcional: loteId devuelto por /api/v1/lotes/inicio>"
   }'
 ```
-Esperado: `200`, `origen: "MANUAL"`.
+Esperado: `200`, `origen: "MANUAL"`. El campo `loteId` es opcional — si se manda, el ajuste manual queda correlacionado en el historial de ese lote (ver 4.7); si se omite, la consigna se audita igual, pero sin lote asociado.
 
 Probá también el rechazo por rango:
 ```bash
@@ -151,7 +153,7 @@ Deberías ver filas con `origen = 'AUTOMATICO'` (4.3) y `origen = 'MANUAL'` (4.4
 curl "http://localhost:8080/api/v1/horno/consigna/historial?loteId=<loteId devuelto por 4.3>"
 ```
 
-⚠️ **Detalle a tener en cuenta:** los despachos manuales (SCA-320) no llevan `loteId` — solo los automáticos (SCA-142) lo generan. Si consultás este endpoint con un `loteId` de un despacho manual no vas a encontrar nada asociado, porque `ConsignaManualRequest` no tiene ese campo. Es esperado con el diseño actual; si se necesita que el panel muestre "todo lo que le pasó a este lote" incluyendo ajustes manuales posteriores, habría que pasar el `loteId` activo también en el request manual (hoy no se pide).
+El `loteId` es generado por `POST /api/v1/lotes/inicio` (despacho automático). Si además se manda ese mismo `loteId` en un `POST /api/v1/horno/consigna` manual posterior (campo opcional `loteId` del request), ambos quedan en el mismo historial — así el panel puede mostrar "todo lo que le pasó a este lote": la consigna automática inicial más cualquier corrección manual posterior.
 
 ### 4.8 Casos de error — tabla resumen
 

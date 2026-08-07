@@ -77,7 +77,7 @@ func (s *ConsignaService) DispatchManual(ctx context.Context, req consigna.Consi
 		usuario = &req.Usuario
 	}
 	prod := req.ProductoID
-	return s.dispatch(ctx, req.HornoID, nil, &prod, req.TemperaturaObjetivo, req.VelocidadCintaObjetivo, consigna.OrigenManual, usuario)
+	return s.dispatch(ctx, req.HornoID, req.LoteID, &prod, req.TemperaturaObjetivo, req.VelocidadCintaObjetivo, consigna.OrigenManual, usuario)
 }
 
 // GetHistorialByLote devuelve el historial de auditoría de consignas de un lote.
