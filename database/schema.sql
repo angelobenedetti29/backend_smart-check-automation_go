@@ -322,6 +322,33 @@ WHERE producto_id = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
   AND temp_setpoint IS NULL;
 
 -- ============================================================================
+-- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
+-- "Tostada Integral" ya estaba cargada; se agregan las 5 restantes, cada una
+-- con su matriz de parámetros óptimos (rango + setpoint puntual) para que
+-- ConsignaService.DispatchAutomatico pueda resolverlas sin intervención manual.
+-- ============================================================================
+INSERT INTO productos (id, nombre) VALUES
+    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 'Pan Lactal'),
+    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 'Pan Francés'),
+    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 'Pan de Salvado'),
+    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 'Medialunas'),
+    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 'Pan Dulce')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO parametros_producto (
+    producto_id, peso_referencia_kg, tolerancia_peso_pct,
+    dimension_base_cm, tolerancia_dimension_cm,
+    temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
+    temp_setpoint, velocidad_cinta_setpoint
+) VALUES
+    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 0.500, 8.00,  25.00, 1.00, 180.00, 200.00, 0.15, 0.35, 190.00, 0.25),
+    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 0.250, 6.00,  30.00, 1.50, 200.00, 220.00, 0.20, 0.40, 210.00, 0.30),
+    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 0.450, 8.00,  22.00, 1.00, 170.00, 190.00, 0.15, 0.35, 180.00, 0.25),
+    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 0.060, 12.00, 10.00, 0.50, 190.00, 210.00, 0.25, 0.45, 200.00, 0.35),
+    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 0.800, 10.00, 15.00, 1.00, 150.00, 170.00, 0.08, 0.20, 160.00, 0.14)
+ON CONFLICT (producto_id) DO NOTHING;
+
+-- ============================================================================
 -- TABLA 6: historial_consignas (Auditoría de consignas térmicas/velocidad
 -- despachadas al controlador físico del horno — SCA-142 / SCA-320)
 -- ============================================================================
