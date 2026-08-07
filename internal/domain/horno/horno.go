@@ -2,6 +2,14 @@ package horno
 
 import "time"
 
+// EstadoControlManual indica que el enlace con el controlador físico del
+// horno falló (o no pudo confirmarse) al intentar despachar una consigna.
+// Mientras el horno esté en este estado, el control automático de consignas
+// (SCA-142) queda bloqueado — solo el envío manual (SCA-320) puede operarlo,
+// como vía de escape segura — hasta que un despacho se aplique con éxito y
+// restaure el estado a "ACTIVO" (ver internal/service/consigna).
+const EstadoControlManual = "CONTROL_MANUAL"
+
 // Horno represents an industrial oven entity in the factory line.
 type Horno struct {
 	ID             string    `json:"id"`

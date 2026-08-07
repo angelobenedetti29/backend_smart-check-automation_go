@@ -24,6 +24,12 @@ var ErrFueraDeRango = errors.New("consigna: valores fuera de rango seguro")
 // pudo aplicar la consigna.
 var ErrDispatchFallido = errors.New("consigna: el controlador físico rechazó la consigna")
 
+// ErrHornoEnControlManual indica que el horno quedó en modo CONTROL_MANUAL
+// tras un fallo de enlace previo con el controlador físico, y por lo tanto
+// rechaza nuevos despachos automáticos hasta que un operario lo reactive
+// con un envío manual exitoso (ver horno.EstadoControlManual).
+var ErrHornoEnControlManual = errors.New("consigna: el horno está en modo CONTROL_MANUAL, requiere intervención manual antes de reanudar el control automático")
+
 // Origen indica si la consigna fue disparada automáticamente por el sistema
 // (tras la detección de IA al iniciar un lote) o manualmente por un operario
 // desde el panel de control.

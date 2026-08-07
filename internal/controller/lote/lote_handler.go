@@ -183,6 +183,8 @@ func (h *LoteHandler) HandleIniciarLote(w http.ResponseWriter, r *http.Request) 
 			response.Error(w, http.StatusNotFound, "El horno indicado no existe", nil)
 		case errors.Is(err, consigna.ErrParametrosNoExiste):
 			response.Error(w, http.StatusUnprocessableEntity, "El producto no tiene setpoints de cocción cargados", nil)
+		case errors.Is(err, consigna.ErrHornoEnControlManual):
+			response.Error(w, http.StatusConflict, "El horno está en modo CONTROL_MANUAL: requiere intervención de un operario (envío manual) antes de reanudar el control automático", nil)
 		case errors.Is(err, consigna.ErrDispatchFallido):
 			log.Printf("[AUDIT] Consigna automática rechazada por el controlador físico: horno=%s lote=%s producto=%s", req.HornoID, loteID, req.ProductoID)
 			response.JSON(w, http.StatusBadGateway, false, "El controlador físico del horno rechazó la consigna", rec, nil)

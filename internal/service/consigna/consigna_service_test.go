@@ -7,11 +7,24 @@ import (
 	"testing"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
 	parametrosproducto "github.com/angelobenedetti29/smart-check-automation/internal/domain/parametros_producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
+
+// fakeController es un doble de prueba determinista de OvenController: en vez
+// del ~5% de fallo aleatorio del cliente simulado real, siempre devuelve el
+// DispatchResult configurado — necesario para probar la rama de fallo de
+// enlace (alerta crítica + CONTROL_MANUAL) sin depender del azar.
+type fakeController struct {
+	result oven_controller.DispatchResult
+}
+
+func (f *fakeController) SendSetpoint(hornoID string, temperatura, velocidad float64) oven_controller.DispatchResult {
+	return f.result
+}
 
 const testProductoID = "a1b2c3d4-5678-90ab-cdef-1234567890ab"
 
@@ -108,12 +121,27 @@ func (f *fakeConsignaRepo) count() int {
 	return len(f.saved)
 }
 
+// newTestService arma un ConsignaService con el cliente simulado real (~5%
+// de fallo aleatorio) — usado por los tests existentes que toleran esa
+// variabilidad. database.PostgresRepository (en memoria) implementa tanto
+// horno.Repository como alerta.Repository, así que se reutiliza para ambos.
 func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *database.PostgresRepository, *fakeConsignaRepo) {
 	hornoRepo := database.NewPostgresRepository()
 	consignaRepo := &fakeConsignaRepo{}
 	ctrl := oven_controller.NewOvenControllerClient("http://localhost:8600/plc/horno")
 	broker := sse.NewBroker()
-	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker)
+	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
+	return svc, hornoRepo, consignaRepo
+}
+
+// newTestServiceWithController arma un ConsignaService con un OvenController
+// determinista (fakeController), para probar rutas de éxito/fallo sin depender
+// del azar del cliente simulado real.
+func newTestServiceWithController(paramRepo *fakeParamRepo, ctrl OvenController) (*ConsignaService, *database.PostgresRepository, *fakeConsignaRepo) {
+	hornoRepo := database.NewPostgresRepository()
+	consignaRepo := &fakeConsignaRepo{}
+	broker := sse.NewBroker()
+	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
 	return svc, hornoRepo, consignaRepo
 }
 
@@ -264,5 +292,131 @@ func TestDispatchManual_SinLoteID_NoQuedaAsociadoANingunLote(t *testing.T) {
 	}
 	if rec.LoteID != nil {
 		t.Errorf("expected LoteID nil cuando no se especifica en el request, got %v", *rec.LoteID)
+	}
+}
+
+func TestDispatch_Fallido_GeneraAlertaCriticaYPasaAControlManual(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	failing := &fakeController{result: oven_controller.DispatchResult{Aplicada: false, Motivo: "timeout simulado del enlace"}}
+	svc, hornoRepo, consignaRepo := newTestServiceWithController(paramRepo, failing)
+
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-01",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+	}
+
+	_, err := svc.DispatchManual(context.Background(), req)
+	if !errors.Is(err, consigna.ErrDispatchFallido) {
+		t.Fatalf("expected ErrDispatchFallido, got %v", err)
+	}
+	if consignaRepo.count() != 1 {
+		t.Fatalf("expected el intento fallido auditado, got %d registros", consignaRepo.count())
+	}
+
+	h, getErr := hornoRepo.GetByID("horno-01")
+	if getErr != nil {
+		t.Fatalf("unexpected error: %v", getErr)
+	}
+	if h.Estado != horno.EstadoControlManual {
+		t.Errorf("expected Estado CONTROL_MANUAL tras el fallo, got %s", h.Estado)
+	}
+
+	alertas, alertaErr := hornoRepo.GetByHornoID("horno-01")
+	if alertaErr != nil {
+		t.Fatalf("unexpected error: %v", alertaErr)
+	}
+	if len(alertas) != 1 {
+		t.Fatalf("expected 1 alerta crítica generada, got %d", len(alertas))
+	}
+	if alertas[0].Nivel != "CRITICAL" {
+		t.Errorf("expected nivel CRITICAL, got %s", alertas[0].Nivel)
+	}
+}
+
+func TestDispatchAutomatico_BloqueadoSiHornoEnControlManual(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	svc, hornoRepo, _ := newTestServiceWithController(paramRepo, &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}})
+
+	h, err := hornoRepo.GetByID("horno-01")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	h.Estado = horno.EstadoControlManual
+	if err := hornoRepo.Update(h); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	_, err = svc.DispatchAutomatico(context.Background(), "horno-01", "lote-1", testProductoID)
+	if !errors.Is(err, consigna.ErrHornoEnControlManual) {
+		t.Fatalf("expected ErrHornoEnControlManual, got %v", err)
+	}
+}
+
+func TestDispatchManual_NoSeBloqueaAunqueHornoEsteEnControlManual(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	svc, hornoRepo, _ := newTestServiceWithController(paramRepo, &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}})
+
+	h, _ := hornoRepo.GetByID("horno-01")
+	h.Estado = horno.EstadoControlManual
+	_ = hornoRepo.Update(h)
+
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-01",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+	}
+
+	rec, err := svc.DispatchManual(context.Background(), req)
+	if err != nil {
+		t.Fatalf("el envío manual no debería bloquearse en CONTROL_MANUAL: %v", err)
+	}
+	if !rec.Exitosa {
+		t.Errorf("expected consigna exitosa, got Exitosa=false")
+	}
+}
+
+func TestDispatchManual_ExitosoTrasFalloRestauraEstadoActivo(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+
+	failingCtrl := &fakeController{result: oven_controller.DispatchResult{Aplicada: false, Motivo: "timeout simulado"}}
+	failingSvc, hornoRepo, consignaRepo := newTestServiceWithController(paramRepo, failingCtrl)
+
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-01",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+	}
+
+	_, err := failingSvc.DispatchManual(context.Background(), req)
+	if !errors.Is(err, consigna.ErrDispatchFallido) {
+		t.Fatalf("expected ErrDispatchFallido, got %v", err)
+	}
+	h, _ := hornoRepo.GetByID("horno-01")
+	if h.Estado != horno.EstadoControlManual {
+		t.Fatalf("precondición fallida: esperaba CONTROL_MANUAL, got %s", h.Estado)
+	}
+
+	// Reutiliza el mismo hornoRepo/consignaRepo/paramRepo, pero con un
+	// controller exitoso, para simular que el operario reactivó el enlace.
+	okCtrl := &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}}
+	broker := sse.NewBroker()
+	okSvc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, okCtrl, broker, hornoRepo)
+
+	_, err = okSvc.DispatchManual(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	h2, _ := hornoRepo.GetByID("horno-01")
+	if h2.Estado != "ACTIVO" {
+		t.Errorf("expected Estado ACTIVO tras despacho exitoso, got %s", h2.Estado)
 	}
 }
