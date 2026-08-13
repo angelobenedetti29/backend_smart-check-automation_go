@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -24,6 +25,68 @@ type DispositivoHandler struct {
 // NewDispositivoHandler instancia el handler inyectando el servicio.
 func NewDispositivoHandler(svc dispositivo.Service) *DispositivoHandler {
 	return &DispositivoHandler{service: svc}
+}
+
+// Handle despacha GET /api/v1/dispositivos (listar estados) y POST (alta de
+// dispositivo) sobre la misma ruta según el método HTTP.
+//
+// NOTA: el alta todavía no requiere autenticación de usuario porque el login con
+// Google OAuth 2.0 está pendiente (ver CLAUDE.md). Cuando se implemente, el POST
+// debe quedar restringido a usuarios con rol Operador/Supervisor. No se reusa
+// X-API-Key: esa clave es para las Raspberry Pi, no para el panel del operador.
+func (h *DispositivoHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.HandleEstados(w, r)
+	case http.MethodPost:
+		h.HandleCreate(w, r)
+	default:
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+	}
+}
+
+// HandleCreate maneja POST /api/v1/dispositivos — alta de un dispositivo del
+// catálogo por nombre/ubicación desde el panel del operador.
+func (h *DispositivoHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
+	req, ok := h.decodeAndValidate(w, r)
+	if !ok {
+		return
+	}
+
+	estado, err := h.service.Create(r.Context(), req)
+	if err != nil {
+		log.Printf("[ERROR] Error al crear dispositivo: %v", err)
+		response.Error(w, http.StatusInternalServerError, "Error al crear el dispositivo", nil)
+		return
+	}
+
+	response.JSON(w, http.StatusCreated, true, "Dispositivo creado exitosamente", estado, nil)
+}
+
+// decodeAndValidate valida Content-Type, límite de tamaño, formato JSON y reglas
+// de negocio del body del alta. Escribe la respuesta de error correspondiente y
+// devuelve ok=false si algún paso falla.
+func (h *DispositivoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Request) (dispositivo.CreateDispositivoRequest, bool) {
+	var req dispositivo.CreateDispositivoRequest
+
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+		return req, false
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+		return req, false
+	}
+
+	if err := req.Validate(); err != nil {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		return req, false
+	}
+
+	return req, true
 }
 
 // parseQueryInt extrae un parámetro entero de la query string, devolviendo el valor por defecto si falla.

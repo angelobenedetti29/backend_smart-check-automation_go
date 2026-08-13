@@ -22,6 +22,28 @@ func NewPostgresDispositivoRepository(db *pgxpool.Pool) *PostgresDispositivoRepo
 	return &PostgresDispositivoRepository{db: db}
 }
 
+// Create inserta un dispositivo nuevo en el catálogo. El UUID lo genera
+// PostgreSQL vía gen_random_uuid(); el método mapea id y created_at de vuelta
+// al struct. Si Ubicacion está vacía se inserta NULL para respetar la columna
+// nullable.
+func (r *PostgresDispositivoRepository) Create(ctx context.Context, d *dispositivo.Dispositivo) error {
+	const query = `
+		INSERT INTO dispositivos (nombre, ubicacion)
+		VALUES ($1, $2)
+		RETURNING id, created_at`
+
+	var ubicacion *string
+	if d.Ubicacion != "" {
+		ubicacion = &d.Ubicacion
+	}
+
+	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion).Scan(&d.ID, &d.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("failed to insert dispositivo: %w", err)
+	}
+	return nil
+}
+
 // InsertMetrica inserta un registro de telemetría en el historial append-only.
 func (r *PostgresDispositivoRepository) InsertMetrica(ctx context.Context, m *dispositivo.MetricaDispositivo) error {
 	const query = `

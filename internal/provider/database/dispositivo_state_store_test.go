@@ -77,6 +77,56 @@ func TestMemoryDispositivoStateStore_Hydrate_KeepsMetricWhenStaleOffline(t *test
 	}
 }
 
+func TestMemoryDispositivoStateStore_Register_AppearsOffline(t *testing.T) {
+	store := NewMemoryDispositivoStateStore()
+
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"})
+
+	estado, ok := store.Get("d1")
+	if !ok {
+		t.Fatal("expected estado for registered device")
+	}
+	if estado.Estado != dispositivo.EstadoOffline {
+		t.Fatalf("expected offline after register, got %q", estado.Estado)
+	}
+	if estado.UltimaMetrica != nil || estado.LastSeen != nil {
+		t.Fatalf("expected no metric/lastSeen after register, got %+v", estado)
+	}
+	if estado.Nombre != "Pi 1" || estado.Ubicacion != "Línea A" {
+		t.Fatalf("expected registered metadata, got %+v", estado)
+	}
+
+	// Aparece en GetAllEstados sin esperar el primer ping.
+	all := store.GetAll()
+	if len(all) != 1 || all[0].DispositivoID != "d1" {
+		t.Fatalf("expected device in GetAll, got %+v", all)
+	}
+}
+
+func TestMemoryDispositivoStateStore_Register_UpdatesWithoutDuplicating(t *testing.T) {
+	store := NewMemoryDispositivoStateStore()
+
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"})
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1 Renombrada", Ubicacion: "Línea B"})
+
+	estado, ok := store.Get("d1")
+	if !ok {
+		t.Fatal("expected estado for registered device")
+	}
+	if estado.Nombre != "Pi 1 Renombrada" || estado.Ubicacion != "Línea B" {
+		t.Fatalf("expected updated metadata, got %+v", estado)
+	}
+	if estado.Estado != dispositivo.EstadoOffline {
+		t.Fatalf("expected still offline after re-register, got %q", estado.Estado)
+	}
+
+	// El re-registro no duplica la entrada.
+	all := store.GetAll()
+	if len(all) != 1 {
+		t.Fatalf("expected single entry after re-register, got %d", len(all))
+	}
+}
+
 func TestMemoryDispositivoStateStore_Update_TransitionsToOnline(t *testing.T) {
 	store := NewMemoryDispositivoStateStore()
 	store.Hydrate([]dispositivo.DispositivoConUltimaMetrica{
