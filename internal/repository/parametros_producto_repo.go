@@ -34,6 +34,7 @@ const selectParametrosProductoColumns = `
 	pp.dimension_base_cm, pp.tolerancia_dimension_cm,
 	pp.temp_min, pp.temp_max,
 	pp.velocidad_cinta_min, pp.velocidad_cinta_max,
+	pp.temp_setpoint, pp.velocidad_cinta_setpoint,
 	pp.activo, pp.created_at, pp.updated_at`
 
 // GetAll devuelve todos los sets de parámetros configurados, ordenados por nombre de producto.
@@ -58,6 +59,7 @@ func (r *ParametrosProductoPostgresRepository) GetAll(ctx context.Context) ([]pa
 			&p.DimensionBaseCm, &p.ToleranciaDimensionCm,
 			&p.TempMin, &p.TempMax,
 			&p.VelocidadCintaMin, &p.VelocidadCintaMax,
+			&p.TempSetpoint, &p.VelocidadCintaSetpoint,
 			&p.Activo, &p.CreatedAt, &p.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan parametro_producto: %w", err)
@@ -88,6 +90,7 @@ func (r *ParametrosProductoPostgresRepository) GetByProductoID(ctx context.Conte
 		&p.DimensionBaseCm, &p.ToleranciaDimensionCm,
 		&p.TempMin, &p.TempMax,
 		&p.VelocidadCintaMin, &p.VelocidadCintaMax,
+		&p.TempSetpoint, &p.VelocidadCintaSetpoint,
 		&p.Activo, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {

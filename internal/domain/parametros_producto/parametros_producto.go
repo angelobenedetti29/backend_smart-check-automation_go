@@ -35,20 +35,26 @@ func IsValidationError(err error) bool {
 // ParametroProducto representa los umbrales de control ideales de horneado
 // para una variedad de producto, tal como se persisten en PostgreSQL.
 type ParametroProducto struct {
-	ID                    string    `json:"id"                    db:"id"`
-	ProductoID            string    `json:"productoId"            db:"producto_id"`
-	ProductoNombre        string    `json:"productoNombre"        db:"producto_nombre"`
-	PesoReferenciaKg      float64   `json:"pesoReferenciaKg"      db:"peso_referencia_kg"`
-	ToleranciaPesoPct     float64   `json:"toleranciaPesoPct"     db:"tolerancia_peso_pct"`
-	DimensionBaseCm       float64   `json:"dimensionBaseCm"       db:"dimension_base_cm"`
-	ToleranciaDimensionCm float64   `json:"toleranciaDimensionCm" db:"tolerancia_dimension_cm"`
-	TempMin               float64   `json:"tempMin"               db:"temp_min"`
-	TempMax               float64   `json:"tempMax"               db:"temp_max"`
-	VelocidadCintaMin     float64   `json:"velocidadCintaMin"     db:"velocidad_cinta_min"`
-	VelocidadCintaMax     float64   `json:"velocidadCintaMax"     db:"velocidad_cinta_max"`
-	Activo                bool      `json:"activo"                db:"activo"`
-	CreatedAt             time.Time `json:"createdAt"             db:"created_at"`
-	UpdatedAt             time.Time `json:"updatedAt"             db:"updated_at"`
+	ID                    string  `json:"id"                    db:"id"`
+	ProductoID            string  `json:"productoId"            db:"producto_id"`
+	ProductoNombre        string  `json:"productoNombre"        db:"producto_nombre"`
+	PesoReferenciaKg      float64 `json:"pesoReferenciaKg"      db:"peso_referencia_kg"`
+	ToleranciaPesoPct     float64 `json:"toleranciaPesoPct"     db:"tolerancia_peso_pct"`
+	DimensionBaseCm       float64 `json:"dimensionBaseCm"       db:"dimension_base_cm"`
+	ToleranciaDimensionCm float64 `json:"toleranciaDimensionCm" db:"tolerancia_dimension_cm"`
+	TempMin               float64 `json:"tempMin"               db:"temp_min"`
+	TempMax               float64 `json:"tempMax"               db:"temp_max"`
+	VelocidadCintaMin     float64 `json:"velocidadCintaMin"     db:"velocidad_cinta_min"`
+	VelocidadCintaMax     float64 `json:"velocidadCintaMax"     db:"velocidad_cinta_max"`
+	// TempSetpoint y VelocidadCintaSetpoint son el valor puntual (dentro del
+	// rango min/max) que se despacha al horno en un envío automático de
+	// consigna (ver internal/domain/consigna). Nullable: si no están
+	// cargados, el producto no admite despacho automático todavía.
+	TempSetpoint           *float64  `json:"tempSetpoint,omitempty"           db:"temp_setpoint"`
+	VelocidadCintaSetpoint *float64  `json:"velocidadCintaSetpoint,omitempty" db:"velocidad_cinta_setpoint"`
+	Activo                 bool      `json:"activo"                db:"activo"`
+	CreatedAt              time.Time `json:"createdAt"             db:"created_at"`
+	UpdatedAt              time.Time `json:"updatedAt"             db:"updated_at"`
 }
 
 // ParametroProductoRequest representa el payload JSON entrante para el alta (POST)

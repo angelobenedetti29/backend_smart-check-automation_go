@@ -1,12 +1,16 @@
 package controller
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote"
 	loteProductivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_productivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
@@ -23,14 +27,42 @@ type LoteFetcher interface {
 
 // LoteHandler handles HTTP requests for productive batch operations.
 type LoteHandler struct {
-	repo    lote.Repository
-	broker  *sse.Broker
-	fetcher LoteFetcher
+	repo        lote.Repository
+	broker      *sse.Broker
+	fetcher     LoteFetcher
+	consignaSvc consigna.Service
 }
 
-// NewLoteHandler creates a new LoteHandler with the given repository, SSE broker, and fetcher.
-func NewLoteHandler(repo lote.Repository, broker *sse.Broker, fetcher LoteFetcher) *LoteHandler {
-	return &LoteHandler{repo: repo, broker: broker, fetcher: fetcher}
+// NewLoteHandler creates a new LoteHandler with the given repository, SSE broker,
+// fetcher, and consigna service (usado por el inicio automático de lote, SCA-142).
+func NewLoteHandler(repo lote.Repository, broker *sse.Broker, fetcher LoteFetcher, consignaSvc consigna.Service) *LoteHandler {
+	return &LoteHandler{repo: repo, broker: broker, fetcher: fetcher, consignaSvc: consignaSvc}
+}
+
+// validateAPIKey valida el header X-API-Key con comparación de tiempo constante
+// (a prueba de timing attacks) contra el secreto configurado para escrituras
+// originadas por la Raspberry Pi. Devuelve false y ya escribe la respuesta 401 si es inválida.
+func validateAPIKey(w http.ResponseWriter, r *http.Request) bool {
+	apiKey := r.Header.Get("X-API-Key")
+	secret := os.Getenv("API_KEY_SECRET")
+	if apiKey == "" || subtle.ConstantTimeCompare([]byte(apiKey), []byte(secret)) != 1 {
+		response.Error(w, http.StatusUnauthorized, "API key inválida o ausente", nil)
+		return false
+	}
+	return true
+}
+
+// newCorrelationID genera un UUID v4 usado como identificador de correlación
+// para consignas automáticas disparadas antes de que el lote se persista en
+// lotes_productivos (ver HandleIniciarLote).
+func newCorrelationID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 // HandleCreateLote processes POST /api/v1/lotes.
@@ -50,10 +82,7 @@ func (h *LoteHandler) HandleCreateLote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Validate X-API-Key header using constant-time comparison (timing-attack safe)
-	apiKey := r.Header.Get("X-API-Key")
-	secret := os.Getenv("API_KEY_SECRET")
-	if apiKey == "" || subtle.ConstantTimeCompare([]byte(apiKey), []byte(secret)) != 1 {
-		response.Error(w, http.StatusUnauthorized, "API key inválida o ausente", nil)
+	if !validateAPIKey(w, r) {
 		return
 	}
 
@@ -89,6 +118,88 @@ func (h *LoteHandler) HandleCreateLote(w http.ResponseWriter, r *http.Request) {
 
 	// 10. Respond 201 Created
 	response.JSON(w, http.StatusCreated, true, "Lote creado exitosamente", domainLote, nil)
+}
+
+// InicioLoteRequest es el payload JSON entrante de POST /api/v1/lotes/inicio:
+// el nodo Raspberry Pi lo envía apenas la IA identifica y valida la variedad
+// de producto que ingresa a la línea, antes de que el lote termine.
+type InicioLoteRequest struct {
+	HornoID    string `json:"hornoId"`
+	ProductoID string `json:"productoId"`
+}
+
+// HandleIniciarLote processes POST /api/v1/lotes/inicio (SCA-142).
+// Es el punto de disparo del envío automático de consigna: cuando la IA del
+// nodo de entrada identifica la variedad de producto, este endpoint despacha
+// automáticamente los valores objetivo de temperatura y velocidad al
+// controlador físico del horno, sin intervención del operario. No crea una
+// fila en lotes_productivos (eso ocurre después, vía POST /api/v1/lotes,
+// cuando el lote termina) — sólo genera un ID de correlación para auditoría.
+func (h *LoteHandler) HandleIniciarLote(w http.ResponseWriter, r *http.Request) {
+	// 0. Method check
+	if r.Method != http.MethodPost {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+
+	// 1. Validate Content-Type
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+		return
+	}
+
+	// 2. Validate X-API-Key header (mismo esquema que POST /api/v1/lotes: origen Raspberry Pi)
+	if !validateAPIKey(w, r) {
+		return
+	}
+
+	// 3. Limit body size to prevent memory-exhaustion DoS
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+
+	// 4. Decode JSON body
+	var req InicioLoteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+		return
+	}
+	if req.HornoID == "" || req.ProductoID == "" {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos de inicio de lote inválidos", "hornoId y productoId son requeridos")
+		return
+	}
+
+	// 5. Generar ID de correlación (el lote real todavía no existe en lotes_productivos)
+	loteID, err := newCorrelationID()
+	if err != nil {
+		log.Printf("[ERROR] Error al generar ID de correlación de lote: %v", err)
+		response.Error(w, http.StatusInternalServerError, "Error interno al iniciar el lote", nil)
+		return
+	}
+
+	// 6. Despachar consigna automática al horno
+	rec, err := h.consignaSvc.DispatchAutomatico(r.Context(), req.HornoID, loteID, req.ProductoID)
+	if err != nil {
+		switch {
+		case errors.Is(err, consigna.ErrHornoNoExiste):
+			response.Error(w, http.StatusNotFound, "El horno indicado no existe", nil)
+		case errors.Is(err, consigna.ErrParametrosNoExiste):
+			response.Error(w, http.StatusUnprocessableEntity, "El producto no tiene setpoints de cocción cargados", nil)
+		case errors.Is(err, consigna.ErrHornoEnControlManual):
+			response.Error(w, http.StatusConflict, "El horno está en modo CONTROL_MANUAL: requiere intervención de un operario (envío manual) antes de reanudar el control automático", nil)
+		case errors.Is(err, consigna.ErrDispatchFallido):
+			log.Printf("[AUDIT] Consigna automática rechazada por el controlador físico: horno=%s lote=%s producto=%s", req.HornoID, loteID, req.ProductoID)
+			response.JSON(w, http.StatusBadGateway, false, "El controlador físico del horno rechazó la consigna", rec, nil)
+		default:
+			log.Printf("[ERROR] Error al despachar consigna automática: %v", err)
+			response.Error(w, http.StatusInternalServerError, "Error al despachar la consigna al horno", nil)
+		}
+		return
+	}
+
+	// 7. Respond 200 OK con el resultado del despacho
+	response.JSON(w, http.StatusOK, true, "Lote iniciado: consigna despachada al horno", map[string]interface{}{
+		"loteId":   loteID,
+		"consigna": rec,
+	}, nil)
 }
 
 // broadcastCreation fetches the full lot info and broadcasts it via SSE.
