@@ -135,19 +135,56 @@ type CreateDispositivoRequest struct {
 // Retorna un *ValidationError con el listado completo de campos inválidos,
 // o nil si el request es válido.
 func (req CreateDispositivoRequest) Validate() error {
+	errs := validateNombreUbicacion(req.Nombre, req.Ubicacion)
+
+	if len(errs) > 0 {
+		return &ValidationError{Fields: errs}
+	}
+	return nil
+}
+
+// validateNombreUbicacion valida las reglas de negocio de nombre y ubicación
+// compartidas entre el alta (CreateDispositivoRequest) y la modificación
+// (UpdateDispositivoRequest). Retorna el listado de campos inválidos.
+func validateNombreUbicacion(nombre, ubicacion string) []string {
 	var errs []string
 
 	// Campo obligatorio: nombre
-	if strings.TrimSpace(req.Nombre) == "" {
+	if strings.TrimSpace(nombre) == "" {
 		errs = append(errs, "nombre: es requerido")
-	} else if len([]rune(strings.TrimSpace(req.Nombre))) > maxNombreLength {
+	} else if len([]rune(strings.TrimSpace(nombre))) > maxNombreLength {
 		errs = append(errs, fmt.Sprintf("nombre: no puede superar los %d caracteres", maxNombreLength))
 	}
 
 	// Ubicación opcional, con límite de largo coherente con VARCHAR(100)
-	if len([]rune(strings.TrimSpace(req.Ubicacion))) > maxUbicacionLength {
+	if len([]rune(strings.TrimSpace(ubicacion))) > maxUbicacionLength {
 		errs = append(errs, fmt.Sprintf("ubicacion: no puede superar los %d caracteres", maxUbicacionLength))
 	}
+
+	return errs
+}
+
+// UpdateDispositivoRequest representa el payload JSON entrante para la
+// modificación (PUT) de un dispositivo existente desde el panel del operador.
+type UpdateDispositivoRequest struct {
+	DispositivoID string `json:"dispositivoId"`
+	Nombre        string `json:"nombre"`
+	Ubicacion     string `json:"ubicacion"`
+}
+
+// Validate verifica las reglas de negocio del UpdateDispositivoRequest: exige un
+// dispositivoId presente y aplica las mismas reglas de nombre/ubicación que el
+// alta. Retorna un *ValidationError con el listado completo de campos inválidos,
+// o nil si el request es válido.
+func (req UpdateDispositivoRequest) Validate() error {
+	var errs []string
+
+	// Campo obligatorio: dispositivo_id
+	if strings.TrimSpace(req.DispositivoID) == "" {
+		errs = append(errs, "dispositivoId: es requerido")
+	}
+
+	errs = append(errs, validateNombreUbicacion(req.Nombre, req.Ubicacion)...)
 
 	if len(errs) > 0 {
 		return &ValidationError{Fields: errs}
@@ -159,6 +196,8 @@ func (req CreateDispositivoRequest) Validate() error {
 // Las implementaciones viven en la capa de infraestructura (internal/repository).
 type Repository interface {
 	Create(ctx context.Context, d *Dispositivo) error
+	Update(ctx context.Context, d *Dispositivo) error
+	Delete(ctx context.Context, id string) error
 	InsertMetrica(ctx context.Context, m *MetricaDispositivo) error
 	GetDispositivosConUltimaMetrica(ctx context.Context) ([]DispositivoConUltimaMetrica, error)
 	GetDispositivoByID(ctx context.Context, id string) (*Dispositivo, error)
@@ -168,6 +207,8 @@ type Repository interface {
 // StateStore define el contrato del caché en memoria del estado actual de los dispositivos.
 type StateStore interface {
 	Register(d Dispositivo)
+	UpdateDispositivo(d Dispositivo)
+	Remove(dispositivoID string)
 	Hydrate(items []DispositivoConUltimaMetrica, umbral time.Duration, now time.Time)
 	Update(d Dispositivo, m MetricaDispositivo) (prevState, currState string, estado *EstadoDispositivo)
 	Get(dispositivoID string) (*EstadoDispositivo, bool)
@@ -178,6 +219,8 @@ type StateStore interface {
 // Service define las operaciones de negocio para dispositivos.
 type Service interface {
 	Create(ctx context.Context, req CreateDispositivoRequest) (*EstadoDispositivo, error)
+	Update(ctx context.Context, req UpdateDispositivoRequest) (*EstadoDispositivo, error)
+	Delete(ctx context.Context, id string) error
 	ProcessPing(ctx context.Context, req PingRequest) (*EstadoDispositivo, error)
 	GetAllEstados() []EstadoDispositivo
 	GetMetricas(ctx context.Context, dispositivoID string, page, pageSize int) (*PaginatedResult, error)

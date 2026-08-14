@@ -62,6 +62,48 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 	return estado, nil
 }
 
+// Update modifica nombre y ubicación de un dispositivo existente: persiste en el
+// catálogo (PostgreSQL), actualiza el caché de estado preservando salud/métrica/
+// last_seen, y emite el evento SSE dispositivo.state para que el frontend en vivo
+// vea el nombre/ubicación nuevos. Propaga ErrDispositivoNotFound si no existe.
+func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	d := dispositivo.Dispositivo{
+		ID:        strings.TrimSpace(req.DispositivoID),
+		Nombre:    strings.TrimSpace(req.Nombre),
+		Ubicacion: strings.TrimSpace(req.Ubicacion),
+	}
+
+	if err := s.repo.Update(ctx, &d); err != nil {
+		return nil, err
+	}
+
+	s.store.UpdateDispositivo(d)
+
+	estado, ok := s.store.Get(d.ID)
+	if !ok {
+		estado = &dispositivo.EstadoDispositivo{
+			DispositivoID: d.ID,
+			Nombre:        d.Nombre,
+			Ubicacion:     d.Ubicacion,
+			Estado:        dispositivo.EstadoOffline,
+		}
+	}
+	s.broadcastState(*estado)
+
+	return estado, nil
+}
+
+// Delete elimina un dispositivo del catálogo y de la caché de estado. Sin evento
+// SSE. Propaga ErrDispositivoNotFound si el dispositivo no existe.
+func (s *DispositivoService) Delete(ctx context.Context, id string) error {
+	if err := s.repo.Delete(ctx, id); err != nil {
+		return err
+	}
+
+	s.store.Remove(id)
+	return nil
+}
+
 // ProcessPing procesa un heartbeat recibido de un dispositivo: valida su
 // existencia en el catálogo, persiste la métrica en el historial (fire-and-forget),
 // actualiza el estado actual a online y emite los eventos SSE correspondientes.

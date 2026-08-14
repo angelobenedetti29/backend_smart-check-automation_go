@@ -27,19 +27,24 @@ func NewDispositivoHandler(svc dispositivo.Service) *DispositivoHandler {
 	return &DispositivoHandler{service: svc}
 }
 
-// Handle despacha GET /api/v1/dispositivos (listar estados) y POST (alta de
-// dispositivo) sobre la misma ruta según el método HTTP.
+// Handle despacha GET /api/v1/dispositivos (listar estados), POST (alta), PUT
+// (modificar) y DELETE (eliminar) sobre la misma ruta según el método HTTP.
 //
-// NOTA: el alta todavía no requiere autenticación de usuario porque el login con
-// Google OAuth 2.0 está pendiente (ver CLAUDE.md). Cuando se implemente, el POST
-// debe quedar restringido a usuarios con rol Operador/Supervisor. No se reusa
-// X-API-Key: esa clave es para las Raspberry Pi, no para el panel del operador.
+// NOTA: el alta y la modificación todavía no requieren autenticación de usuario
+// porque el login con Google OAuth 2.0 está pendiente (ver CLAUDE.md). Cuando se
+// implemente, POST/PUT/DELETE deben quedar restringidos a usuarios con rol
+// Operador/Supervisor. No se reusa X-API-Key: esa clave es para las Raspberry Pi,
+// no para el panel del operador.
 func (h *DispositivoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		h.HandleEstados(w, r)
 	case http.MethodPost:
 		h.HandleCreate(w, r)
+	case http.MethodPut:
+		h.HandleUpdate(w, r)
+	case http.MethodDelete:
+		h.HandleDelete(w, r)
 	default:
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
 	}
@@ -63,11 +68,84 @@ func (h *DispositivoHandler) HandleCreate(w http.ResponseWriter, r *http.Request
 	response.JSON(w, http.StatusCreated, true, "Dispositivo creado exitosamente", estado, nil)
 }
 
+// HandleUpdate maneja PUT /api/v1/dispositivos — modifica nombre/ubicación de un
+// dispositivo existente, identificado por dispositivoId en el body.
+func (h *DispositivoHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
+	req, ok := h.decodeAndValidateUpdate(w, r)
+	if !ok {
+		return
+	}
+
+	estado, err := h.service.Update(r.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, dispositivo.ErrDispositivoNotFound):
+			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+		case dispositivo.IsValidationError(err):
+			response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		default:
+			log.Printf("[ERROR] Error al actualizar dispositivo: %v", err)
+			response.Error(w, http.StatusInternalServerError, "Error al actualizar el dispositivo", nil)
+		}
+		return
+	}
+
+	response.JSON(w, http.StatusOK, true, "Dispositivo actualizado exitosamente", estado, nil)
+}
+
+// HandleDelete maneja DELETE /api/v1/dispositivos?dispositivoId=... — elimina un
+// dispositivo del catálogo y de la caché de estado.
+func (h *DispositivoHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	dispositivoID := r.URL.Query().Get("dispositivoId")
+	if strings.TrimSpace(dispositivoID) == "" {
+		response.Error(w, http.StatusBadRequest, "El parámetro dispositivoId es requerido", nil)
+		return
+	}
+
+	if err := h.service.Delete(r.Context(), dispositivoID); err != nil {
+		if errors.Is(err, dispositivo.ErrDispositivoNotFound) {
+			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+			return
+		}
+		log.Printf("[ERROR] Error al eliminar dispositivo: %v", err)
+		response.Error(w, http.StatusInternalServerError, "Error al eliminar el dispositivo", nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, true, "Dispositivo eliminado exitosamente", nil, nil)
+}
+
 // decodeAndValidate valida Content-Type, límite de tamaño, formato JSON y reglas
 // de negocio del body del alta. Escribe la respuesta de error correspondiente y
 // devuelve ok=false si algún paso falla.
 func (h *DispositivoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Request) (dispositivo.CreateDispositivoRequest, bool) {
 	var req dispositivo.CreateDispositivoRequest
+
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+		return req, false
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+		return req, false
+	}
+
+	if err := req.Validate(); err != nil {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		return req, false
+	}
+
+	return req, true
+}
+
+// decodeAndValidateUpdate valida Content-Type, límite de tamaño, formato JSON y
+// reglas de negocio del body de la modificación (PUT). Escribe la respuesta de
+// error correspondiente y devuelve ok=false si algún paso falla.
+func (h *DispositivoHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *http.Request) (dispositivo.UpdateDispositivoRequest, bool) {
+	var req dispositivo.UpdateDispositivoRequest
 
 	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
 		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)

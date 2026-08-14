@@ -44,6 +44,46 @@ func (r *PostgresDispositivoRepository) Create(ctx context.Context, d *dispositi
 	return nil
 }
 
+// Update modifica nombre y ubicación de un dispositivo existente. El método
+// mapea id y created_at de vuelta al struct vía RETURNING. Si Ubicacion está
+// vacía se guarda NULL para respetar la columna nullable. Devuelve
+// dispositivo.ErrDispositivoNotFound si el dispositivo no existe.
+func (r *PostgresDispositivoRepository) Update(ctx context.Context, d *dispositivo.Dispositivo) error {
+	const query = `
+		UPDATE dispositivos
+		SET nombre = $1, ubicacion = $2
+		WHERE id = $3
+		RETURNING id, created_at`
+
+	var ubicacion *string
+	if d.Ubicacion != "" {
+		ubicacion = &d.Ubicacion
+	}
+
+	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion, d.ID).Scan(&d.ID, &d.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return dispositivo.ErrDispositivoNotFound
+		}
+		return fmt.Errorf("failed to update dispositivo: %w", err)
+	}
+	return nil
+}
+
+// Delete elimina un dispositivo del catálogo. Las métricas asociadas se borran
+// por ON DELETE CASCADE de metricas_dispositivo. Devuelve
+// dispositivo.ErrDispositivoNotFound si el dispositivo no existe.
+func (r *PostgresDispositivoRepository) Delete(ctx context.Context, id string) error {
+	cmd, err := r.db.Exec(ctx, `DELETE FROM dispositivos WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete dispositivo: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return dispositivo.ErrDispositivoNotFound
+	}
+	return nil
+}
+
 // InsertMetrica inserta un registro de telemetría en el historial append-only.
 func (r *PostgresDispositivoRepository) InsertMetrica(ctx context.Context, m *dispositivo.MetricaDispositivo) error {
 	const query = `

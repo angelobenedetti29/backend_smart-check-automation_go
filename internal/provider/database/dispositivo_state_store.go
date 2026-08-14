@@ -44,6 +44,27 @@ func (s *MemoryDispositivoStateStore) Register(d dispositivo.Dispositivo) {
 	}
 }
 
+// UpdateDispositivo actualiza nombre y ubicación de un dispositivo en el caché
+// de estado, preservando su estado de salud, última métrica y last_seen. Si el
+// dispositivo no está registrado, no hace nada.
+func (s *MemoryDispositivoStateStore) UpdateDispositivo(d dispositivo.Dispositivo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if cur, ok := s.data[d.ID]; ok {
+		cur.Nombre = d.Nombre
+		cur.Ubicacion = d.Ubicacion
+	}
+}
+
+// Remove elimina del caché el estado de un dispositivo dado su ID.
+func (s *MemoryDispositivoStateStore) Remove(dispositivoID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.data, dispositivoID)
+}
+
 // Hydrate precarga el catálogo de dispositivos junto con su última métrica
 // registrada. El estado se calcula según la antigüedad de last_seen: si existe
 // una métrica más reciente que el umbral, el dispositivo queda online; de lo
