@@ -16,6 +16,22 @@ type fakeDispositivoRepo struct {
 	mu           sync.Mutex
 	dispositivos map[string]dispositivo.Dispositivo
 	inserted     []dispositivo.MetricaDispositivo
+	createErr    error
+}
+
+func (f *fakeDispositivoRepo) Create(ctx context.Context, d *dispositivo.Dispositivo) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.createErr != nil {
+		return f.createErr
+	}
+
+	// Simula la generación de UUID por PostgreSQL y el created_at de la DB.
+	d.ID = "d-nuevo"
+	d.CreatedAt = time.Now().UTC()
+	f.dispositivos[d.ID] = *d
+	return nil
 }
 
 func (f *fakeDispositivoRepo) InsertMetrica(ctx context.Context, m *dispositivo.MetricaDispositivo) error {
@@ -191,6 +207,80 @@ func TestProcessPing_InsertsMetricaHistory(t *testing.T) {
 	inserted := repo.insertedAt(0)
 	if inserted.CpuPct != 30 || inserted.DispositivoID != "d1" {
 		t.Fatalf("unexpected inserted metric: %+v", inserted)
+	}
+}
+
+func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
+	store := database.NewMemoryDispositivoStateStore()
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	svc := NewDispositivoService(repo, store, broker)
+
+	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
+		Nombre:    "  Raspberry Pi Horno 2  ",
+		Ubicacion: "  Línea B  ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Devuelve el estado recién registrado: offline, sin métrica ni last_seen.
+	if estado.Estado != dispositivo.EstadoOffline {
+		t.Fatalf("expected offline, got %q", estado.Estado)
+	}
+	if estado.Nombre != "Raspberry Pi Horno 2" || estado.Ubicacion != "Línea B" {
+		t.Fatalf("expected trimmed metadata, got %+v", estado)
+	}
+	if estado.UltimaMetrica != nil || estado.LastSeen != nil {
+		t.Fatalf("expected no metric/lastSeen for new device, got %+v", estado)
+	}
+
+	// Persistió en el repositorio.
+	persisted, err := repo.GetDispositivoByID(context.Background(), estado.DispositivoID)
+	if err != nil {
+		t.Fatalf("expected device persisted, got %v", err)
+	}
+	if persisted.Nombre != "Raspberry Pi Horno 2" || persisted.Ubicacion != "Línea B" {
+		t.Fatalf("unexpected persisted device: %+v", persisted)
+	}
+
+	// Quedó registrado en el store: aparece de inmediato en GetAllEstados.
+	estados := svc.GetAllEstados()
+	if len(estados) != 1 || estados[0].DispositivoID != estado.DispositivoID {
+		t.Fatalf("expected device in GetAllEstados, got %+v", estados)
+	}
+
+	// Emite el evento SSE dispositivo.state.
+	types := drainEvents(client, 500*time.Millisecond)
+	if !containsAll(types, "dispositivo.state") {
+		t.Fatalf("expected dispositivo.state event, got %v", types)
+	}
+}
+
+func TestCreate_PropagatesRepoError(t *testing.T) {
+	repo := &fakeDispositivoRepo{
+		dispositivos: map[string]dispositivo.Dispositivo{},
+		createErr:    errors.New("db caída"),
+	}
+	store := database.NewMemoryDispositivoStateStore()
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker)
+
+	_, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{Nombre: "Pi X"})
+	if err == nil {
+		t.Fatal("expected error propagated from repo")
+	}
+	if err.Error() != "db caída" {
+		t.Fatalf("expected original repo error, got %v", err)
+	}
+
+	// Sin persistencia exitosa no debe registrarse nada en el store.
+	if len(svc.GetAllEstados()) != 0 {
+		t.Fatalf("expected no states registered after failed create, got %+v", svc.GetAllEstados())
 	}
 }
 

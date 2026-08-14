@@ -14,7 +14,14 @@ const (
 	EstadoOffline = "offline"
 )
 
-// ValidationError agrupa todos los errores de validación de un PingRequest.
+// Límites de largo de los campos de un dispositivo, coherentes con los
+// VARCHAR(100) de la tabla dispositivos (database/schema.sql).
+const (
+	maxNombreLength    = 100
+	maxUbicacionLength = 100
+)
+
+// ValidationError agrupa todos los errores de validación de un request entrante.
 type ValidationError struct {
 	Fields []string
 }
@@ -116,9 +123,42 @@ func (req PingRequest) Validate() error {
 	return nil
 }
 
+// CreateDispositivoRequest representa el payload JSON entrante para el alta
+// (POST) de un dispositivo Raspberry Pi desde el panel del operador.
+type CreateDispositivoRequest struct {
+	Nombre    string `json:"nombre"`
+	Ubicacion string `json:"ubicacion"`
+}
+
+// Validate verifica las reglas de negocio del CreateDispositivoRequest,
+// replicando en el servidor los constraints de la tabla dispositivos.
+// Retorna un *ValidationError con el listado completo de campos inválidos,
+// o nil si el request es válido.
+func (req CreateDispositivoRequest) Validate() error {
+	var errs []string
+
+	// Campo obligatorio: nombre
+	if strings.TrimSpace(req.Nombre) == "" {
+		errs = append(errs, "nombre: es requerido")
+	} else if len([]rune(strings.TrimSpace(req.Nombre))) > maxNombreLength {
+		errs = append(errs, fmt.Sprintf("nombre: no puede superar los %d caracteres", maxNombreLength))
+	}
+
+	// Ubicación opcional, con límite de largo coherente con VARCHAR(100)
+	if len([]rune(strings.TrimSpace(req.Ubicacion))) > maxUbicacionLength {
+		errs = append(errs, fmt.Sprintf("ubicacion: no puede superar los %d caracteres", maxUbicacionLength))
+	}
+
+	if len(errs) > 0 {
+		return &ValidationError{Fields: errs}
+	}
+	return nil
+}
+
 // Repository define el contrato de persistencia de dispositivos y métricas.
 // Las implementaciones viven en la capa de infraestructura (internal/repository).
 type Repository interface {
+	Create(ctx context.Context, d *Dispositivo) error
 	InsertMetrica(ctx context.Context, m *MetricaDispositivo) error
 	GetDispositivosConUltimaMetrica(ctx context.Context) ([]DispositivoConUltimaMetrica, error)
 	GetDispositivoByID(ctx context.Context, id string) (*Dispositivo, error)
@@ -127,6 +167,7 @@ type Repository interface {
 
 // StateStore define el contrato del caché en memoria del estado actual de los dispositivos.
 type StateStore interface {
+	Register(d Dispositivo)
 	Hydrate(items []DispositivoConUltimaMetrica, umbral time.Duration, now time.Time)
 	Update(d Dispositivo, m MetricaDispositivo) (prevState, currState string, estado *EstadoDispositivo)
 	Get(dispositivoID string) (*EstadoDispositivo, bool)
@@ -136,6 +177,7 @@ type StateStore interface {
 
 // Service define las operaciones de negocio para dispositivos.
 type Service interface {
+	Create(ctx context.Context, req CreateDispositivoRequest) (*EstadoDispositivo, error)
 	ProcessPing(ctx context.Context, req PingRequest) (*EstadoDispositivo, error)
 	GetAllEstados() []EstadoDispositivo
 	GetMetricas(ctx context.Context, dispositivoID string, page, pageSize int) (*PaginatedResult, error)

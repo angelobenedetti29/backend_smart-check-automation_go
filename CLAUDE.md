@@ -61,6 +61,7 @@ test_backend_go/
 ├── cmd/server/main.go                          # Entry point, wiring de dependencias
 ├── internal/
 │   ├── controller/
+│   │   ├── dispositivo/                        # Handler GET|POST /api/v1/dispositivos (estados + alta), POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos/metricas
 │   │   ├── consigna/                           # Handler POST /api/v1/horno/consigna, GET /api/v1/horno/consigna/historial (SCA-320)
 │   │   ├── dispositivo/                        # Handler POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
 │   │   ├── horno/                              # Handler GET /api/v1/horno, POST /api/v1/horno/temperatura
@@ -87,6 +88,9 @@ test_backend_go/
 │   │   ├── postgres_repo.go                    # Repo real PostgreSQL — CREATE lote
 │   │   ├── lote_productivo_repo.go             # Repo real PostgreSQL — GET lotes (JOIN con productos)
 │   │   ├── parametros_producto_repo.go         # Repo real PostgreSQL — GET/CREATE/UPDATE parametros_producto (JOIN con productos)
+│   │   └── dispositivo_repo.go                 # Repo real PostgreSQL — CREATE dispositivos, INSERT metricas, GET catálogo de dispositivos, historial paginado
+│   └── service/
+│       ├── dispositivo/                        # Alta de dispositivos, lógica de ping, estado online/offline, reaper, emisión SSE
 │   │   ├── dispositivo_repo.go                 # Repo real PostgreSQL — INSERT metricas, GET catálogo de dispositivos, historial paginado
 │   │   └── consigna_repo.go                    # Repo real PostgreSQL — INSERT/GET historial_consignas (auditoría)
 │   └── service/
@@ -228,6 +232,7 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 - **Eventos SSE de dispositivos**: `dispositivo.metric` se emite en cada ping (cada ~10s) con la última métrica; `dispositivo.state` se emite solo ante una transición online↔offline (detectada en el ping para offline→online y en el reaper para online→offline).
 - **`GET /api/v1/lotes-productivos` acepta `productoId` opcional como filtro**: sin el parámetro lista todos los lotes (comportamiento original); con `productoId` devuelve solo las corridas (lotes) de ese producto, ordenadas por `inicio_at` DESC y paginadas (mismo patrón que `/api/v1/dispositivos/metricas`). Si el `productoId` no existe en `productos` devuelve 404; si el producto existe pero no tiene lotes, devuelve 200 con `data: []`. Cada lote ya trae los valores reales usados en esa corrida (`temp_horno_1/2`, `temp_comb_horno_1/2`, `velocidad_cinta`) — el historial de corridas por producto sale de `lotes_productivos`, no de las recomendaciones (`parametros_producto`, que no se versiona).
 - **`POST /api/v1/dispositivos/ping` autenticado con `X-API-Key`**: reusa el `API_KEY_SECRET` compartido (mismo patrón que `/api/v1/lotes`). Los GET de consulta quedan abiertos porque el login de usuarios (Google OAuth) todavía no existe.
+- **Alta de dispositivos sin autenticación (por ahora)**: `POST /api/v1/dispositivos` queda abierto (precedente de `parametros_producto`), porque el login de usuarios (Google OAuth) todavía no existe; no se reusa `X-API-Key` (pensada para las Raspberry Pi, no para el panel del operador). Hay un TODO en el handler para restringirlo por rol Operador/Supervisor cuando OAuth esté implementado. Además, el dispositivo nuevo se registra en el state store como `offline` al momento del alta (sin métrica ni `last_seen`), así aparece de inmediato en `GET /api/v1/dispositivos` sin esperar el primer ping.
 - **Mecanismo de consigna compartido entre SCA-142 (automático) y SCA-320 (manual)**: `internal/service/consigna` centraliza en un único método `dispatch()` la resolución de la consigna, el despacho al controlador físico simulado (`internal/provider/oven_controller`, análogo a `yolo_client`), la actualización del estado activo de `horno.Horno` y el registro de auditoría en `historial_consignas` — tanto si el despacho fue exitoso como si falló. `DispatchAutomatico` y `DispatchManual` son las dos puertas de entrada; ambas terminan en el mismo `dispatch()`.
 - **El setpoint automático es un valor puntual explícito, no el punto medio del rango**: `parametros_producto.temp_setpoint`/`velocidad_cinta_setpoint` (nullable) son los valores que se despachan en un envío automático. Si no están cargados para un producto, `DispatchAutomatico` devuelve `ErrParametrosNoExiste` — no se infiere un valor. El envío manual (SCA-320), en cambio, valida los valores que ingresa el operario contra el rango `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]`, no contra el setpoint puntual.
 - **`POST /api/v1/lotes/inicio` es el trigger de SCA-142, distinto de `POST /api/v1/lotes`**: `POST /api/v1/lotes` sigue siendo un resumen posterior al hecho (llega con `inicioAt` y `finAt` ya completos). `POST /api/v1/lotes/inicio` es lo que la Raspberry Pi llama apenas la IA identifica el producto, **antes** de que el lote termine; no inserta fila en `lotes_productivos` — solo genera un UUID de correlación (`crypto/rand`, sin dependencia externa) que se guarda en `historial_consignas.lote_id` sin FK, porque el lote real todavía no existe en ese momento. Usa el mismo esquema `X-API-Key` que `POST /api/v1/lotes` (helper `validateAPIKey` extraído para no duplicar el chequeo).
@@ -254,6 +259,7 @@ El nombre se obtiene via JOIN con `productos` en el GET. Usar ese UUID en los PO
 | PUT | /api/v1/parametros-producto | — | ✅ implementado (PostgreSQL real) — modificación por `productoId` en el body, 404 si no existe |
 | POST | /api/v1/dispositivos/ping | X-API-Key | ✅ implementado (PostgreSQL real + caché en memoria) — recibe CPU/RAM/temp cada ~10s, actualiza estado online/offline y emite SSE |
 | GET | /api/v1/dispositivos | — | ✅ implementado (caché en memoria) — estado actual online/offline de todos los dispositivos |
+| POST | /api/v1/dispositivos | — | ✅ implementado (PostgreSQL real + caché en memoria) — alta de dispositivo por nombre/ubicación, 201, se registra de inmediato como offline |
 | GET | /api/v1/dispositivos/metricas | — | ✅ implementado (PostgreSQL real) — historial paginado por `dispositivoId` (query param) |
 | GET | /api/v1/dispositivos/events | — | ✅ implementado — SSE de telemetría: `dispositivo.metric` (cada ping) y `dispositivo.state` (transiciones) |
 | POST | /api/v1/horno/consigna | — | ✅ implementado (SCA-320) — envío manual de consigna: valida rango seguro del producto, 422 si el producto no tiene parámetros o si los valores están fuera de rango, 404 si el horno no existe, 502 si el controlador físico rechaza la consigna |

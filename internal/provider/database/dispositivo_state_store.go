@@ -23,6 +23,27 @@ func NewMemoryDispositivoStateStore() *MemoryDispositivoStateStore {
 	}
 }
 
+// Register da de alta un dispositivo nuevo en el caché de estado con
+// Estado=offline y sin métrica/last_seen, para que aparezca en GetAllEstados sin
+// esperar el primer ping. Si el dispositivo ya existía, actualiza nombre/ubicación.
+func (s *MemoryDispositivoStateStore) Register(d dispositivo.Dispositivo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if cur, ok := s.data[d.ID]; ok {
+		cur.Nombre = d.Nombre
+		cur.Ubicacion = d.Ubicacion
+		return
+	}
+
+	s.data[d.ID] = &dispositivo.EstadoDispositivo{
+		DispositivoID: d.ID,
+		Nombre:        d.Nombre,
+		Ubicacion:     d.Ubicacion,
+		Estado:        dispositivo.EstadoOffline,
+	}
+}
+
 // Hydrate precarga el catálogo de dispositivos junto con su última métrica
 // registrada. El estado se calcula según la antigüedad de last_seen: si existe
 // una métrica más reciente que el umbral, el dispositivo queda online; de lo

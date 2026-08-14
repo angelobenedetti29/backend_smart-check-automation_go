@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"time"
 
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
@@ -30,6 +31,35 @@ type DispositivoService struct {
 // NewDispositivoService instancia el servicio inyectando repositorio, state store y broker SSE.
 func NewDispositivoService(repo dispositivo.Repository, store dispositivo.StateStore, broker *sse.Broker) *DispositivoService {
 	return &DispositivoService{repo: repo, store: store, broker: broker}
+}
+
+// Create da de alta un dispositivo nuevo: persiste en el catálogo (PostgreSQL),
+// lo registra en el caché de estado como offline para que aparezca de inmediato
+// en GET /api/v1/dispositivos, y emite el evento SSE dispositivo.state.
+func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	d := dispositivo.Dispositivo{
+		Nombre:    strings.TrimSpace(req.Nombre),
+		Ubicacion: strings.TrimSpace(req.Ubicacion),
+	}
+
+	if err := s.repo.Create(ctx, &d); err != nil {
+		return nil, err
+	}
+
+	s.store.Register(d)
+
+	estado, ok := s.store.Get(d.ID)
+	if !ok {
+		estado = &dispositivo.EstadoDispositivo{
+			DispositivoID: d.ID,
+			Nombre:        d.Nombre,
+			Ubicacion:     d.Ubicacion,
+			Estado:        dispositivo.EstadoOffline,
+		}
+	}
+	s.broadcastState(*estado)
+
+	return estado, nil
 }
 
 // ProcessPing procesa un heartbeat recibido de un dispositivo: valida su

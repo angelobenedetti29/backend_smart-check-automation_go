@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,11 +15,13 @@ import (
 )
 
 type fakeDispositivoService struct {
-	pingResp *dispositivo.EstadoDispositivo
-	pingErr  error
-	estados  []dispositivo.EstadoDispositivo
-	metricas *dispositivo.PaginatedResult
-	metrErr  error
+	pingResp   *dispositivo.EstadoDispositivo
+	pingErr    error
+	estados    []dispositivo.EstadoDispositivo
+	metricas   *dispositivo.PaginatedResult
+	metrErr    error
+	createResp *dispositivo.EstadoDispositivo
+	createErr  error
 }
 
 func (f *fakeDispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
@@ -31,6 +34,10 @@ func (f *fakeDispositivoService) GetAllEstados() []dispositivo.EstadoDispositivo
 
 func (f *fakeDispositivoService) GetMetricas(ctx context.Context, id string, page, pageSize int) (*dispositivo.PaginatedResult, error) {
 	return f.metricas, f.metrErr
+}
+
+func (f *fakeDispositivoService) Create(ctx context.Context, req dispositivo.CreateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	return f.createResp, f.createErr
 }
 
 const testAPIKey = "test-secret-key"
@@ -215,6 +222,129 @@ func TestHandleEstados_WrongMethod(t *testing.T) {
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestHandleCreate_Success(t *testing.T) {
+	estado := &dispositivo.EstadoDispositivo{
+		DispositivoID: "d-nuevo",
+		Nombre:        "Raspberry Pi Horno 2",
+		Ubicacion:     "Línea B",
+		Estado:        dispositivo.EstadoOffline,
+	}
+	h := NewDispositivoHandler(&fakeDispositivoService{createResp: estado})
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","ubicacion":"Línea B"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rec.Code)
+	}
+
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success=true")
+	}
+
+	data, ok := resp.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object, got %T", resp.Data)
+	}
+	if data["estado"] != dispositivo.EstadoOffline {
+		t.Fatalf("expected estado=offline in response, got %v", data["estado"])
+	}
+	if data["nombre"] != "Raspberry Pi Horno 2" {
+		t.Fatalf("expected nombre in response, got %v", data["nombre"])
+	}
+}
+
+func TestHandleCreate_EmptyNombre(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"nombre":"   ","ubicacion":"Línea B"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", rec.Code)
+	}
+
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("expected success=false")
+	}
+}
+
+func TestHandleCreate_InvalidJSON(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"nombre":`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleCreate_InvalidContentType(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d", rec.Code)
+	}
+}
+
+func TestHandleCreate_InternalError(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{createErr: errors.New("db caída")})
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestHandle_WrongMethod(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/api/v1/dispositivos", nil)
+		rec := httptest.NewRecorder()
+
+		h.Handle(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405 for %s, got %d", method, rec.Code)
+		}
 	}
 }
 

@@ -121,7 +121,7 @@ func main() {
 	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(parametrosProductoHandler.Handle))
 	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(sseHandler.HandleSSE))
 	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(dispositivoHandler.HandlePing))
-	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(dispositivoHandler.HandleEstados))
+	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(dispositivoHandler.Handle))
 	mux.HandleFunc("/api/v1/dispositivos/metricas", loggingMiddleware(dispositivoHandler.HandleMetricas))
 	mux.HandleFunc("/api/v1/dispositivos/events", loggingMiddleware(dispositivoSSEHandler.HandleSSE))
 	mux.HandleFunc("/api/v1/horno/consigna", loggingMiddleware(consignaHandler.DispatchManual))
@@ -183,7 +183,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, POST /api/v1/lotes/inicio, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE), POST /api/v1/dispositivos/ping, GET /api/v1/dispositivos, GET /api/v1/dispositivos/metricas, GET /api/v1/dispositivos/events (SSE), POST /api/v1/horno/consigna, GET /api/v1/horno/consigna/historial, GET /api/v1/horno/events (SSE)\n"))
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, POST /api/v1/lotes/inicio, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE), POST /api/v1/dispositivos/ping, GET|POST /api/v1/dispositivos, GET /api/v1/dispositivos/metricas, GET /api/v1/dispositivos/events (SSE), POST /api/v1/horno/consigna, GET /api/v1/horno/consigna/historial, GET /api/v1/horno/events (SSE)\n"))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
