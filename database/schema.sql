@@ -13,6 +13,8 @@
 --   2. Tabla transaccional: lotes_productivos (depende de productos vía FK)
 --   3. Tabla de configuración: parametros_producto (depende de productos vía FK)
 --   4. Seed de datos de catálogo
+--   5. Tablas de telemetría: dispositivos + metricas_dispositivo
+--   6. Setpoints puntuales en parametros_producto + historial_consignas (SCA-142/SCA-320)
 -- ============================================================================
 
 BEGIN;
@@ -282,6 +284,120 @@ CREATE INDEX IF NOT EXISTS idx_metricas_dispositivo_disp_received
 INSERT INTO dispositivos (id, nombre, ubicacion) VALUES
     ('b1c2d3e4-5678-90ab-cdef-1234567890ab', 'Raspberry Pi Horno 1', 'Línea A')
 ON CONFLICT (id) DO NOTHING;
+
+-- ============================================================================
+-- ALTER: parametros_producto — setpoints puntuales de cocción (SCA-142/SCA-320)
+-- ============================================================================
+-- Las columnas temp_min/max y velocidad_cinta_min/max ya definen el rango
+-- aceptable de control. Estas columnas nuevas guardan el valor PUNTUAL que se
+-- despacha al controlador físico del horno (envío automático o manual), y
+-- deben estar dentro del rango ya definido para el producto.
+ALTER TABLE parametros_producto
+    ADD COLUMN IF NOT EXISTS temp_setpoint             NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS velocidad_cinta_setpoint   NUMERIC(6,2);
+
+-- ADD CONSTRAINT no soporta IF NOT EXISTS en PostgreSQL; se guarda con un
+-- bloque DO para que el script siga siendo seguro de re-ejecutar.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_parametros_temp_setpoint_rango') THEN
+        ALTER TABLE parametros_producto
+            ADD CONSTRAINT chk_parametros_temp_setpoint_rango
+                CHECK (temp_setpoint IS NULL OR temp_setpoint BETWEEN temp_min AND temp_max);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_parametros_velocidad_setpoint_rango') THEN
+        ALTER TABLE parametros_producto
+            ADD CONSTRAINT chk_parametros_velocidad_setpoint_rango
+                CHECK (velocidad_cinta_setpoint IS NULL OR velocidad_cinta_setpoint BETWEEN velocidad_cinta_min AND velocidad_cinta_max);
+    END IF;
+END $$;
+
+COMMENT ON COLUMN parametros_producto.temp_setpoint IS 'Temperatura objetivo puntual a despachar al horno (°C), dentro de [temp_min, temp_max]. Nullable: si no está cargada, no se puede despachar consigna automática para el producto.';
+COMMENT ON COLUMN parametros_producto.velocidad_cinta_setpoint IS 'Velocidad de cinta objetivo puntual a despachar al horno (m/s), dentro de [velocidad_cinta_min, velocidad_cinta_max]. Nullable, misma razón que temp_setpoint.';
+
+-- Seed: setpoints puntuales por defecto para "Tostada Integral", dentro del rango ya cargado (160-180 / 0.10-0.30)
+UPDATE parametros_producto
+SET temp_setpoint = 170.00, velocidad_cinta_setpoint = 0.20
+WHERE producto_id = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+  AND temp_setpoint IS NULL;
+
+-- ============================================================================
+-- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
+-- "Tostada Integral" ya estaba cargada; se agregan las 5 restantes, cada una
+-- con su matriz de parámetros óptimos (rango + setpoint puntual) para que
+-- ConsignaService.DispatchAutomatico pueda resolverlas sin intervención manual.
+-- ============================================================================
+INSERT INTO productos (id, nombre) VALUES
+    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 'Pan Lactal'),
+    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 'Pan Francés'),
+    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 'Pan de Salvado'),
+    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 'Medialunas'),
+    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 'Pan Dulce')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO parametros_producto (
+    producto_id, peso_referencia_kg, tolerancia_peso_pct,
+    dimension_base_cm, tolerancia_dimension_cm,
+    temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
+    temp_setpoint, velocidad_cinta_setpoint
+) VALUES
+    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 0.500, 8.00,  25.00, 1.00, 180.00, 200.00, 0.15, 0.35, 190.00, 0.25),
+    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 0.250, 6.00,  30.00, 1.50, 200.00, 220.00, 0.20, 0.40, 210.00, 0.30),
+    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 0.450, 8.00,  22.00, 1.00, 170.00, 190.00, 0.15, 0.35, 180.00, 0.25),
+    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 0.060, 12.00, 10.00, 0.50, 190.00, 210.00, 0.25, 0.45, 200.00, 0.35),
+    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 0.800, 10.00, 15.00, 1.00, 150.00, 170.00, 0.08, 0.20, 160.00, 0.14)
+ON CONFLICT (producto_id) DO NOTHING;
+
+-- ============================================================================
+-- TABLA 6: historial_consignas (Auditoría de consignas térmicas/velocidad
+-- despachadas al controlador físico del horno — SCA-142 / SCA-320)
+-- ============================================================================
+-- El horno todavía vive en memoria (ver internal/domain/horno), sin tabla
+-- propia en Postgres; por eso horno_id es un identificador libre (no FK) y
+-- lote_id tampoco tiene FK: un despacho automático puede ocurrir antes de que
+-- el lote se persista en lotes_productivos (ver POST /api/v1/lotes/inicio).
+CREATE TABLE IF NOT EXISTS historial_consignas (
+    id                        UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+    horno_id                  VARCHAR(50)     NOT NULL,
+    lote_id                   UUID,
+    producto_id               UUID,
+    temperatura_objetivo      NUMERIC(6,2)    NOT NULL,
+    velocidad_cinta_objetivo  NUMERIC(6,2)    NOT NULL,
+    origen                    VARCHAR(12)     NOT NULL,
+    usuario                   VARCHAR(150),
+    exitosa                   BOOLEAN         NOT NULL,
+    motivo_error              TEXT,
+    temperatura_previa        NUMERIC(6,2),
+    velocidad_cinta_previa    NUMERIC(6,2),
+    creada_en                 TIMESTAMPTZ     NOT NULL DEFAULT now(),
+
+    -- FOREIGN KEY: producto_id sí tiene tabla real, se valida su existencia
+    CONSTRAINT fk_historial_consignas_producto
+        FOREIGN KEY (producto_id)
+        REFERENCES productos (id)
+        ON DELETE SET NULL,
+
+    -- El origen de la consigna es automático (IA + inicio de lote) o manual (operario)
+    CONSTRAINT chk_historial_consignas_origen
+        CHECK (origen IN ('AUTOMATICO', 'MANUAL'))
+);
+
+COMMENT ON TABLE  historial_consignas IS 'Auditoría de toda consigna térmica/velocidad despachada (o intentada) al controlador físico del horno, de origen automático (SCA-142) o manual (SCA-320).';
+COMMENT ON COLUMN historial_consignas.horno_id IS 'Identificador del horno (dominio horno vive en memoria, sin tabla propia; no es FK)';
+COMMENT ON COLUMN historial_consignas.lote_id IS 'Correlación con el lote productivo, sin FK: en el despacho automático el lote puede no estar persistido aún en lotes_productivos';
+COMMENT ON COLUMN historial_consignas.producto_id IS 'FK al producto cuyos parámetros originaron la consigna (nullable: puede no aplicar en consignas manuales sin producto asociado)';
+COMMENT ON COLUMN historial_consignas.origen IS 'AUTOMATICO: disparado por detección de IA al iniciar el lote. MANUAL: cargado por un operario desde el panel';
+COMMENT ON COLUMN historial_consignas.usuario IS 'Identificador best-effort del operario que disparó una consigna manual (aún no hay autenticación real de usuarios — TODO: reemplazar por FK cuando exista Google OAuth)';
+COMMENT ON COLUMN historial_consignas.exitosa IS 'Indica si el controlador físico (simulado) aplicó la consigna con éxito';
+COMMENT ON COLUMN historial_consignas.motivo_error IS 'Motivo del rechazo/fallo cuando exitosa=false';
+COMMENT ON COLUMN historial_consignas.temperatura_previa IS 'Temperatura activa del horno inmediatamente antes de este despacho (para trazabilidad)';
+COMMENT ON COLUMN historial_consignas.velocidad_cinta_previa IS 'Velocidad de cinta activa del horno inmediatamente antes de este despacho (para trazabilidad)';
+
+CREATE INDEX IF NOT EXISTS idx_historial_consignas_lote_id
+    ON historial_consignas (lote_id);
+
+CREATE INDEX IF NOT EXISTS idx_historial_consignas_horno_id
+    ON historial_consignas (horno_id, creada_en DESC);
 
 COMMIT;
  

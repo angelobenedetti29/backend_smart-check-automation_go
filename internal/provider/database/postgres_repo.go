@@ -26,11 +26,12 @@ func NewPostgresRepository() *PostgresRepository {
 
 	// Seed data representing a real industrial kiln (Horno) in factory line
 	repo.hornos["horno-01"] = horno.Horno{
-		ID:          "horno-01",
-		Nombre:      "Horno Rotativo de Clinkerización A-1",
-		Temperatura: 185.3,
-		Estado:      "ACTIVO",
-		UltimoCheck: time.Now(),
+		ID:             "horno-01",
+		Nombre:         "Horno Rotativo de Clinkerización A-1",
+		Temperatura:    185.3,
+		VelocidadCinta: 0.20,
+		Estado:         "ACTIVO",
+		UltimoCheck:    time.Now(),
 	}
 
 	return repo
