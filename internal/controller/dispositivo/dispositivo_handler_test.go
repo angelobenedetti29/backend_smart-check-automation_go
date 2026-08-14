@@ -22,6 +22,9 @@ type fakeDispositivoService struct {
 	metrErr    error
 	createResp *dispositivo.EstadoDispositivo
 	createErr  error
+	updateResp *dispositivo.EstadoDispositivo
+	updateErr  error
+	deleteErr  error
 }
 
 func (f *fakeDispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
@@ -38,6 +41,14 @@ func (f *fakeDispositivoService) GetMetricas(ctx context.Context, id string, pag
 
 func (f *fakeDispositivoService) Create(ctx context.Context, req dispositivo.CreateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
 	return f.createResp, f.createErr
+}
+
+func (f *fakeDispositivoService) Update(ctx context.Context, req dispositivo.UpdateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	return f.updateResp, f.updateErr
+}
+
+func (f *fakeDispositivoService) Delete(ctx context.Context, id string) error {
+	return f.deleteErr
 }
 
 const testAPIKey = "test-secret-key"
@@ -333,18 +344,160 @@ func TestHandleCreate_InternalError(t *testing.T) {
 	}
 }
 
+func TestHandleUpdate_Success(t *testing.T) {
+	estado := &dispositivo.EstadoDispositivo{
+		DispositivoID: "d1",
+		Nombre:        "Pi 1",
+		Ubicacion:     "Línea A",
+		Estado:        dispositivo.EstadoOffline,
+	}
+	h := NewDispositivoHandler(&fakeDispositivoService{updateResp: estado})
+	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"Pi 1","ubicacion":"Línea A"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success=true")
+	}
+
+	data, ok := resp.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object, got %T", resp.Data)
+	}
+	if data["nombre"] != "Pi 1" {
+		t.Fatalf("expected nombre in response, got %v", data["nombre"])
+	}
+}
+
+func TestHandleUpdate_EmptyNombre(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"   ","ubicacion":"Línea A"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", rec.Code)
+	}
+}
+
+func TestHandleUpdate_InvalidJSON(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"dispositivoId":`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleUpdate_InvalidContentType(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"Pi 1"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d", rec.Code)
+	}
+}
+
+func TestHandleUpdate_NotFound(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{updateErr: dispositivo.ErrDispositivoNotFound})
+	body := bytes.NewBufferString(`{"dispositivoId":"missing","nombre":"Pi 1"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestHandleDelete_Success(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/dispositivos?dispositivoId=d1", nil)
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success=true")
+	}
+}
+
+func TestHandleDelete_MissingID(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/dispositivos", nil)
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleDelete_NotFound(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{deleteErr: dispositivo.ErrDispositivoNotFound})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/dispositivos?dispositivoId=missing", nil)
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
 func TestHandle_WrongMethod(t *testing.T) {
 	h := NewDispositivoHandler(&fakeDispositivoService{})
 
-	for _, method := range []string{http.MethodPut, http.MethodDelete} {
-		req := httptest.NewRequest(method, "/api/v1/dispositivos", nil)
-		rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos", nil)
+	rec := httptest.NewRecorder()
 
-		h.Handle(rec, req)
+	h.Handle(rec, req)
 
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("expected 405 for %s, got %d", method, rec.Code)
-		}
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
 	}
 }
 

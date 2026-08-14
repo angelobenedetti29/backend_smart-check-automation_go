@@ -34,6 +34,35 @@ func (f *fakeDispositivoRepo) Create(ctx context.Context, d *dispositivo.Disposi
 	return nil
 }
 
+// Update actualiza nombre/ubicación de un dispositivo existente en el map,
+// devolviendo ErrDispositivoNotFound si el id no existe.
+func (f *fakeDispositivoRepo) Update(ctx context.Context, d *dispositivo.Dispositivo) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	cur, ok := f.dispositivos[d.ID]
+	if !ok {
+		return dispositivo.ErrDispositivoNotFound
+	}
+	cur.Nombre = d.Nombre
+	cur.Ubicacion = d.Ubicacion
+	f.dispositivos[d.ID] = cur
+	return nil
+}
+
+// Delete borra un dispositivo del map, devolviendo ErrDispositivoNotFound si el
+// id no existe.
+func (f *fakeDispositivoRepo) Delete(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if _, ok := f.dispositivos[id]; !ok {
+		return dispositivo.ErrDispositivoNotFound
+	}
+	delete(f.dispositivos, id)
+	return nil
+}
+
 func (f *fakeDispositivoRepo) InsertMetrica(ctx context.Context, m *dispositivo.MetricaDispositivo) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -389,4 +418,106 @@ func containsAll(types []string, wanted ...string) bool {
 		}
 	}
 	return true
+}
+
+func TestUpdate_ActualizaCacheYEmiteSSE(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	// Registra d1 como online con métrica para verificar que se preserva.
+	store.Update(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"}, dispositivo.MetricaDispositivo{
+		DispositivoID: "d1", CpuPct: 10, MemRamDisponibleMb: 500, TempChip: 50, ReceivedAt: time.Now().UTC(),
+	})
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	svc := NewDispositivoService(repo, store, broker)
+
+	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
+		DispositivoID: "d1",
+		Nombre:        "  Pi 1 Renombrado  ",
+		Ubicacion:     "  Línea B  ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.Nombre != "Pi 1 Renombrado" || estado.Ubicacion != "Línea B" {
+		t.Fatalf("expected trimmed updated metadata, got %+v", estado)
+	}
+	// El update preserva estado de salud y última métrica del caché.
+	if estado.Estado != dispositivo.EstadoOnline {
+		t.Fatalf("expected preserved online state, got %q", estado.Estado)
+	}
+	if estado.UltimaMetrica == nil {
+		t.Fatal("expected preserved ultima metrica after update")
+	}
+
+	// El caché devuelve el nombre/ubicación nuevos.
+	cached, ok := store.Get("d1")
+	if !ok {
+		t.Fatal("expected device in store")
+	}
+	if cached.Nombre != "Pi 1 Renombrado" || cached.Ubicacion != "Línea B" {
+		t.Fatalf("expected updated cache, got %+v", cached)
+	}
+
+	// Emite el evento SSE dispositivo.state.
+	types := drainEvents(client, 500*time.Millisecond)
+	if !containsAll(types, "dispositivo.state") {
+		t.Fatalf("expected dispositivo.state event, got %v", types)
+	}
+}
+
+func TestUpdate_NotFound(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
+	store := database.NewMemoryDispositivoStateStore()
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker)
+
+	_, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
+		DispositivoID: "missing",
+		Nombre:        "Pi X",
+	})
+	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
+		t.Fatalf("expected ErrDispositivoNotFound, got %v", err)
+	}
+}
+
+func TestDelete_RemueveDelCache(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1"},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1"})
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker)
+
+	if err := svc.Delete(context.Background(), "d1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Quedó fuera del caché y del repositorio.
+	if _, ok := store.Get("d1"); ok {
+		t.Fatal("expected device removed from cache")
+	}
+	if _, err := repo.GetDispositivoByID(context.Background(), "d1"); !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
+		t.Fatalf("expected device removed from repo, got %v", err)
+	}
+}
+
+func TestDelete_NotFound(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
+	store := database.NewMemoryDispositivoStateStore()
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker)
+
+	err := svc.Delete(context.Background(), "missing")
+	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
+		t.Fatalf("expected ErrDispositivoNotFound, got %v", err)
+	}
 }
