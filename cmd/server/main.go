@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
+	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	consignaController "github.com/angelobenedetti29/smart-check-automation/internal/controller/consigna"
 	dispositivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/dispositivo"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
@@ -20,15 +21,20 @@ import (
 	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
 	parametrosProductoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/parametros_producto"
 	sseController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sse"
+	userController "github.com/angelobenedetti29/smart-check-automation/internal/controller/user"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
+	googleProvider "github.com/angelobenedetti29/smart-check-automation/internal/provider/google"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
+	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	consignaService "github.com/angelobenedetti29/smart-check-automation/internal/service/consigna"
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
 	parametrosProductoService "github.com/angelobenedetti29/smart-check-automation/internal/service/parametros_producto"
+	userService "github.com/angelobenedetti29/smart-check-automation/internal/service/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
 
@@ -40,6 +46,13 @@ func main() {
 	// 0. Load environment variables from .env file
 	if err := godotenv.Load(); err != nil {
 		log.Println("Advertencia: archivo .env no encontrado, se usarán variables de entorno del sistema")
+	}
+
+	// Validar variables de entorno requeridas para auth antes de iniciar el servidor
+	googleClientID := os.Getenv("GOOGLE_CLIENT_ID")
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if googleClientID == "" || jwtSecret == "" {
+		log.Fatal("GOOGLE_CLIENT_ID y JWT_SECRET son requeridos. Verifica el archivo .env")
 	}
 
 	// 1. Initialize PostgreSQL connection pool
@@ -67,6 +80,10 @@ func main() {
 	parametrosProductoRepo := repository.NewParametrosProductoPostgresRepository(pgPool)
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
 	consignaRepo := repository.NewConsignaPostgresRepository(pgPool)
+	userRepo := repository.NewUserPostgresRepository(pgPool)
+
+	// Auth provider (Google)
+	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
 
 	// SSE broker for real-time event streaming
 	sseBroker := sse.NewBroker()
@@ -84,6 +101,9 @@ func main() {
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker)
 	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, parametrosProductoRepo, ovenController, hornoSSEBroker, dbRepo)
+
+	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
+	userSvc := userService.NewService(userRepo)
 
 	reaperInterval := getEnvDuration("DISPOSITIVO_REAPER_INTERVAL", 5*time.Second)
 	offlineThreshold := getEnvDuration("DISPOSITIVO_OFFLINE_THRESHOLD", 25*time.Second)
@@ -106,6 +126,10 @@ func main() {
 	consignaHandler := consignaController.NewConsignaHandler(consignaSvc)
 	hornoSSEHandler := sseController.NewSSEHandler(hornoSSEBroker)
 
+	authHandler := authController.NewAuthHandler(authSvc)
+	userHandler := userController.NewUserHandler(userSvc)
+	jwtSecretBytes := []byte(jwtSecret)
+
 	// 5. Setup routes
 	mux := http.NewServeMux()
 
@@ -113,11 +137,21 @@ func main() {
 	mux.HandleFunc("/health", healthHandler(pgPool))
 	mux.HandleFunc("/healthz", healthHandler(pgPool))
 
-	mux.HandleFunc("/api/v1/horno", loggingMiddleware(hornoHandler.GetHornoStatus))
-	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(hornoHandler.UpdateTemperature))
+	// Auth — rutas públicas (no requieren JWT)
+	mux.HandleFunc("/api/v1/auth/login", loggingMiddleware(authHandler.Login))
+	mux.HandleFunc("/api/v1/auth/google", loggingMiddleware(authHandler.LoginWithGoogle))
+	mux.HandleFunc("/api/v1/auth/logout", loggingMiddleware(authHandler.Logout))
+
+	// Rutas de Administración de Usuarios (Solo Administrador)
+	mux.HandleFunc("/api/v1/admin/usuarios", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleAdmin}, userHandler.HandleUsers))))
+	mux.HandleFunc("/api/v1/admin/usuarios/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleAdmin}, userHandler.HandleUserByID))))
+
+	// Rutas del dominio industrial
+	mux.HandleFunc("/api/v1/horno", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoHandler.GetHornoStatus)))
+	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleSupervisor, user.RoleAdmin}, hornoHandler.UpdateTemperature))))
 	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
 	mux.HandleFunc("/api/v1/lotes/inicio", loggingMiddleware(loteHandler.HandleIniciarLote))
-	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(loteProductivoHandler.GetAll))
+	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteProductivoHandler.GetAll)))
 	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(parametrosProductoHandler.Handle))
 	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(sseHandler.HandleSSE))
 	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(dispositivoHandler.HandlePing))
@@ -183,7 +217,8 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\nEndpoints: GET /health, GET /api/v1/horno, POST /api/v1/horno/temperatura, POST /api/v1/lotes, POST /api/v1/lotes/inicio, GET /api/v1/lotes-productivos, GET|POST|PUT /api/v1/parametros-producto, GET /api/v1/lotes-productivos/events (SSE), POST /api/v1/dispositivos/ping, GET|POST|PUT|DELETE /api/v1/dispositivos, GET /api/v1/dispositivos/metricas, GET /api/v1/dispositivos/events (SSE), POST /api/v1/horno/consigna, GET /api/v1/horno/consigna/historial, GET /api/v1/horno/events (SSE)\n"))}
+	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\n"))
+}
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -4,17 +4,14 @@
 -- Versión: 1.1
 -- Motor:  PostgreSQL 15+ (Aiven Cloud, AWS sa-east-1)
 -- ============================================================================
--- Este script crea la estructura completa del modelo de datos para las
--- User Stories "Persistir lotes productivos" y "ABM de Parámetros y Umbrales
--- de Control por Tipo de Producto" (SCA-142).
---
--- Orden de ejecución:
+-- Este script crea la estructura completa del modelo de datos para:
 --   1. Tabla maestra: productos
 --   2. Tabla transaccional: lotes_productivos (depende de productos vía FK)
 --   3. Tabla de configuración: parametros_producto (depende de productos vía FK)
 --   4. Seed de datos de catálogo
 --   5. Tablas de telemetría: dispositivos + metricas_dispositivo
 --   6. Setpoints puntuales en parametros_producto + historial_consignas (SCA-142/SCA-320)
+--   7. Tabla de acceso: usuarios (autenticación y RBAC)
 -- ============================================================================
 
 BEGIN;
@@ -288,16 +285,10 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================================
 -- ALTER: parametros_producto — setpoints puntuales de cocción (SCA-142/SCA-320)
 -- ============================================================================
--- Las columnas temp_min/max y velocidad_cinta_min/max ya definen el rango
--- aceptable de control. Estas columnas nuevas guardan el valor PUNTUAL que se
--- despacha al controlador físico del horno (envío automático o manual), y
--- deben estar dentro del rango ya definido para el producto.
 ALTER TABLE parametros_producto
     ADD COLUMN IF NOT EXISTS temp_setpoint             NUMERIC(6,2),
     ADD COLUMN IF NOT EXISTS velocidad_cinta_setpoint   NUMERIC(6,2);
 
--- ADD CONSTRAINT no soporta IF NOT EXISTS en PostgreSQL; se guarda con un
--- bloque DO para que el script siga siendo seguro de re-ejecutar.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_parametros_temp_setpoint_rango') THEN
@@ -315,7 +306,7 @@ END $$;
 COMMENT ON COLUMN parametros_producto.temp_setpoint IS 'Temperatura objetivo puntual a despachar al horno (°C), dentro de [temp_min, temp_max]. Nullable: si no está cargada, no se puede despachar consigna automática para el producto.';
 COMMENT ON COLUMN parametros_producto.velocidad_cinta_setpoint IS 'Velocidad de cinta objetivo puntual a despachar al horno (m/s), dentro de [velocidad_cinta_min, velocidad_cinta_max]. Nullable, misma razón que temp_setpoint.';
 
--- Seed: setpoints puntuales por defecto para "Tostada Integral", dentro del rango ya cargado (160-180 / 0.10-0.30)
+-- Seed: setpoints puntuales por defecto para "Tostada Integral"
 UPDATE parametros_producto
 SET temp_setpoint = 170.00, velocidad_cinta_setpoint = 0.20
 WHERE producto_id = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
@@ -323,9 +314,6 @@ WHERE producto_id = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
 
 -- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
--- "Tostada Integral" ya estaba cargada; se agregan las 5 restantes, cada una
--- con su matriz de parámetros óptimos (rango + setpoint puntual) para que
--- ConsignaService.DispatchAutomatico pueda resolverlas sin intervención manual.
 -- ============================================================================
 INSERT INTO productos (id, nombre) VALUES
     ('b2c3d4e5-6789-01ab-cdef-234567890abc', 'Pan Lactal'),
@@ -349,13 +337,8 @@ INSERT INTO parametros_producto (
 ON CONFLICT (producto_id) DO NOTHING;
 
 -- ============================================================================
--- TABLA 6: historial_consignas (Auditoría de consignas térmicas/velocidad
--- despachadas al controlador físico del horno — SCA-142 / SCA-320)
+-- TABLA 6: historial_consignas (Auditoría de consignas térmicas/velocidad)
 -- ============================================================================
--- El horno todavía vive en memoria (ver internal/domain/horno), sin tabla
--- propia en Postgres; por eso horno_id es un identificador libre (no FK) y
--- lote_id tampoco tiene FK: un despacho automático puede ocurrir antes de que
--- el lote se persista en lotes_productivos (ver POST /api/v1/lotes/inicio).
 CREATE TABLE IF NOT EXISTS historial_consignas (
     id                        UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
     horno_id                  VARCHAR(50)     NOT NULL,
@@ -371,13 +354,11 @@ CREATE TABLE IF NOT EXISTS historial_consignas (
     velocidad_cinta_previa    NUMERIC(6,2),
     creada_en                 TIMESTAMPTZ     NOT NULL DEFAULT now(),
 
-    -- FOREIGN KEY: producto_id sí tiene tabla real, se valida su existencia
     CONSTRAINT fk_historial_consignas_producto
         FOREIGN KEY (producto_id)
         REFERENCES productos (id)
         ON DELETE SET NULL,
 
-    -- El origen de la consigna es automático (IA + inicio de lote) o manual (operario)
     CONSTRAINT chk_historial_consignas_origen
         CHECK (origen IN ('AUTOMATICO', 'MANUAL'))
 );
@@ -387,7 +368,7 @@ COMMENT ON COLUMN historial_consignas.horno_id IS 'Identificador del horno (domi
 COMMENT ON COLUMN historial_consignas.lote_id IS 'Correlación con el lote productivo, sin FK: en el despacho automático el lote puede no estar persistido aún en lotes_productivos';
 COMMENT ON COLUMN historial_consignas.producto_id IS 'FK al producto cuyos parámetros originaron la consigna (nullable: puede no aplicar en consignas manuales sin producto asociado)';
 COMMENT ON COLUMN historial_consignas.origen IS 'AUTOMATICO: disparado por detección de IA al iniciar el lote. MANUAL: cargado por un operario desde el panel';
-COMMENT ON COLUMN historial_consignas.usuario IS 'Identificador best-effort del operario que disparó una consigna manual (aún no hay autenticación real de usuarios — TODO: reemplazar por FK cuando exista Google OAuth)';
+COMMENT ON COLUMN historial_consignas.usuario IS 'Identificador del operario que disparó una consigna manual';
 COMMENT ON COLUMN historial_consignas.exitosa IS 'Indica si el controlador físico (simulado) aplicó la consigna con éxito';
 COMMENT ON COLUMN historial_consignas.motivo_error IS 'Motivo del rechazo/fallo cuando exitosa=false';
 COMMENT ON COLUMN historial_consignas.temperatura_previa IS 'Temperatura activa del horno inmediatamente antes de este despacho (para trazabilidad)';
@@ -399,5 +380,45 @@ CREATE INDEX IF NOT EXISTS idx_historial_consignas_lote_id
 CREATE INDEX IF NOT EXISTS idx_historial_consignas_horno_id
     ON historial_consignas (horno_id, creada_en DESC);
 
+-- ============================================================================
+-- TABLA 7: usuarios (Usuarios corporativos autorizados para la plataforma)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS usuarios (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         VARCHAR(254) NOT NULL UNIQUE,
+    nombre        VARCHAR(150) NOT NULL,
+    rol           VARCHAR(20)  NOT NULL,
+    password_hash VARCHAR(255),
+    activo        BOOLEAN      NOT NULL DEFAULT true,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+
+    -- Solo roles válidos del sistema
+    CONSTRAINT chk_usuarios_rol
+        CHECK (rol IN ('Administrador', 'Supervisor', 'Operario')),
+
+    -- Validación de formato de email (segunda línea de defensa)
+    CONSTRAINT chk_usuarios_email_formato
+        CHECK (email ~* '^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$')
+);
+
+COMMENT ON TABLE  usuarios               IS 'Usuarios corporativos autorizados para acceder a la plataforma Smart-Check.';
+COMMENT ON COLUMN usuarios.email         IS 'Correo corporativo. Debe existir aquí para poder autenticarse.';
+COMMENT ON COLUMN usuarios.rol           IS 'Nivel de acceso: Administrador, Supervisor u Operario.';
+COMMENT ON COLUMN usuarios.password_hash IS 'Hash bcrypt de la contraseña para autenticación local (nullable si solo usa OAuth).';
+COMMENT ON COLUMN usuarios.activo        IS 'Revocar acceso sin eliminar el registro: UPDATE usuarios SET activo=false WHERE email=...';
+
+-- Índice para la búsqueda por email en cada login (operación más frecuente)
+CREATE INDEX IF NOT EXISTS idx_usuarios_email ON usuarios (email);
+
+-- ============================================================================
+-- SEED: Usuarios de prueba (modificar con emails corporativos reales)
+-- Contraseña por defecto para usuarios seed: password123 ($2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy)
+-- ============================================================================
+INSERT INTO usuarios (email, nombre, rol, password_hash) VALUES
+    ('admin@fermar.com.ar',      'Administrador Fermar',  'Administrador', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'),
+    ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'),
+    ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy')
+ON CONFLICT (email) DO NOTHING;
+
 COMMIT;
- 
