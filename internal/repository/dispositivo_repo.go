@@ -88,8 +88,8 @@ func (r *PostgresDispositivoRepository) Delete(ctx context.Context, id string) e
 func (r *PostgresDispositivoRepository) InsertMetrica(ctx context.Context, m *dispositivo.MetricaDispositivo) error {
 	const query = `
 		INSERT INTO metricas_dispositivo (
-			dispositivo_id, cpu_pct, mem_ram_disponible_mb, temp_chip, received_at
-		) VALUES ($1, $2, $3, $4, $5)
+			dispositivo_id, cpu_pct, mem_ram_disponible_mb, temp_chip, ai_processor_pct, received_at
+		) VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id`
 
 	err := r.db.QueryRow(ctx, query,
@@ -97,6 +97,7 @@ func (r *PostgresDispositivoRepository) InsertMetrica(ctx context.Context, m *di
 		m.CpuPct,
 		m.MemRamDisponibleMb,
 		m.TempChip,
+		m.AiProcessorPct,
 		m.ReceivedAt,
 	).Scan(&m.ID)
 	if err != nil {
@@ -112,7 +113,7 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT ON (d.id)
 			d.id, d.nombre, d.ubicacion, d.created_at,
-			m.id, m.cpu_pct, m.mem_ram_disponible_mb, m.temp_chip, m.received_at
+			m.id, m.cpu_pct, m.mem_ram_disponible_mb, m.temp_chip, m.ai_processor_pct, m.received_at
 		FROM dispositivos d
 		LEFT JOIN metricas_dispositivo m ON m.dispositivo_id = d.id
 		ORDER BY d.id, m.received_at DESC
@@ -131,9 +132,10 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 			cpu       *float64
 			mem       *float64
 			tempChip  *float64
+			aiProc    *float64
 			received  *time.Time
 		)
-		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &d.CreatedAt, &mID, &cpu, &mem, &tempChip, &received); err != nil {
+		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &d.CreatedAt, &mID, &cpu, &mem, &tempChip, &aiProc, &received); err != nil {
 			return nil, fmt.Errorf("failed to scan dispositivo con ultima metrica: %w", err)
 		}
 
@@ -144,6 +146,7 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 			m.CpuPct = *cpu
 			m.MemRamDisponibleMb = *mem
 			m.TempChip = *tempChip
+			m.AiProcessorPct = *aiProc
 			m.ReceivedAt = *received
 			item.UltimaMetrica = &m
 		}
@@ -190,7 +193,7 @@ func (r *PostgresDispositivoRepository) GetMetricasByDispositivo(ctx context.Con
 	offset := (page - 1) * pageSize
 
 	rows, err := r.db.Query(ctx, `
-		SELECT id, dispositivo_id, cpu_pct, mem_ram_disponible_mb, temp_chip, received_at
+		SELECT id, dispositivo_id, cpu_pct, mem_ram_disponible_mb, temp_chip, ai_processor_pct, received_at
 		FROM metricas_dispositivo
 		WHERE dispositivo_id = $1
 		ORDER BY received_at DESC
@@ -205,7 +208,7 @@ func (r *PostgresDispositivoRepository) GetMetricasByDispositivo(ctx context.Con
 	for rows.Next() {
 		var m dispositivo.MetricaDispositivo
 		if err := rows.Scan(
-			&m.ID, &m.DispositivoID, &m.CpuPct, &m.MemRamDisponibleMb, &m.TempChip, &m.ReceivedAt,
+			&m.ID, &m.DispositivoID, &m.CpuPct, &m.MemRamDisponibleMb, &m.TempChip, &m.AiProcessorPct, &m.ReceivedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan metrica_dispositivo: %w", err)
 		}

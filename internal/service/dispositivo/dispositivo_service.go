@@ -118,6 +118,7 @@ func (s *DispositivoService) ProcessPing(ctx context.Context, req dispositivo.Pi
 		CpuPct:             req.CpuPct,
 		MemRamDisponibleMb: req.MemRamDisponibleMb,
 		TempChip:           req.TempChip,
+		AiProcessorPct:     req.AiProcessorPct,
 		ReceivedAt:         time.Now().UTC(),
 	}
 

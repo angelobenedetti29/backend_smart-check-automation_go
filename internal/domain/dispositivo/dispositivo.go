@@ -54,6 +54,7 @@ type MetricaDispositivo struct {
 	CpuPct             float64   `json:"cpuPct"             db:"cpu_pct"`
 	MemRamDisponibleMb float64   `json:"memRamDisponibleMb" db:"mem_ram_disponible_mb"`
 	TempChip           float64   `json:"tempChip"           db:"temp_chip"`
+	AiProcessorPct     float64   `json:"aiProcessorPct"     db:"ai_processor_pct"`
 	ReceivedAt         time.Time `json:"receivedAt"         db:"received_at"`
 }
 
@@ -89,6 +90,7 @@ type PingRequest struct {
 	CpuPct             float64 `json:"cpuPct"`
 	MemRamDisponibleMb float64 `json:"memRamDisponibleMb"`
 	TempChip           float64 `json:"tempChip"`
+	AiProcessorPct     float64 `json:"aiProcessorPct"`
 }
 
 // Validate verifica las reglas de negocio del PingRequest.
@@ -115,6 +117,11 @@ func (req PingRequest) Validate() error {
 	// Temperatura del chip dentro de un rango físico razonable
 	if req.TempChip < -40 || req.TempChip > 120 {
 		errs = append(errs, fmt.Sprintf("tempChip: valor '%.2f' fuera de rango razonable (-40 a 120)", req.TempChip))
+	}
+
+	// Uso del procesador de IA (NPU) en porcentaje (0-100)
+	if req.AiProcessorPct < 0 || req.AiProcessorPct > 100 {
+		errs = append(errs, fmt.Sprintf("aiProcessorPct: valor '%.2f' fuera de rango, debe estar entre 0 y 100", req.AiProcessorPct))
 	}
 
 	if len(errs) > 0 {

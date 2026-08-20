@@ -57,7 +57,7 @@ func TestHandlePing_UnauthorizedWithoutAPIKey(t *testing.T) {
 	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"d1","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -122,7 +122,7 @@ func TestHandlePing_ValidationError(t *testing.T) {
 	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"dispositivoId":"","cpuPct":200,"memRamDisponibleMb":-1,"tempChip":500}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"","cpuPct":200,"memRamDisponibleMb":-1,"tempChip":500,"aiProcessorPct":150}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -140,7 +140,7 @@ func TestHandlePing_DispositivoNoExiste(t *testing.T) {
 	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{pingErr: dispositivo.ErrDispositivoNotFound})
-	body := bytes.NewBufferString(`{"dispositivoId":"missing","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"missing","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -164,12 +164,12 @@ func TestHandlePing_Success(t *testing.T) {
 		Ubicacion:     "Línea A",
 		Estado:        dispositivo.EstadoOnline,
 		UltimaMetrica: &dispositivo.MetricaDispositivo{
-			DispositivoID: "d1", CpuPct: 10, MemRamDisponibleMb: 500, TempChip: 50, ReceivedAt: now,
+			DispositivoID: "d1", CpuPct: 10, MemRamDisponibleMb: 500, TempChip: 50, AiProcessorPct: 42, ReceivedAt: now,
 		},
 		LastSeen: &now,
 	}
 	h := NewDispositivoHandler(&fakeDispositivoService{pingResp: estado})
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"d1","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")

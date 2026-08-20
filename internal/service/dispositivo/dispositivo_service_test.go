@@ -146,6 +146,7 @@ func TestProcessPing_UpdatesStateAndBroadcasts(t *testing.T) {
 		CpuPct:             20,
 		MemRamDisponibleMb: 400,
 		TempChip:           50,
+		AiProcessorPct:     35,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -155,6 +156,9 @@ func TestProcessPing_UpdatesStateAndBroadcasts(t *testing.T) {
 	}
 	if estado.UltimaMetrica == nil || estado.UltimaMetrica.CpuPct != 20 {
 		t.Fatalf("expected last metric set, got %+v", estado.UltimaMetrica)
+	}
+	if estado.UltimaMetrica == nil || estado.UltimaMetrica.AiProcessorPct != 35 {
+		t.Fatalf("expected aiProcessorPct in last metric, got %+v", estado.UltimaMetrica)
 	}
 	if estado.LastSeen == nil {
 		t.Fatal("expected lastSeen set")
@@ -178,7 +182,7 @@ func TestProcessPing_NoStateEventWhenAlreadyOnline(t *testing.T) {
 
 	svc := NewDispositivoService(repo, store, broker)
 
-	ping := dispositivo.PingRequest{DispositivoID: "d1", CpuPct: 20, MemRamDisponibleMb: 400, TempChip: 50}
+	ping := dispositivo.PingRequest{DispositivoID: "d1", CpuPct: 20, MemRamDisponibleMb: 400, TempChip: 50, AiProcessorPct: 35}
 	if _, err := svc.ProcessPing(context.Background(), ping); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,6 +210,7 @@ func TestProcessPing_DispositivoNotFound(t *testing.T) {
 		CpuPct:             10,
 		MemRamDisponibleMb: 100,
 		TempChip:           40,
+		AiProcessorPct:     20,
 	})
 	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
 		t.Fatalf("expected ErrDispositivoNotFound, got %v", err)
@@ -221,7 +226,7 @@ func TestProcessPing_InsertsMetricaHistory(t *testing.T) {
 
 	svc := NewDispositivoService(repo, store, broker)
 	if _, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{
-		DispositivoID: "d1", CpuPct: 30, MemRamDisponibleMb: 500, TempChip: 55,
+		DispositivoID: "d1", CpuPct: 30, MemRamDisponibleMb: 500, TempChip: 55, AiProcessorPct: 40,
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -375,7 +380,7 @@ func TestStartReaper_EmitsOfflineState(t *testing.T) {
 
 	// El dispositivo queda con last_seen muy antiguo (1 min atrás) y online.
 	store.Update(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1"}, dispositivo.MetricaDispositivo{
-		DispositivoID: "d1", ReceivedAt: time.Now().UTC().Add(-1 * time.Minute),
+		DispositivoID: "d1", AiProcessorPct: 0, ReceivedAt: time.Now().UTC().Add(-1 * time.Minute),
 	})
 
 	svc := NewDispositivoService(repo, store, broker)
@@ -427,7 +432,7 @@ func TestUpdate_ActualizaCacheYEmiteSSE(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	// Registra d1 como online con métrica para verificar que se preserva.
 	store.Update(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"}, dispositivo.MetricaDispositivo{
-		DispositivoID: "d1", CpuPct: 10, MemRamDisponibleMb: 500, TempChip: 50, ReceivedAt: time.Now().UTC(),
+		DispositivoID: "d1", CpuPct: 10, MemRamDisponibleMb: 500, TempChip: 50, AiProcessorPct: 10, ReceivedAt: time.Now().UTC(),
 	})
 	broker := sse.NewBroker()
 	client := broker.Subscribe()

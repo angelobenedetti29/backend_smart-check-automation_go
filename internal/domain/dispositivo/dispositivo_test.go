@@ -11,6 +11,7 @@ func TestPingRequestValidate_Valid(t *testing.T) {
 		CpuPct:             42.5,
 		MemRamDisponibleMb: 512.0,
 		TempChip:           58.3,
+		AiProcessorPct:     42.5,
 	}
 
 	if err := req.Validate(); err != nil {
@@ -24,6 +25,7 @@ func TestPingRequestValidate_Invalid(t *testing.T) {
 		CpuPct:             120.0,
 		MemRamDisponibleMb: -1.0,
 		TempChip:           200.0,
+		AiProcessorPct:     150.0,
 	}
 
 	err := req.Validate()
@@ -35,8 +37,8 @@ func TestPingRequestValidate_Invalid(t *testing.T) {
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected *ValidationError, got %T", err)
 	}
-	if len(ve.Fields) != 4 {
-		t.Fatalf("expected 4 field errors, got %d: %v", len(ve.Fields), ve.Fields)
+	if len(ve.Fields) != 5 {
+		t.Fatalf("expected 5 field errors, got %d: %v", len(ve.Fields), ve.Fields)
 	}
 }
 
@@ -55,6 +57,32 @@ func TestPingRequestValidate_BoundariesCpu(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := PingRequest{DispositivoID: "d1", CpuPct: tt.cpu}
+			err := req.Validate()
+			if tt.ok && err != nil {
+				t.Fatalf("expected valid, got: %v", err)
+			}
+			if !tt.ok && err == nil {
+				t.Fatal("expected invalid")
+			}
+		})
+	}
+}
+
+func TestPingRequestValidate_BoundariesAiProcessor(t *testing.T) {
+	tests := []struct {
+		name string
+		ai   float64
+		ok   bool
+	}{
+		{"ai min 0", 0, true},
+		{"ai max 100", 100, true},
+		{"ai negativo", -0.01, false},
+		{"ai sobre 100", 100.01, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := PingRequest{DispositivoID: "d1", AiProcessorPct: tt.ai}
 			err := req.Validate()
 			if tt.ok && err != nil {
 				t.Fatalf("expected valid, got: %v", err)

@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS metricas_dispositivo (
     cpu_pct               NUMERIC(5,2)    NOT NULL CHECK (cpu_pct BETWEEN 0 AND 100),
     mem_ram_disponible_mb NUMERIC(10,2)   NOT NULL CHECK (mem_ram_disponible_mb >= 0),
     temp_chip             NUMERIC(6,2)    NOT NULL,
+    ai_processor_pct      NUMERIC(5,2)    NOT NULL CHECK (ai_processor_pct BETWEEN 0 AND 100),
     received_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
 
     -- FOREIGN KEY: garantiza integridad referencial con el catálogo de dispositivos
@@ -269,6 +270,7 @@ COMMENT ON COLUMN metricas_dispositivo.dispositivo_id        IS 'FK al catálogo
 COMMENT ON COLUMN metricas_dispositivo.cpu_pct               IS 'Uso de CPU en porcentaje (0-100)';
 COMMENT ON COLUMN metricas_dispositivo.mem_ram_disponible_mb IS 'Memoria RAM disponible en MB';
 COMMENT ON COLUMN metricas_dispositivo.temp_chip             IS 'Temperatura interna del chip en °C';
+COMMENT ON COLUMN metricas_dispositivo.ai_processor_pct      IS 'Uso del procesador de IA (NPU) en porcentaje (0-100)';
 COMMENT ON COLUMN metricas_dispositivo.received_at           IS 'Marca temporal en que el backend recibió la métrica';
 
 -- Índice para la consulta más frecuente: historial por dispositivo ordenado por tiempo
@@ -311,6 +313,16 @@ UPDATE parametros_producto
 SET temp_setpoint = 170.00, velocidad_cinta_setpoint = 0.20
 WHERE producto_id = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
   AND temp_setpoint IS NULL;
+
+-- ============================================================================
+-- ALTER: metricas_dispositivo — uso del procesador de IA (NPU) (SCA-172)
+-- Idempotente para bases existentes: agrega la columna solo si falta.
+-- ============================================================================
+ALTER TABLE metricas_dispositivo
+    ADD COLUMN IF NOT EXISTS ai_processor_pct NUMERIC(5,2) NOT NULL DEFAULT 0
+        CHECK (ai_processor_pct BETWEEN 0 AND 100);
+
+COMMENT ON COLUMN metricas_dispositivo.ai_processor_pct IS 'Uso del procesador de IA (NPU) en porcentaje (0-100)';
 
 -- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
