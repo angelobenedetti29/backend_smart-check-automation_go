@@ -35,6 +35,7 @@ const selectParametrosProductoColumns = `
 	pp.temp_min, pp.temp_max,
 	pp.velocidad_cinta_min, pp.velocidad_cinta_max,
 	pp.temp_setpoint, pp.velocidad_cinta_setpoint,
+	pp.costo_unitario,
 	pp.activo, pp.created_at, pp.updated_at`
 
 // GetAll devuelve todos los sets de parámetros configurados, ordenados por nombre de producto.
@@ -60,6 +61,7 @@ func (r *ParametrosProductoPostgresRepository) GetAll(ctx context.Context) ([]pa
 			&p.TempMin, &p.TempMax,
 			&p.VelocidadCintaMin, &p.VelocidadCintaMax,
 			&p.TempSetpoint, &p.VelocidadCintaSetpoint,
+			&p.CostoUnitario,
 			&p.Activo, &p.CreatedAt, &p.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan parametro_producto: %w", err)
@@ -91,6 +93,7 @@ func (r *ParametrosProductoPostgresRepository) GetByProductoID(ctx context.Conte
 		&p.TempMin, &p.TempMax,
 		&p.VelocidadCintaMin, &p.VelocidadCintaMax,
 		&p.TempSetpoint, &p.VelocidadCintaSetpoint,
+		&p.CostoUnitario,
 		&p.Activo, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
@@ -112,9 +115,10 @@ func (r *ParametrosProductoPostgresRepository) Create(ctx context.Context, p *pa
 			INSERT INTO parametros_producto (
 				producto_id, peso_referencia_kg, tolerancia_peso_pct,
 				dimension_base_cm, tolerancia_dimension_cm,
-				temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max, activo
+				temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
+				costo_unitario, activo
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 			)
 			RETURNING *
 		)
@@ -132,6 +136,7 @@ func (r *ParametrosProductoPostgresRepository) Create(ctx context.Context, p *pa
 		p.TempMax,
 		p.VelocidadCintaMin,
 		p.VelocidadCintaMax,
+		p.CostoUnitario,
 		p.Activo,
 	).Scan(&p.ID, &p.ProductoNombre, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
@@ -162,6 +167,7 @@ func (r *ParametrosProductoPostgresRepository) Update(ctx context.Context, p *pa
 			temp_max = $7,
 			velocidad_cinta_min = $8,
 			velocidad_cinta_max = $9,
+			costo_unitario = COALESCE($10, parametros_producto.costo_unitario),
 			updated_at = now()
 		FROM productos
 		WHERE parametros_producto.producto_id = $1
@@ -179,6 +185,7 @@ func (r *ParametrosProductoPostgresRepository) Update(ctx context.Context, p *pa
 		p.TempMax,
 		p.VelocidadCintaMin,
 		p.VelocidadCintaMax,
+		p.CostoUnitario,
 	).Scan(&p.ID, &p.ProductoNombre, &p.Activo, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

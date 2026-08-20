@@ -20,6 +20,7 @@ import (
 	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
 	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
 	parametrosProductoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/parametros_producto"
+	reporteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/reporte"
 	sseController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sse"
 	userController "github.com/angelobenedetti29/smart-check-automation/internal/controller/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
@@ -34,6 +35,7 @@ import (
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
 	parametrosProductoService "github.com/angelobenedetti29/smart-check-automation/internal/service/parametros_producto"
+	reporteService "github.com/angelobenedetti29/smart-check-automation/internal/service/reporte"
 	userService "github.com/angelobenedetti29/smart-check-automation/internal/service/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
@@ -81,6 +83,7 @@ func main() {
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
 	consignaRepo := repository.NewConsignaPostgresRepository(pgPool)
 	userRepo := repository.NewUserPostgresRepository(pgPool)
+	reporteRepo := repository.NewReportePostgresRepository(pgPool)
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
@@ -101,6 +104,7 @@ func main() {
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker)
 	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, parametrosProductoRepo, ovenController, hornoSSEBroker, dbRepo)
+	reporteSvc := reporteService.NewService(reporteRepo)
 
 	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
 	userSvc := userService.NewService(userRepo)
@@ -125,6 +129,7 @@ func main() {
 	dispositivoSSEHandler := sseController.NewSSEHandler(dispositivoSSEBroker)
 	consignaHandler := consignaController.NewConsignaHandler(consignaSvc)
 	hornoSSEHandler := sseController.NewSSEHandler(hornoSSEBroker)
+	reporteHandler := reporteController.NewHandler(reporteSvc)
 
 	authHandler := authController.NewAuthHandler(authSvc)
 	userHandler := userController.NewUserHandler(userSvc)
@@ -153,6 +158,7 @@ func main() {
 	mux.HandleFunc("/api/v1/lotes/inicio", loggingMiddleware(loteHandler.HandleIniciarLote))
 	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteProductivoHandler.GetAll)))
 	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(parametrosProductoHandler.Handle))
+	mux.HandleFunc("/api/v1/reportes/kpi-financiero", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reporteHandler.GetKPIFinanciero)))
 	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(sseHandler.HandleSSE))
 	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(dispositivoHandler.HandlePing))
 	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(dispositivoHandler.Handle))

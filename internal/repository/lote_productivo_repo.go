@@ -63,7 +63,7 @@ func (r *LoteProductivoPostgresRepository) GetAll(productoID string, page, pageS
 			       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
 			       lp.temp_horno_1, lp.temp_comb_horno_1,
 			       lp.temp_horno_2, lp.temp_comb_horno_2,
-			       lp.velocidad_cinta, lp.created_at, lp.updated_at
+			       lp.velocidad_cinta, lp.costo_unitario, lp.created_at, lp.updated_at
 			FROM lotes_productivos lp
 			JOIN productos pr ON lp.producto_id = pr.id
 			ORDER BY lp.inicio_at DESC
@@ -83,7 +83,7 @@ func (r *LoteProductivoPostgresRepository) GetAll(productoID string, page, pageS
 			       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
 			       lp.temp_horno_1, lp.temp_comb_horno_1,
 			       lp.temp_horno_2, lp.temp_comb_horno_2,
-			       lp.velocidad_cinta, lp.created_at, lp.updated_at
+			       lp.velocidad_cinta, lp.costo_unitario, lp.created_at, lp.updated_at
 			FROM lotes_productivos lp
 			JOIN productos pr ON lp.producto_id = pr.id
 			WHERE lp.producto_id = $1
@@ -105,7 +105,7 @@ func (r *LoteProductivoPostgresRepository) GetAll(productoID string, page, pageS
 			&l.CorrectosKg, &l.QuemadosKg, &l.CrudosKg,
 			&l.TempHorno1, &l.TempCombHorno1,
 			&l.TempHorno2, &l.TempCombHorno2,
-			&l.VelocidadCinta, &l.CreatedAt, &l.UpdatedAt,
+			&l.VelocidadCinta, &l.CostoUnitario, &l.CreatedAt, &l.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan lote: %w", err)
 		}
@@ -134,7 +134,7 @@ func (r *LoteProductivoPostgresRepository) GetByID(id string) (*lote.LoteProduct
 		       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
 		       lp.temp_horno_1, lp.temp_comb_horno_1,
 		       lp.temp_horno_2, lp.temp_comb_horno_2,
-		       lp.velocidad_cinta, lp.created_at, lp.updated_at
+		       lp.velocidad_cinta, lp.costo_unitario, lp.created_at, lp.updated_at
 		FROM lotes_productivos lp
 		JOIN productos pr ON lp.producto_id = pr.id
 		WHERE lp.id = $1
@@ -144,10 +144,13 @@ func (r *LoteProductivoPostgresRepository) GetByID(id string) (*lote.LoteProduct
 		&l.CorrectosKg, &l.QuemadosKg, &l.CrudosKg,
 		&l.TempHorno1, &l.TempCombHorno1,
 		&l.TempHorno2, &l.TempCombHorno2,
-		&l.VelocidadCinta, &l.CreatedAt, &l.UpdatedAt,
+		&l.VelocidadCinta, &l.CostoUnitario, &l.CreatedAt, &l.UpdatedAt,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get lote by id %s: %w", id, err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query lote by id: %w", err)
 	}
 
 	return &l, nil

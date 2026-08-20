@@ -81,6 +81,7 @@ type Lote struct {
 	TempHorno2     *float64  `json:"temp_horno_2"`
 	TempCombHorno2 *float64  `json:"temp_comb_horno_2"`
 	VelocidadCinta *float64  `json:"velocidad_cinta"`
+	CostoUnitario  *float64  `json:"costo_unitario,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

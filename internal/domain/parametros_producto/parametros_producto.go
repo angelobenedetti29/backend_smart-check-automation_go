@@ -52,6 +52,7 @@ type ParametroProducto struct {
 	// cargados, el producto no admite despacho automático todavía.
 	TempSetpoint           *float64  `json:"tempSetpoint,omitempty"           db:"temp_setpoint"`
 	VelocidadCintaSetpoint *float64  `json:"velocidadCintaSetpoint,omitempty" db:"velocidad_cinta_setpoint"`
+	CostoUnitario          *float64  `json:"costoUnitario,omitempty"          db:"costo_unitario"`
 	Activo                 bool      `json:"activo"                db:"activo"`
 	CreatedAt              time.Time `json:"createdAt"             db:"created_at"`
 	UpdatedAt              time.Time `json:"updatedAt"             db:"updated_at"`
@@ -61,15 +62,16 @@ type ParametroProducto struct {
 // y la modificación (PUT) de parámetros por producto, provenientes del panel de
 // configuración del Supervisor.
 type ParametroProductoRequest struct {
-	ProductoID            string  `json:"productoId"`
-	PesoReferenciaKg      float64 `json:"pesoReferenciaKg"`
-	ToleranciaPesoPct     float64 `json:"toleranciaPesoPct"`
-	DimensionBaseCm       float64 `json:"dimensionBaseCm"`
-	ToleranciaDimensionCm float64 `json:"toleranciaDimensionCm"`
-	TempMin               float64 `json:"tempMin"`
-	TempMax               float64 `json:"tempMax"`
-	VelocidadCintaMin     float64 `json:"velocidadCintaMin"`
-	VelocidadCintaMax     float64 `json:"velocidadCintaMax"`
+	ProductoID            string   `json:"productoId"`
+	PesoReferenciaKg      float64  `json:"pesoReferenciaKg"`
+	ToleranciaPesoPct     float64  `json:"toleranciaPesoPct"`
+	DimensionBaseCm       float64  `json:"dimensionBaseCm"`
+	ToleranciaDimensionCm float64  `json:"toleranciaDimensionCm"`
+	TempMin               float64  `json:"tempMin"`
+	TempMax               float64  `json:"tempMax"`
+	VelocidadCintaMin     float64  `json:"velocidadCintaMin"`
+	VelocidadCintaMax     float64  `json:"velocidadCintaMax"`
+	CostoUnitario          *float64 `json:"costoUnitario,omitempty"`
 }
 
 // MapRequestToParametroProducto convierte un ParametroProductoRequest (DTO de API)
@@ -85,6 +87,7 @@ func MapRequestToParametroProducto(req ParametroProductoRequest) ParametroProduc
 		TempMax:               req.TempMax,
 		VelocidadCintaMin:     req.VelocidadCintaMin,
 		VelocidadCintaMax:     req.VelocidadCintaMax,
+		CostoUnitario:          req.CostoUnitario,
 		Activo:                true,
 	}
 }
@@ -129,6 +132,11 @@ func (req ParametroProductoRequest) Validate() error {
 	// Consistencia del rango de velocidad de cinta: el máximo debe superar al mínimo
 	if req.VelocidadCintaMax <= req.VelocidadCintaMin {
 		errs = append(errs, fmt.Sprintf("velocidadCintaMax(%.2f): debe ser mayor a velocidadCintaMin(%.2f)", req.VelocidadCintaMax, req.VelocidadCintaMin))
+	}
+
+	// Costo unitario no puede ser negativo si se provee
+	if req.CostoUnitario != nil && *req.CostoUnitario < 0 {
+		errs = append(errs, fmt.Sprintf("costoUnitario(%.2f): no puede ser negativo", *req.CostoUnitario))
 	}
 
 	if len(errs) > 0 {

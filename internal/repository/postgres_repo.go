@@ -22,6 +22,7 @@ func NewPostgresRepository(db *pgxpool.Pool) *PostgresRepository {
 // Create inserts a new productive batch into the lotes_productivos table.
 // If the Lote already carries an ID it is used directly; otherwise
 // PostgreSQL generates one via gen_random_uuid().
+// Persiste como "foto" el costo_unitario vigente en parametros_producto para garantizar consistencia histórica.
 func (r *PostgresRepository) Create(ctx context.Context, l *lote.Lote) error {
 	const query = `
 		INSERT INTO lotes_productivos (
@@ -31,6 +32,7 @@ func (r *PostgresRepository) Create(ctx context.Context, l *lote.Lote) error {
 			temp_horno_1, temp_comb_horno_1,
 			temp_horno_2, temp_comb_horno_2,
 			velocidad_cinta,
+			costo_unitario,
 			created_at, updated_at
 		) VALUES (
 			CASE WHEN $1 = '' THEN gen_random_uuid() ELSE $1::uuid END,
@@ -40,9 +42,10 @@ func (r *PostgresRepository) Create(ctx context.Context, l *lote.Lote) error {
 			$13, $14,
 			$15, $16,
 			$17,
-			$18, $19
+			COALESCE($18, (SELECT costo_unitario FROM parametros_producto WHERE producto_id = $2 AND activo = true LIMIT 1)),
+			$19, $20
 		)
-		RETURNING id`
+		RETURNING id, costo_unitario`
 
 	err := r.db.QueryRow(ctx, query,
 		l.ID,
@@ -62,9 +65,10 @@ func (r *PostgresRepository) Create(ctx context.Context, l *lote.Lote) error {
 		l.TempHorno2,
 		l.TempCombHorno2,
 		l.VelocidadCinta,
+		l.CostoUnitario,
 		l.CreatedAt,
 		l.UpdatedAt,
-	).Scan(&l.ID)
+	).Scan(&l.ID, &l.CostoUnitario)
 	if err != nil {
 		return fmt.Errorf("failed to insert lote: %w", err)
 	}

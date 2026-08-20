@@ -28,6 +28,7 @@ type LoteProductivo struct {
 	TempHorno2     *float64   `json:"tempHorno2"       db:"temp_horno_2"`
 	TempCombHorno2 *float64   `json:"tempCombHorno2"   db:"temp_comb_horno_2"`
 	VelocidadCinta *float64   `json:"velocidadCinta"   db:"velocidad_cinta"`
+	CostoUnitario  *float64   `json:"costoUnitario,omitempty" db:"costo_unitario"`
 	CreatedAt      time.Time  `json:"createdAt"        db:"created_at"`
 	UpdatedAt      time.Time  `json:"updatedAt"        db:"updated_at"`
 }

@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS lotes_productivos (
     temp_horno_2        NUMERIC(6,2),
     temp_comb_horno_2   NUMERIC(6,2),
     velocidad_cinta     NUMERIC(6,2),
+    costo_unitario      NUMERIC(12,2),
     created_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
 
@@ -61,6 +62,10 @@ CREATE TABLE IF NOT EXISTS lotes_productivos (
         ON UPDATE CASCADE,
 
     -- RESTRICCIONES DE DOMINIO (Check Constraints)
+
+    -- El costo unitario no puede ser negativo si está cargado
+    CONSTRAINT chk_lotes_costo_unitario_no_negativo
+        CHECK (costo_unitario IS NULL OR costo_unitario >= 0),
 
     -- Turno limitado a los 3 valores definidos por el negocio
     CONSTRAINT chk_lotes_turno
@@ -145,6 +150,7 @@ CREATE TABLE IF NOT EXISTS parametros_producto (
     temp_max                NUMERIC(6,2)    NOT NULL,
     velocidad_cinta_min     NUMERIC(6,2)    NOT NULL,
     velocidad_cinta_max     NUMERIC(6,2)    NOT NULL,
+    costo_unitario          NUMERIC(12,2),
     activo                  BOOLEAN         NOT NULL DEFAULT true,
     created_at              TIMESTAMPTZ     NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ     NOT NULL DEFAULT now(),
@@ -157,6 +163,10 @@ CREATE TABLE IF NOT EXISTS parametros_producto (
         ON UPDATE CASCADE,
 
     -- RESTRICCIONES DE DOMINIO (Check Constraints)
+
+    -- El costo unitario no puede ser negativo si está configurado
+    CONSTRAINT chk_parametros_costo_unitario_no_negativo
+        CHECK (costo_unitario IS NULL OR costo_unitario >= 0),
 
     -- El peso de referencia debe ser positivo
     CONSTRAINT chk_parametros_peso_positivo
@@ -283,11 +293,15 @@ INSERT INTO dispositivos (id, nombre, ubicacion) VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
--- ALTER: parametros_producto — setpoints puntuales de cocción (SCA-142/SCA-320)
+-- ALTER: parametros_producto y lotes_productivos — costo unitario / impacto económico
 -- ============================================================================
 ALTER TABLE parametros_producto
     ADD COLUMN IF NOT EXISTS temp_setpoint             NUMERIC(6,2),
-    ADD COLUMN IF NOT EXISTS velocidad_cinta_setpoint   NUMERIC(6,2);
+    ADD COLUMN IF NOT EXISTS velocidad_cinta_setpoint   NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS costo_unitario            NUMERIC(12,2);
+
+ALTER TABLE lotes_productivos
+    ADD COLUMN IF NOT EXISTS costo_unitario            NUMERIC(12,2);
 
 DO $$
 BEGIN
@@ -301,16 +315,28 @@ BEGIN
             ADD CONSTRAINT chk_parametros_velocidad_setpoint_rango
                 CHECK (velocidad_cinta_setpoint IS NULL OR velocidad_cinta_setpoint BETWEEN velocidad_cinta_min AND velocidad_cinta_max);
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_parametros_costo_unitario_no_negativo') THEN
+        ALTER TABLE parametros_producto
+            ADD CONSTRAINT chk_parametros_costo_unitario_no_negativo
+                CHECK (costo_unitario IS NULL OR costo_unitario >= 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_costo_unitario_no_negativo') THEN
+        ALTER TABLE lotes_productivos
+            ADD CONSTRAINT chk_lotes_costo_unitario_no_negativo
+                CHECK (costo_unitario IS NULL OR costo_unitario >= 0);
+    END IF;
 END $$;
 
+COMMENT ON COLUMN parametros_producto.costo_unitario IS 'Costo de fabricación unitario vigente de la variedad de producto en ARS (nullable)';
+COMMENT ON COLUMN lotes_productivos.costo_unitario   IS 'Foto histórica del costo de fabricación unitario en ARS al momento de registrar el lote (nullable)';
 COMMENT ON COLUMN parametros_producto.temp_setpoint IS 'Temperatura objetivo puntual a despachar al horno (°C), dentro de [temp_min, temp_max]. Nullable: si no está cargada, no se puede despachar consigna automática para el producto.';
 COMMENT ON COLUMN parametros_producto.velocidad_cinta_setpoint IS 'Velocidad de cinta objetivo puntual a despachar al horno (m/s), dentro de [velocidad_cinta_min, velocidad_cinta_max]. Nullable, misma razón que temp_setpoint.';
 
--- Seed: setpoints puntuales por defecto para "Tostada Integral"
+-- Seed: setpoints puntuales y costo unitario por defecto para "Tostada Integral"
 UPDATE parametros_producto
-SET temp_setpoint = 170.00, velocidad_cinta_setpoint = 0.20
+SET temp_setpoint = 170.00, velocidad_cinta_setpoint = 0.20, costo_unitario = 150.00
 WHERE producto_id = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
-  AND temp_setpoint IS NULL;
+  AND (temp_setpoint IS NULL OR costo_unitario IS NULL);
 
 -- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
@@ -327,13 +353,13 @@ INSERT INTO parametros_producto (
     producto_id, peso_referencia_kg, tolerancia_peso_pct,
     dimension_base_cm, tolerancia_dimension_cm,
     temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
-    temp_setpoint, velocidad_cinta_setpoint
+    temp_setpoint, velocidad_cinta_setpoint, costo_unitario
 ) VALUES
-    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 0.500, 8.00,  25.00, 1.00, 180.00, 200.00, 0.15, 0.35, 190.00, 0.25),
-    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 0.250, 6.00,  30.00, 1.50, 200.00, 220.00, 0.20, 0.40, 210.00, 0.30),
-    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 0.450, 8.00,  22.00, 1.00, 170.00, 190.00, 0.15, 0.35, 180.00, 0.25),
-    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 0.060, 12.00, 10.00, 0.50, 190.00, 210.00, 0.25, 0.45, 200.00, 0.35),
-    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 0.800, 10.00, 15.00, 1.00, 150.00, 170.00, 0.08, 0.20, 160.00, 0.14)
+    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 0.500, 8.00,  25.00, 1.00, 180.00, 200.00, 0.15, 0.35, 190.00, 0.25, 420.00),
+    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 0.250, 6.00,  30.00, 1.50, 200.00, 220.00, 0.20, 0.40, 210.00, 0.30, 280.00),
+    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 0.450, 8.00,  22.00, 1.00, 170.00, 190.00, 0.15, 0.35, 180.00, 0.25, 450.00),
+    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 0.060, 12.00, 10.00, 0.50, 190.00, 210.00, 0.25, 0.45, 200.00, 0.35, 120.00),
+    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 0.800, 10.00, 15.00, 1.00, 150.00, 170.00, 0.08, 0.20, 160.00, 0.14, NULL)
 ON CONFLICT (producto_id) DO NOTHING;
 
 -- ============================================================================

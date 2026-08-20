@@ -150,13 +150,29 @@ func TestIsValidationError(t *testing.T) {
 	assert.True(t, IsValidationError(err))
 }
 
+func TestValidate_CostoUnitario(t *testing.T) {
+	req := baseValidRequest()
+	costoValido := 250.50
+	req.CostoUnitario = &costoValido
+	assert.NoError(t, req.Validate())
+
+	costoNegativo := -10.0
+	req.CostoUnitario = &costoNegativo
+	err := req.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "costoUnitario")
+}
+
 func TestMapRequestToParametroProducto(t *testing.T) {
 	req := baseValidRequest()
+	costo := 300.0
+	req.CostoUnitario = &costo
 	p := MapRequestToParametroProducto(req)
 
 	assert.Equal(t, req.ProductoID, p.ProductoID)
 	assert.Equal(t, req.PesoReferenciaKg, p.PesoReferenciaKg)
 	assert.Equal(t, req.TempMin, p.TempMin)
 	assert.Equal(t, req.TempMax, p.TempMax)
+	assert.Equal(t, req.CostoUnitario, p.CostoUnitario)
 	assert.True(t, p.Activo, "un nuevo registro debe crearse activo por defecto")
 }
