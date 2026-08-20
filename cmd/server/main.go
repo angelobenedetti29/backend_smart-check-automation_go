@@ -71,6 +71,12 @@ func main() {
 
 	log.Println("Pool de conexiones a PostgreSQL inicializado y verificado exitosamente.")
 
+	if err := database.RunMigrations(context.Background(), pgPool); err != nil {
+		log.Printf("[ADVERTENCIA] Error al ejecutar migraciones automáticas: %v", err)
+	} else {
+		log.Println("Migraciones de esquema verificadas y aplicadas exitosamente.")
+	}
+
 	// 2. Instantiate Infrastructure Adapters (Providers Layer)
 	dbRepo := database.NewPostgresRepository()
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500/yolo/conveyor")
