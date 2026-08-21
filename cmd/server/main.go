@@ -152,7 +152,14 @@ func main() {
 	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
 	mux.HandleFunc("/api/v1/lotes/inicio", loggingMiddleware(loteHandler.HandleIniciarLote))
 	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteProductivoHandler.GetAll)))
-	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(parametrosProductoHandler.Handle))
+	parametrosRoleAware := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			authController.RequireRole([]string{user.RoleSupervisor, user.RoleAdmin}, parametrosProductoHandler.Handle)(w, r)
+			return
+		}
+		parametrosProductoHandler.Handle(w, r)
+	}
+	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, parametrosRoleAware)))
 	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(sseHandler.HandleSSE))
 	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(dispositivoHandler.HandlePing))
 	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(dispositivoHandler.Handle))
