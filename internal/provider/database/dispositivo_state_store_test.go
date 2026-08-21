@@ -32,7 +32,7 @@ func TestMemoryDispositivoStateStore_Hydrate_RecoversOnlineWithMetric(t *testing
 	store := NewMemoryDispositivoStateStore()
 	now := time.Now().UTC()
 	metrica := dispositivo.MetricaDispositivo{
-		ID: "m1", DispositivoID: "d1", CpuPct: 30, MemRamDisponibleMb: 500, TempChip: 55,
+		ID: "m1", DispositivoID: "d1", CpuPct: 30, MemRamDisponibleMb: 500, TempChip: 55, AiProcessorPct: 20,
 		ReceivedAt: now.Add(-5 * time.Second),
 	}
 
@@ -59,7 +59,7 @@ func TestMemoryDispositivoStateStore_Hydrate_KeepsMetricWhenStaleOffline(t *test
 	store := NewMemoryDispositivoStateStore()
 	now := time.Now().UTC()
 	metrica := dispositivo.MetricaDispositivo{
-		ID: "m1", DispositivoID: "d1", CpuPct: 30, MemRamDisponibleMb: 500, TempChip: 55,
+		ID: "m1", DispositivoID: "d1", CpuPct: 30, MemRamDisponibleMb: 500, TempChip: 55, AiProcessorPct: 20,
 		ReceivedAt: now.Add(-40 * time.Second),
 	}
 
@@ -139,6 +139,7 @@ func TestMemoryDispositivoStateStore_Update_TransitionsToOnline(t *testing.T) {
 		CpuPct:             30,
 		MemRamDisponibleMb: 500,
 		TempChip:           55,
+		AiProcessorPct:     20,
 		ReceivedAt:         now,
 	}
 

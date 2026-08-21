@@ -344,7 +344,7 @@ Cada Raspberry Pi manda esto cada ~10s con su estado de salud (CPU/RAM/temperatu
 ```bash
 curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":35.2,"memRamDisponibleMb":512.0,"tempChip":45.5}'
+  -d '{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":35.2,"memRamDisponibleMb":512.0,"tempChip":45.5,"aiProcessorPct":42.0}'
 ```
 
 ```json
@@ -353,7 +353,7 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
   "data": {
     "dispositivoId": "b1c2d3e4-...", "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A",
     "estado": "online",
-    "ultimaMetrica": { "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "tempChip": 45.5, "receivedAt": "..." },
+    "ultimaMetrica": { "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "tempChip": 45.5, "aiProcessorPct": 42.0, "receivedAt": "..." },
     "lastSeen": "2026-08-06T12:00:00Z"
   }
 }
@@ -368,7 +368,7 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
 | 422 | Validación de negocio falló, o `dispositivoId` no existe en el catálogo |
 | 500 | Error interno |
 
-**Reglas de validación:** `dispositivoId` requerido · `cpuPct` ∈ [0,100] · `memRamDisponibleMb >= 0` · `tempChip` ∈ [-40,120].
+**Reglas de validación:** `dispositivoId` requerido · `cpuPct` ∈ [0,100] · `memRamDisponibleMb >= 0` · `tempChip` ∈ [-40,120] · `aiProcessorPct` ∈ [0,100].
 
 ---
 
@@ -410,7 +410,7 @@ curl "http://localhost:8080/api/v1/dispositivos/metricas?dispositivoId=b1c2d3e4-
 ```json
 {
   "success": true, "message": "Métricas del dispositivo obtenidas exitosamente",
-  "data": [ { "id": "...", "dispositivoId": "b1c2d3e4-...", "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "tempChip": 45.5, "receivedAt": "..." } ],
+  "data": [ { "id": "...", "dispositivoId": "b1c2d3e4-...", "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "tempChip": 45.5, "aiProcessorPct": 42.0, "receivedAt": "..." } ],
   "total": 1, "page": 1, "pageSize": 20
 }
 ```
