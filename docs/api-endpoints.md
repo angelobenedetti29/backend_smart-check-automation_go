@@ -20,7 +20,9 @@ Los endpoints paginados (`GET /api/v1/lotes-productivos`, `GET /api/v1/dispositi
 
 ### Autenticación
 
-Solo **3 de los 17 endpoints** requieren `X-API-Key` (pensado para las Raspberry Pi, comparación a prueba de timing attacks con `crypto/subtle`): `POST /api/v1/lotes`, `POST /api/v1/lotes/inicio` y `POST /api/v1/dispositivos/ping`. El resto está abierto — varios tienen un comentario `// TODO(OAuth)` explícito porque el login de usuarios (Google) todavía no existe.
+Solo los endpoints de telemetría/transacción llamados por la Raspberry requieren `X-API-Key` (comparación a prueba de timing attacks con `crypto/subtle`): `POST /api/v1/lotes`, `POST /api/v1/lotes/inicio` y `POST /api/v1/dispositivos/ping`. Las lecturas de dispositivos (`GET /api/v1/dispositivos`, `GET /api/v1/dispositivos/metricas`) y los tres endpoints SSE requieren la cookie JWT `session_token`, sin restricción de rol. El resto conserva las reglas de autenticación indicadas en cada endpoint.
+
+El proxy del frontend debe reenviar la cookie HttpOnly `session_token` en esas lecturas y mantenerla en la conexión SSE; no debe enviar `X-API-Key` para reemplazar la autenticación JWT.
 
 ### Errores de validación
 
@@ -337,14 +339,14 @@ Respuesta `200 OK` con el registro actualizado.
 
 ## 9. `POST /api/v1/dispositivos/ping` — Telemetría de Raspberry Pi
 
-Cada Raspberry Pi manda esto cada ~10s con su estado de salud (CPU/RAM/temperatura del chip). Actualiza el caché de estado online/offline en memoria, persiste el historial en Postgres (fire-and-forget) y emite SSE.
+Cada Raspberry Pi manda esto cada ~10s con su estado de salud (CPU/RAM/almacenamiento/temperatura del chip). Actualiza el caché de estado online/offline en memoria, persiste el historial en Postgres (fire-and-forget) y emite SSE.
 
 **Auth:** `X-API-Key`. `Content-Type: application/json` obligatorio.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":35.2,"memRamDisponibleMb":512.0,"tempChip":45.5,"aiProcessorPct":42.0}'
+  -d '{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":35.2,"memRamDisponibleMb":512.0,"memRamTotalMb":1024.0,"almacenamientoDisponibleMb":20000.0,"almacenamientoTotalMb":64000.0,"tempChip":45.5,"aiProcessorPct":42.0}'
 ```
 
 ```json
@@ -353,7 +355,7 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
   "data": {
     "dispositivoId": "b1c2d3e4-...", "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A",
     "estado": "online",
-    "ultimaMetrica": { "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "tempChip": 45.5, "aiProcessorPct": 42.0, "receivedAt": "..." },
+    "ultimaMetrica": { "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "memRamTotalMb": 1024.0, "almacenamientoDisponibleMb": 20000.0, "almacenamientoTotalMb": 64000.0, "tempChip": 45.5, "aiProcessorPct": 42.0, "receivedAt": "..." },
     "lastSeen": "2026-08-06T12:00:00Z"
   }
 }
@@ -368,18 +370,19 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
 | 422 | Validación de negocio falló, o `dispositivoId` no existe en el catálogo |
 | 500 | Error interno |
 
-**Reglas de validación:** `dispositivoId` requerido · `cpuPct` ∈ [0,100] · `memRamDisponibleMb >= 0` · `tempChip` ∈ [-40,120] · `aiProcessorPct` ∈ [0,100].
+**Reglas de validación:** `dispositivoId` requerido y UUID válido · `cpuPct` ∈ [0,100] · `memRamDisponibleMb >= 0` · `memRamTotalMb` opcional y >= 0; si se informa, `memRamDisponibleMb <= memRamTotalMb` · `almacenamientoDisponibleMb` y `almacenamientoTotalMb` forman un par opcional: deben omitirse ambos o informarse ambos, ser >= 0 y cumplir `almacenamientoDisponibleMb <= almacenamientoTotalMb` · `tempChip` ∈ [-40,120] · `aiProcessorPct` ∈ [0,100]. Los tres campos nuevos pueden omitirse para mantener compatibilidad con pings legacy.
 
 ---
 
 ## 10. `GET /api/v1/dispositivos` — Estado online/offline de todos los dispositivos
 
 Lectura desde el caché en memoria (no toca Postgres) — rápida, para refrescar el panel.
+La misma ruta para `POST`, `PUT` y `DELETE` administra el catálogo y también requiere JWT, sin restricción de rol.
 
-**Auth:** ninguna.
+**Auth:** cookie JWT `session_token` obligatoria; cualquier rol autenticado.
 
 ```bash
-curl http://localhost:8080/api/v1/dispositivos
+curl -b "session_token=$JWT" http://localhost:8080/api/v1/dispositivos
 ```
 
 ```json
@@ -391,9 +394,12 @@ curl http://localhost:8080/api/v1/dispositivos
 }
 ```
 
+El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #9: además de `memRamDisponibleMb`, CPU, IA y temperatura, puede incluir `memRamTotalMb`, `almacenamientoDisponibleMb` y `almacenamientoTotalMb`. Los campos nuevos se omiten cuando el dispositivo todavía envía un ping legacy.
+
 | Código | Motivo |
 |---|---|
 | 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
 
 ---
 
@@ -401,16 +407,16 @@ curl http://localhost:8080/api/v1/dispositivos
 
 Historial paginado desde Postgres (`metricas_dispositivo`), no el caché.
 
-**Auth:** ninguna. **Query params:** `dispositivoId` (requerido), `page`/`pageSize` (igual que #5).
+**Auth:** cookie JWT `session_token` obligatoria; cualquier rol. **Query params:** `dispositivoId` (requerido), `page`/`pageSize` (igual que #5).
 
 ```bash
-curl "http://localhost:8080/api/v1/dispositivos/metricas?dispositivoId=b1c2d3e4-5678-90ab-cdef-1234567890ab&page=1&pageSize=20"
+curl -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos/metricas?dispositivoId=b1c2d3e4-5678-90ab-cdef-1234567890ab&page=1&pageSize=20"
 ```
 
 ```json
 {
   "success": true, "message": "Métricas del dispositivo obtenidas exitosamente",
-  "data": [ { "id": "...", "dispositivoId": "b1c2d3e4-...", "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "tempChip": 45.5, "aiProcessorPct": 42.0, "receivedAt": "..." } ],
+  "data": [ { "id": "...", "dispositivoId": "b1c2d3e4-...", "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "memRamTotalMb": 1024.0, "almacenamientoDisponibleMb": 20000.0, "almacenamientoTotalMb": 64000.0, "tempChip": 45.5, "aiProcessorPct": 42.0, "receivedAt": "..." } ],
   "total": 1, "page": 1, "pageSize": 20
 }
 ```
@@ -419,6 +425,7 @@ curl "http://localhost:8080/api/v1/dispositivos/metricas?dispositivoId=b1c2d3e4-
 |---|---|
 | 405 | Método distinto de GET |
 | 400 | Falta `dispositivoId` |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
 | 404 | `dispositivoId` no existe en el catálogo |
 | 500 | Error interno |
 
@@ -500,7 +507,7 @@ curl "http://localhost:8080/api/v1/horno/consigna/historial?loteId=1d1e9071-e707
 
 ## 14–16. Endpoints SSE (Server-Sent Events)
 
-Los tres comparten el mismo handler genérico, cada uno con su propio broker (sin cruce de eventos entre sí). No usan el envelope JSON estándar — son streams `text/event-stream`.
+Los tres comparten el mismo handler genérico, cada uno con su propio broker (sin cruce de eventos entre sí). Requieren la cookie JWT `session_token` y aceptan cualquier rol autenticado. No usan el envelope JSON estándar — son streams `text/event-stream`.
 
 | Endpoint | Eventos que emite |
 |---|---|
@@ -508,8 +515,10 @@ Los tres comparten el mismo handler genérico, cada uno con su propio broker (si
 | `GET /api/v1/dispositivos/events` | `dispositivo.metric` (cada ping) y `dispositivo.state` (transición online↔offline) |
 | `GET /api/v1/horno/events` | `horno.consigna` — cada vez que se despacha una consigna (automática o manual, exitosa o fallida) |
 
+El evento `dispositivo.metric` contiene el mismo envelope y estado que el ping REST. En `data.ultimaMetrica`, los campos `memRamTotalMb`, `almacenamientoDisponibleMb` y `almacenamientoTotalMb` aparecen cuando fueron informados por la Raspberry; los pings legacy los omiten.
+
 ```bash
-curl -N http://localhost:8080/api/v1/horno/events
+curl -N -b "session_token=$JWT" http://localhost:8080/api/v1/horno/events
 ```
 
 ```
@@ -527,6 +536,7 @@ Se manda un comentario `: heartbeat` cada 30s para mantener la conexión viva. L
 | Código | Motivo |
 |---|---|
 | 405 (texto plano, no JSON) | Método distinto de GET |
+| 401 (JSON) | Falta la cookie JWT o la sesión es inválida/expirada |
 | 500 (texto plano) | El cliente HTTP no soporta streaming |
 
 ---
@@ -554,7 +564,11 @@ Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database un
 | `POST /api/v1/lotes` | X-API-Key | ✅ | ✅ |
 | `POST /api/v1/lotes/inicio` | X-API-Key | ✅ | ✅ |
 | `POST /api/v1/dispositivos/ping` | X-API-Key | ✅ | ✅ |
+| `POST/PUT/DELETE /api/v1/dispositivos` | JWT cookie (`session_token`) | Según método | Según método |
 | `POST /api/v1/horno/temperatura` | — | ❌ | ❌ |
 | `POST/PUT /api/v1/parametros-producto` | — | ✅ | ✅ |
 | `POST /api/v1/horno/consigna` | — | ✅ | ✅ |
-| Todos los `GET` y los SSE | — | — | — |
+| `GET /api/v1/dispositivos` | JWT cookie (`session_token`) | — | — |
+| `GET /api/v1/dispositivos/metricas` | JWT cookie (`session_token`) | — | — |
+| `GET /*/events` (los 3 SSE) | JWT cookie (`session_token`) | — | — |
+| Otros `GET` | Según la sección del endpoint | — | — |

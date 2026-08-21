@@ -168,14 +168,14 @@ func main() {
 		parametrosProductoHandler.Handle(w, r)
 	}
 	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, parametrosRoleAware)))
-	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(sseHandler.HandleSSE))
+	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, sseHandler.HandleSSE)))
 	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(dispositivoHandler.HandlePing))
-	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(dispositivoHandler.Handle))
-	mux.HandleFunc("/api/v1/dispositivos/metricas", loggingMiddleware(dispositivoHandler.HandleMetricas))
-	mux.HandleFunc("/api/v1/dispositivos/events", loggingMiddleware(dispositivoSSEHandler.HandleSSE))
+	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, dispositivoHandler.Handle)))
+	mux.HandleFunc("/api/v1/dispositivos/metricas", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, dispositivoHandler.HandleMetricas)))
+	mux.HandleFunc("/api/v1/dispositivos/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, dispositivoSSEHandler.HandleSSE)))
 	mux.HandleFunc("/api/v1/horno/consigna", loggingMiddleware(consignaHandler.DispatchManual))
 	mux.HandleFunc("/api/v1/horno/consigna/historial", loggingMiddleware(consignaHandler.GetHistorial))
-	mux.HandleFunc("/api/v1/horno/events", loggingMiddleware(hornoSSEHandler.HandleSSE))
+	mux.HandleFunc("/api/v1/horno/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoSSEHandler.HandleSSE)))
 
 	// 6. Wrap mux with CORS middleware
 	handler := corsMiddleware(mux)

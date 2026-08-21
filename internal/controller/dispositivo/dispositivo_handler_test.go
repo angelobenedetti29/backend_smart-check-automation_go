@@ -17,6 +17,7 @@ import (
 type fakeDispositivoService struct {
 	pingResp   *dispositivo.EstadoDispositivo
 	pingErr    error
+	pingCalls  int
 	estados    []dispositivo.EstadoDispositivo
 	metricas   *dispositivo.PaginatedResult
 	metrErr    error
@@ -28,6 +29,7 @@ type fakeDispositivoService struct {
 }
 
 func (f *fakeDispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
+	f.pingCalls++
 	return f.pingResp, f.pingErr
 }
 
@@ -57,7 +59,7 @@ func TestHandlePing_UnauthorizedWithoutAPIKey(t *testing.T) {
 	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -87,7 +89,7 @@ func TestHandlePing_InvalidContentType(t *testing.T) {
 	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"dispositivoId":"d1"}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("X-API-Key", testAPIKey)
@@ -136,11 +138,32 @@ func TestHandlePing_ValidationError(t *testing.T) {
 	}
 }
 
+func TestHandlePing_MalformedDispositivoIDIsClientValidationError(t *testing.T) {
+	t.Setenv("API_KEY_SECRET", testAPIKey)
+
+	service := &fakeDispositivoService{}
+	h := NewDispositivoHandler(service)
+	body := bytes.NewBufferString(`{"dispositivoId":"not-a-uuid","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", testAPIKey)
+	rec := httptest.NewRecorder()
+
+	h.HandlePing(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for malformed dispositivoId, got %d", rec.Code)
+	}
+	if service.pingCalls != 0 {
+		t.Fatalf("expected malformed ping not to reach service, got %d calls", service.pingCalls)
+	}
+}
+
 func TestHandlePing_DispositivoNoExiste(t *testing.T) {
 	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{pingErr: dispositivo.ErrDispositivoNotFound})
-	body := bytes.NewBufferString(`{"dispositivoId":"missing","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"00000000-0000-0000-0000-000000000000","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -169,7 +192,7 @@ func TestHandlePing_Success(t *testing.T) {
 		LastSeen: &now,
 	}
 	h := NewDispositivoHandler(&fakeDispositivoService{pingResp: estado})
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")

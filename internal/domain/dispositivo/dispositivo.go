@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -20,6 +21,8 @@ const (
 	maxNombreLength    = 100
 	maxUbicacionLength = 100
 )
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // ValidationError agrupa todos los errores de validación de un request entrante.
 type ValidationError struct {
@@ -49,13 +52,16 @@ type Dispositivo struct {
 
 // MetricaDispositivo representa un registro de telemetría recibido de un dispositivo.
 type MetricaDispositivo struct {
-	ID                 string    `json:"id"                 db:"id"`
-	DispositivoID      string    `json:"dispositivoId"      db:"dispositivo_id"`
-	CpuPct             float64   `json:"cpuPct"             db:"cpu_pct"`
-	MemRamDisponibleMb float64   `json:"memRamDisponibleMb" db:"mem_ram_disponible_mb"`
-	TempChip           float64   `json:"tempChip"           db:"temp_chip"`
-	AiProcessorPct     float64   `json:"aiProcessorPct"     db:"ai_processor_pct"`
-	ReceivedAt         time.Time `json:"receivedAt"         db:"received_at"`
+	ID                         string    `json:"id"                              db:"id"`
+	DispositivoID              string    `json:"dispositivoId"                   db:"dispositivo_id"`
+	CpuPct                     float64   `json:"cpuPct"                          db:"cpu_pct"`
+	MemRamDisponibleMb         float64   `json:"memRamDisponibleMb"              db:"mem_ram_disponible_mb"`
+	MemRamTotalMb              *float64  `json:"memRamTotalMb,omitempty"          db:"mem_ram_total_mb"`
+	AlmacenamientoDisponibleMb *float64  `json:"almacenamientoDisponibleMb,omitempty" db:"almacenamiento_disponible_mb"`
+	AlmacenamientoTotalMb      *float64  `json:"almacenamientoTotalMb,omitempty" db:"almacenamiento_total_mb"`
+	TempChip                   float64   `json:"tempChip"                        db:"temp_chip"`
+	AiProcessorPct             float64   `json:"aiProcessorPct"                  db:"ai_processor_pct"`
+	ReceivedAt                 time.Time `json:"receivedAt"                      db:"received_at"`
 }
 
 // EstadoDispositivo representa el estado de salud actual de un dispositivo,
@@ -86,11 +92,14 @@ type PaginatedResult struct {
 
 // PingRequest representa el payload JSON enviado por la Raspberry Pi cada 10 segundos.
 type PingRequest struct {
-	DispositivoID      string  `json:"dispositivoId"`
-	CpuPct             float64 `json:"cpuPct"`
-	MemRamDisponibleMb float64 `json:"memRamDisponibleMb"`
-	TempChip           float64 `json:"tempChip"`
-	AiProcessorPct     float64 `json:"aiProcessorPct"`
+	DispositivoID              string   `json:"dispositivoId"`
+	CpuPct                     float64  `json:"cpuPct"`
+	MemRamDisponibleMb         float64  `json:"memRamDisponibleMb"`
+	MemRamTotalMb              *float64 `json:"memRamTotalMb,omitempty"`
+	AlmacenamientoDisponibleMb *float64 `json:"almacenamientoDisponibleMb,omitempty"`
+	AlmacenamientoTotalMb      *float64 `json:"almacenamientoTotalMb,omitempty"`
+	TempChip                   float64  `json:"tempChip"`
+	AiProcessorPct             float64  `json:"aiProcessorPct"`
 }
 
 // Validate verifica las reglas de negocio del PingRequest.
@@ -102,6 +111,8 @@ func (req PingRequest) Validate() error {
 	// Campo obligatorio: dispositivo_id
 	if strings.TrimSpace(req.DispositivoID) == "" {
 		errs = append(errs, "dispositivoId: es requerido")
+	} else if !uuidPattern.MatchString(req.DispositivoID) {
+		errs = append(errs, "dispositivoId: debe ser un UUID válido")
 	}
 
 	// Uso de CPU en porcentaje (0-100)
@@ -112,6 +123,30 @@ func (req PingRequest) Validate() error {
 	// Memoria RAM disponible no puede ser negativa
 	if req.MemRamDisponibleMb < 0 {
 		errs = append(errs, "memRamDisponibleMb: no puede ser negativo")
+	}
+
+	// Los totales de memoria y almacenamiento son opcionales para mantener
+	// compatibilidad con las Raspberry Pi que todavía no los reportan. Los dos
+	// valores de almacenamiento forman un único par opcional.
+	if req.MemRamTotalMb != nil {
+		if *req.MemRamTotalMb < 0 {
+			errs = append(errs, "memRamTotalMb: no puede ser negativo")
+		} else if req.MemRamDisponibleMb > *req.MemRamTotalMb {
+			errs = append(errs, "memRamDisponibleMb: no puede superar memRamTotalMb")
+		}
+	}
+	if (req.AlmacenamientoDisponibleMb == nil) != (req.AlmacenamientoTotalMb == nil) {
+		errs = append(errs, "almacenamientoDisponibleMb y almacenamientoTotalMb: deben informarse juntos")
+	}
+	if req.AlmacenamientoDisponibleMb != nil && *req.AlmacenamientoDisponibleMb < 0 {
+		errs = append(errs, "almacenamientoDisponibleMb: no puede ser negativo")
+	}
+	if req.AlmacenamientoTotalMb != nil {
+		if *req.AlmacenamientoTotalMb < 0 {
+			errs = append(errs, "almacenamientoTotalMb: no puede ser negativo")
+		} else if req.AlmacenamientoDisponibleMb != nil && *req.AlmacenamientoDisponibleMb > *req.AlmacenamientoTotalMb {
+			errs = append(errs, "almacenamientoDisponibleMb: no puede superar almacenamientoTotalMb")
+		}
 	}
 
 	// Temperatura del chip dentro de un rango físico razonable

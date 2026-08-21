@@ -232,7 +232,7 @@ Actualiza la temperatura del horno y aplica reglas de umbral:
 
 ### POST /api/v1/dispositivos/ping
 
-Recibe el heartbeat de telemetría de una Raspberry Pi (cada ~10s): uso de CPU, memoria RAM disponible y temperatura interna del chip. Autenticado con header `X-API-Key`.
+Recibe el heartbeat de telemetría de una Raspberry Pi (cada ~10s): uso de CPU, memoria RAM, almacenamiento y temperatura interna del chip. Autenticado con header `X-API-Key`.
 
 **Body:**
 ```json
@@ -240,9 +240,14 @@ Recibe el heartbeat de telemetría de una Raspberry Pi (cada ~10s): uso de CPU, 
   "dispositivoId": "b1c2d3e4-5678-90ab-cdef-1234567890ab",
   "cpuPct": 42.5,
   "memRamDisponibleMb": 512.0,
+  "memRamTotalMb": 1024.0,
+  "almacenamientoDisponibleMb": 20000.0,
+  "almacenamientoTotalMb": 64000.0,
   "tempChip": 58.3
 }
 ```
+
+`dispositivoId` debe ser un UUID válido. Los tres campos nuevos son opcionales. `almacenamientoDisponibleMb` y `almacenamientoTotalMb` deben informarse juntos; los pings legacy pueden omitirlos.
 
 **Códigos de respuesta:**
 | Código | Significado |
@@ -259,12 +264,15 @@ Recibe el heartbeat de telemetría de una Raspberry Pi (cada ~10s): uso de CPU, 
 ### GET /api/v1/dispositivos
 
 Devuelve el estado de salud actual (`online`/`offline`) de todos los dispositivos, con la última métrica y `lastSeen`.
+Requiere la cookie JWT `session_token`; no aplica restricción de rol.
+La misma autenticación aplica a `POST`, `PUT` y `DELETE /api/v1/dispositivos`.
 
 ---
 
 ### GET /api/v1/dispositivos/metricas?dispositivoId=...&page=1&pageSize=10
 
 Devuelve el historial paginado de métricas de un dispositivo, ordenado por `receivedAt` descendente.
+Requiere la cookie JWT `session_token`; no aplica restricción de rol.
 
 **Códigos de respuesta:**
 | Código | Significado |
@@ -272,6 +280,7 @@ Devuelve el historial paginado de métricas de un dispositivo, ordenado por `rec
 | 200 | Historial paginado obtenido |
 | 400 | Falta el parámetro `dispositivoId` |
 | 404 | El dispositivo no existe en el catálogo |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
 | 500 | Error de base de datos |
 
 ---
@@ -279,6 +288,7 @@ Devuelve el historial paginado de métricas de un dispositivo, ordenado por `rec
 ### GET /api/v1/dispositivos/events
 
 Stream SSE de telemetría de dispositivos. Eventos:
+- Requiere la cookie JWT `session_token`; no aplica restricción de rol.
 - `dispositivo.metric`: se emite en cada ping con la última métrica.
 - `dispositivo.state`: se emite solo cuando un dispositivo transiciona `online`↔`offline`.
 
