@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -168,6 +169,64 @@ func TestProcessPing_UpdatesStateAndBroadcasts(t *testing.T) {
 	types := drainEvents(client, 500*time.Millisecond)
 	if !containsAll(types, "dispositivo.metric", "dispositivo.state") {
 		t.Fatalf("expected metric and state events on first ping, got %v", types)
+	}
+}
+
+func TestProcessPing_PropagaTelemetriaExtendidaAlEstadoHistorialYSSE(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1"},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	memTotal := 1024.0
+	almacenamientoDisponible := 20000.0
+	almacenamientoTotal := 64000.0
+	svc := NewDispositivoService(repo, store, broker)
+	estado, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{
+		DispositivoID:              "d1",
+		MemRamDisponibleMb:         512,
+		MemRamTotalMb:              &memTotal,
+		AlmacenamientoDisponibleMb: &almacenamientoDisponible,
+		AlmacenamientoTotalMb:      &almacenamientoTotal,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.UltimaMetrica.MemRamTotalMb == nil || *estado.UltimaMetrica.MemRamTotalMb != memTotal {
+		t.Fatalf("expected memRamTotalMb in latest state, got %+v", estado.UltimaMetrica)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for repo.insertedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if repo.insertedCount() != 1 {
+		t.Fatalf("expected extended metric in history, got %d records", repo.insertedCount())
+	}
+	inserted := repo.insertedAt(0)
+	if inserted.AlmacenamientoTotalMb == nil || *inserted.AlmacenamientoTotalMb != almacenamientoTotal {
+		t.Fatalf("expected almacenamientoTotalMb in persisted metric, got %+v", inserted)
+	}
+
+	select {
+	case event := <-client.Events:
+		if event.EventType != "dispositivo.metric" {
+			t.Fatalf("expected dispositivo.metric SSE event, got %s", event.EventType)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			t.Fatalf("invalid SSE payload: %v", err)
+		}
+		data := payload["data"].(map[string]interface{})
+		metric := data["ultimaMetrica"].(map[string]interface{})
+		if metric["almacenamientoDisponibleMb"] != almacenamientoDisponible || metric["memRamTotalMb"] != memTotal {
+			t.Fatalf("expected extended telemetry in SSE payload, got %+v", metric)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for dispositivo.metric SSE event")
 	}
 }
 

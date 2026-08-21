@@ -30,11 +30,9 @@ func NewDispositivoHandler(svc dispositivo.Service) *DispositivoHandler {
 // Handle despacha GET /api/v1/dispositivos (listar estados), POST (alta), PUT
 // (modificar) y DELETE (eliminar) sobre la misma ruta según el método HTTP.
 //
-// NOTA: el alta y la modificación todavía no requieren autenticación de usuario
-// porque el login con Google OAuth 2.0 está pendiente (ver CLAUDE.md). Cuando se
-// implemente, POST/PUT/DELETE deben quedar restringidos a usuarios con rol
-// Operador/Supervisor. No se reusa X-API-Key: esa clave es para las Raspberry Pi,
-// no para el panel del operador.
+// La autenticación JWT de POST/PUT/DELETE se aplica en el wiring de rutas, sin
+// restricción de rol. No se reusa X-API-Key: esa clave es exclusiva de las
+// Raspberry Pi y no del panel del operador.
 func (h *DispositivoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -181,8 +179,8 @@ func parseQueryInt(r *http.Request, key string, defaultVal int) int {
 }
 
 // HandlePing procesa POST /api/v1/dispositivos/ping.
-// Recibe las métricas de la Raspberry Pi (CPU, RAM disponible, temperatura del chip)
-// y actualiza el estado de salud del dispositivo.
+// Recibe las métricas de la Raspberry Pi (CPU, RAM, almacenamiento y temperatura
+// del chip) y actualiza el estado de salud del dispositivo.
 func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)

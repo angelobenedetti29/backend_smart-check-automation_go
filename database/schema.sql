@@ -252,6 +252,9 @@ CREATE TABLE IF NOT EXISTS metricas_dispositivo (
     dispositivo_id        UUID            NOT NULL,
     cpu_pct               NUMERIC(5,2)    NOT NULL CHECK (cpu_pct BETWEEN 0 AND 100),
     mem_ram_disponible_mb NUMERIC(10,2)   NOT NULL CHECK (mem_ram_disponible_mb >= 0),
+    mem_ram_total_mb      NUMERIC(10,2),
+    almacenamiento_disponible_mb NUMERIC(12,2),
+    almacenamiento_total_mb      NUMERIC(12,2),
     temp_chip             NUMERIC(6,2)    NOT NULL,
     ai_processor_pct      NUMERIC(5,2)    NOT NULL CHECK (ai_processor_pct BETWEEN 0 AND 100),
     received_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
@@ -264,7 +267,7 @@ CREATE TABLE IF NOT EXISTS metricas_dispositivo (
         ON UPDATE CASCADE
 );
 
-COMMENT ON TABLE  metricas_dispositivo            IS 'Historial append-only de telemetría reportada por cada dispositivo (CPU, RAM disponible y temperatura del chip)';
+COMMENT ON TABLE  metricas_dispositivo            IS 'Historial append-only de telemetría reportada por cada dispositivo (CPU, RAM, almacenamiento y temperatura del chip)';
 COMMENT ON COLUMN metricas_dispositivo.id                    IS 'Identificador UUID del registro de métricas';
 COMMENT ON COLUMN metricas_dispositivo.dispositivo_id        IS 'FK al catálogo de dispositivos';
 COMMENT ON COLUMN metricas_dispositivo.cpu_pct               IS 'Uso de CPU en porcentaje (0-100)';
@@ -323,6 +326,48 @@ ALTER TABLE metricas_dispositivo
         CHECK (ai_processor_pct BETWEEN 0 AND 100);
 
 COMMENT ON COLUMN metricas_dispositivo.ai_processor_pct IS 'Uso del procesador de IA (NPU) en porcentaje (0-100)';
+
+-- ============================================================================
+-- ALTER: metricas_dispositivo — capacidad de memoria y almacenamiento (SCA-36)
+-- Idempotente para bases existentes. Las columnas quedan nullable para aceptar
+-- pings legacy que solo informan memoria RAM disponible.
+-- ============================================================================
+ALTER TABLE metricas_dispositivo
+    ADD COLUMN IF NOT EXISTS mem_ram_total_mb NUMERIC(10,2),
+    ADD COLUMN IF NOT EXISTS almacenamiento_disponible_mb NUMERIC(12,2),
+    ADD COLUMN IF NOT EXISTS almacenamiento_total_mb NUMERIC(12,2);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_mem_ram_total_no_negativo') THEN
+        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_mem_ram_total_no_negativo
+            CHECK (mem_ram_total_mb IS NULL OR mem_ram_total_mb >= 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_mem_ram_disponible_no_supera_total') THEN
+        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_mem_ram_disponible_no_supera_total
+            CHECK (mem_ram_total_mb IS NULL OR mem_ram_disponible_mb <= mem_ram_total_mb);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_almacenamiento_disponible_no_negativo') THEN
+        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_almacenamiento_disponible_no_negativo
+            CHECK (almacenamiento_disponible_mb IS NULL OR almacenamiento_disponible_mb >= 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_almacenamiento_total_no_negativo') THEN
+        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_almacenamiento_total_no_negativo
+            CHECK (almacenamiento_total_mb IS NULL OR almacenamiento_total_mb >= 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_almacenamiento_par') THEN
+        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_almacenamiento_par
+            CHECK ((almacenamiento_disponible_mb IS NULL) = (almacenamiento_total_mb IS NULL));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_almacenamiento_disponible_no_supera_total') THEN
+        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_almacenamiento_disponible_no_supera_total
+            CHECK (almacenamiento_total_mb IS NULL OR almacenamiento_disponible_mb IS NULL OR almacenamiento_disponible_mb <= almacenamiento_total_mb);
+    END IF;
+END $$;
+
+COMMENT ON COLUMN metricas_dispositivo.mem_ram_total_mb IS 'Memoria RAM total en MB (nullable para compatibilidad con pings legacy)';
+COMMENT ON COLUMN metricas_dispositivo.almacenamiento_disponible_mb IS 'Almacenamiento disponible en MB (nullable para compatibilidad con pings legacy)';
+COMMENT ON COLUMN metricas_dispositivo.almacenamiento_total_mb IS 'Almacenamiento total en MB (nullable para compatibilidad con pings legacy)';
 
 -- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)

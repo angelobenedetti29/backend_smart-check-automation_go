@@ -114,12 +114,15 @@ func (s *DispositivoService) ProcessPing(ctx context.Context, req dispositivo.Pi
 	}
 
 	metrica := dispositivo.MetricaDispositivo{
-		DispositivoID:      d.ID,
-		CpuPct:             req.CpuPct,
-		MemRamDisponibleMb: req.MemRamDisponibleMb,
-		TempChip:           req.TempChip,
-		AiProcessorPct:     req.AiProcessorPct,
-		ReceivedAt:         time.Now().UTC(),
+		DispositivoID:              d.ID,
+		CpuPct:                     req.CpuPct,
+		MemRamDisponibleMb:         req.MemRamDisponibleMb,
+		MemRamTotalMb:              req.MemRamTotalMb,
+		AlmacenamientoDisponibleMb: req.AlmacenamientoDisponibleMb,
+		AlmacenamientoTotalMb:      req.AlmacenamientoTotalMb,
+		TempChip:                   req.TempChip,
+		AiProcessorPct:             req.AiProcessorPct,
+		ReceivedAt:                 time.Now().UTC(),
 	}
 
 	// Persistir historial de forma asíncrona: el estado online no depende de la DB.

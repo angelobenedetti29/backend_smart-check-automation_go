@@ -2,8 +2,11 @@ package dispositivo
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
+
+const testDispositivoUUID = "b1c2d3e4-5678-90ab-cdef-1234567890ab"
 
 func TestPingRequestValidate_Valid(t *testing.T) {
 	req := PingRequest{
@@ -16,6 +19,98 @@ func TestPingRequestValidate_Valid(t *testing.T) {
 
 	if err := req.Validate(); err != nil {
 		t.Fatalf("expected no validation error, got: %v", err)
+	}
+}
+
+func TestPingRequestValidate_TelemetriaExtendida(t *testing.T) {
+	memTotal := 1024.0
+	almacenamientoDisponible := 20000.0
+	almacenamientoTotal := 64000.0
+	req := PingRequest{
+		DispositivoID:              testDispositivoUUID,
+		MemRamDisponibleMb:         512,
+		MemRamTotalMb:              &memTotal,
+		AlmacenamientoDisponibleMb: &almacenamientoDisponible,
+		AlmacenamientoTotalMb:      &almacenamientoTotal,
+	}
+
+	if err := req.Validate(); err != nil {
+		t.Fatalf("expected extended telemetry to be valid, got: %v", err)
+	}
+}
+
+func TestPingRequestValidate_DispositivoIDDebeSerUUID(t *testing.T) {
+	req := PingRequest{DispositivoID: "no-es-un-uuid"}
+
+	err := req.Validate()
+	if err == nil || !strings.Contains(err.Error(), "dispositivoId: debe ser un UUID válido") {
+		t.Fatalf("expected UUID validation error, got: %v", err)
+	}
+}
+
+func TestPingRequestValidate_TelemetriaExtendidaMantieneCompatibilidadLegacy(t *testing.T) {
+	req := PingRequest{DispositivoID: testDispositivoUUID, MemRamDisponibleMb: 512}
+
+	if err := req.Validate(); err != nil {
+		t.Fatalf("expected legacy telemetry without totals to remain valid, got: %v", err)
+	}
+}
+
+func TestPingRequestValidate_TelemetriaExtendidaRechazaRelacionesInvalidas(t *testing.T) {
+	memTotal := 100.0
+	almacenamientoDisponible := 200.0
+	almacenamientoTotal := 100.0
+	req := PingRequest{
+		DispositivoID:              testDispositivoUUID,
+		MemRamDisponibleMb:         101,
+		MemRamTotalMb:              &memTotal,
+		AlmacenamientoDisponibleMb: &almacenamientoDisponible,
+		AlmacenamientoTotalMb:      &almacenamientoTotal,
+	}
+
+	err := req.Validate()
+	if err == nil {
+		t.Fatal("expected invalid free/total relationships to be rejected")
+	}
+	if !strings.Contains(err.Error(), "memRamDisponibleMb: no puede superar memRamTotalMb") ||
+		!strings.Contains(err.Error(), "almacenamientoDisponibleMb: no puede superar almacenamientoTotalMb") {
+		t.Fatalf("expected both relationship errors, got: %v", err)
+	}
+}
+
+func TestPingRequestValidate_AlmacenamientoDebeInformarseComoPar(t *testing.T) {
+	almacenamiento := 100.0
+	tests := []PingRequest{
+		{DispositivoID: testDispositivoUUID, AlmacenamientoDisponibleMb: &almacenamiento},
+		{DispositivoID: testDispositivoUUID, AlmacenamientoTotalMb: &almacenamiento},
+	}
+
+	for i, req := range tests {
+		if err := req.Validate(); err == nil || !strings.Contains(err.Error(), "almacenamientoDisponibleMb y almacenamientoTotalMb: deben informarse juntos") {
+			t.Errorf("case %d: expected atomic storage pair validation error, got %v", i, err)
+		}
+	}
+}
+
+func TestPingRequestValidate_TelemetriaExtendidaRechazaTotalesNegativos(t *testing.T) {
+	memTotal := -1.0
+	almacenamientoDisponible := -1.0
+	almacenamientoTotal := -1.0
+	req := PingRequest{
+		DispositivoID:              testDispositivoUUID,
+		MemRamTotalMb:              &memTotal,
+		AlmacenamientoDisponibleMb: &almacenamientoDisponible,
+		AlmacenamientoTotalMb:      &almacenamientoTotal,
+	}
+
+	err := req.Validate()
+	if err == nil {
+		t.Fatal("expected negative optional telemetry values to be rejected")
+	}
+	for _, field := range []string{"memRamTotalMb: no puede ser negativo", "almacenamientoDisponibleMb: no puede ser negativo", "almacenamientoTotalMb: no puede ser negativo"} {
+		if !strings.Contains(err.Error(), field) {
+			t.Errorf("expected error %q, got: %v", field, err)
+		}
 	}
 }
 
@@ -56,7 +151,7 @@ func TestPingRequestValidate_BoundariesCpu(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := PingRequest{DispositivoID: "d1", CpuPct: tt.cpu}
+			req := PingRequest{DispositivoID: testDispositivoUUID, CpuPct: tt.cpu}
 			err := req.Validate()
 			if tt.ok && err != nil {
 				t.Fatalf("expected valid, got: %v", err)
@@ -82,7 +177,7 @@ func TestPingRequestValidate_BoundariesAiProcessor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := PingRequest{DispositivoID: "d1", AiProcessorPct: tt.ai}
+			req := PingRequest{DispositivoID: testDispositivoUUID, AiProcessorPct: tt.ai}
 			err := req.Validate()
 			if tt.ok && err != nil {
 				t.Fatalf("expected valid, got: %v", err)

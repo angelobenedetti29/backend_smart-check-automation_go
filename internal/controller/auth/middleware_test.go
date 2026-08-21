@@ -119,6 +119,20 @@ func TestJWTMiddleware_TokenValido_PasaAlHandler(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
 
+func TestJWTMiddleware_CualquierRolAutenticado_PasaAlHandler(t *testing.T) {
+	for _, role := range []string{"Operario", "Supervisor", "Administrador"} {
+		t.Run(role, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/dispositivos", nil)
+			req.AddCookie(buildValidCookie(t, role))
+			rr := httptest.NewRecorder()
+
+			JWTMiddleware(testSecret, dummyHandler)(rr, req)
+
+			assert.Equal(t, http.StatusOK, rr.Code)
+		})
+	}
+}
+
 func TestJWTMiddleware_ClaimsEnContexto(t *testing.T) {
 	// Verificar que los claims quedan disponibles en el contexto para handlers downstream
 	var capturedClaims *authService.Claims

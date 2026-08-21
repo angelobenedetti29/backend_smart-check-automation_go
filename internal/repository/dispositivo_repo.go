@@ -88,14 +88,19 @@ func (r *PostgresDispositivoRepository) Delete(ctx context.Context, id string) e
 func (r *PostgresDispositivoRepository) InsertMetrica(ctx context.Context, m *dispositivo.MetricaDispositivo) error {
 	const query = `
 		INSERT INTO metricas_dispositivo (
-			dispositivo_id, cpu_pct, mem_ram_disponible_mb, temp_chip, ai_processor_pct, received_at
-		) VALUES ($1, $2, $3, $4, $5, $6)
+			dispositivo_id, cpu_pct, mem_ram_disponible_mb, mem_ram_total_mb,
+			almacenamiento_disponible_mb, almacenamiento_total_mb,
+			temp_chip, ai_processor_pct, received_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id`
 
 	err := r.db.QueryRow(ctx, query,
 		m.DispositivoID,
 		m.CpuPct,
 		m.MemRamDisponibleMb,
+		m.MemRamTotalMb,
+		m.AlmacenamientoDisponibleMb,
+		m.AlmacenamientoTotalMb,
 		m.TempChip,
 		m.AiProcessorPct,
 		m.ReceivedAt,
@@ -113,7 +118,9 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT ON (d.id)
 			d.id, d.nombre, d.ubicacion, d.created_at,
-			m.id, m.cpu_pct, m.mem_ram_disponible_mb, m.temp_chip, m.ai_processor_pct, m.received_at
+			m.id, m.cpu_pct, m.mem_ram_disponible_mb, m.mem_ram_total_mb,
+			m.almacenamiento_disponible_mb, m.almacenamiento_total_mb,
+			m.temp_chip, m.ai_processor_pct, m.received_at
 		FROM dispositivos d
 		LEFT JOIN metricas_dispositivo m ON m.dispositivo_id = d.id
 		ORDER BY d.id, m.received_at DESC
@@ -126,16 +133,19 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 	items := []dispositivo.DispositivoConUltimaMetrica{}
 	for rows.Next() {
 		var (
-			d         dispositivo.Dispositivo
-			m         dispositivo.MetricaDispositivo
-			mID       *string
-			cpu       *float64
-			mem       *float64
-			tempChip  *float64
-			aiProc    *float64
-			received  *time.Time
+			d                        dispositivo.Dispositivo
+			m                        dispositivo.MetricaDispositivo
+			mID                      *string
+			cpu                      *float64
+			mem                      *float64
+			memTotal                 *float64
+			almacenamientoDisponible *float64
+			almacenamientoTotal      *float64
+			tempChip                 *float64
+			aiProc                   *float64
+			received                 *time.Time
 		)
-		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &d.CreatedAt, &mID, &cpu, &mem, &tempChip, &aiProc, &received); err != nil {
+		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &d.CreatedAt, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
 			return nil, fmt.Errorf("failed to scan dispositivo con ultima metrica: %w", err)
 		}
 
@@ -145,6 +155,9 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 			m.DispositivoID = d.ID
 			m.CpuPct = *cpu
 			m.MemRamDisponibleMb = *mem
+			m.MemRamTotalMb = memTotal
+			m.AlmacenamientoDisponibleMb = almacenamientoDisponible
+			m.AlmacenamientoTotalMb = almacenamientoTotal
 			m.TempChip = *tempChip
 			m.AiProcessorPct = *aiProc
 			m.ReceivedAt = *received
@@ -193,7 +206,9 @@ func (r *PostgresDispositivoRepository) GetMetricasByDispositivo(ctx context.Con
 	offset := (page - 1) * pageSize
 
 	rows, err := r.db.Query(ctx, `
-		SELECT id, dispositivo_id, cpu_pct, mem_ram_disponible_mb, temp_chip, ai_processor_pct, received_at
+		SELECT id, dispositivo_id, cpu_pct, mem_ram_disponible_mb, mem_ram_total_mb,
+			almacenamiento_disponible_mb, almacenamiento_total_mb,
+			temp_chip, ai_processor_pct, received_at
 		FROM metricas_dispositivo
 		WHERE dispositivo_id = $1
 		ORDER BY received_at DESC
@@ -206,12 +221,22 @@ func (r *PostgresDispositivoRepository) GetMetricasByDispositivo(ctx context.Con
 
 	items := []dispositivo.MetricaDispositivo{}
 	for rows.Next() {
-		var m dispositivo.MetricaDispositivo
+		var (
+			m                        dispositivo.MetricaDispositivo
+			memTotal                 *float64
+			almacenamientoDisponible *float64
+			almacenamientoTotal      *float64
+		)
 		if err := rows.Scan(
-			&m.ID, &m.DispositivoID, &m.CpuPct, &m.MemRamDisponibleMb, &m.TempChip, &m.AiProcessorPct, &m.ReceivedAt,
+			&m.ID, &m.DispositivoID, &m.CpuPct, &m.MemRamDisponibleMb,
+			&memTotal, &almacenamientoDisponible, &almacenamientoTotal,
+			&m.TempChip, &m.AiProcessorPct, &m.ReceivedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan metrica_dispositivo: %w", err)
 		}
+		m.MemRamTotalMb = memTotal
+		m.AlmacenamientoDisponibleMb = almacenamientoDisponible
+		m.AlmacenamientoTotalMb = almacenamientoTotal
 		items = append(items, m)
 	}
 	if err := rows.Err(); err != nil {
