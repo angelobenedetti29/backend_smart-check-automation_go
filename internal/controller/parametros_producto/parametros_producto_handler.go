@@ -16,9 +16,8 @@ const maxRequestBodyBytes = 1 << 20 // 1 MB
 // ParametrosProductoHandler maneja los endpoints HTTP del ABM de parámetros y
 // umbrales de control por producto.
 //
-// NOTA: estos endpoints todavía no requieren autenticación de usuario porque el
-// login con Google OAuth 2.0 está pendiente (ver CLAUDE.md). Cuando se implemente,
-// GET/POST/PUT deben quedar restringidos a usuarios con rol Supervisor.
+// NOTA: los endpoints requieren JWT: GET admite cualquier rol autenticado;
+// POST/PUT solo Supervisor/Admin (ver cmd/server/main.go).
 type ParametrosProductoHandler struct {
 	service parametrosproducto.Service
 }
