@@ -270,7 +270,6 @@ COMMENT ON COLUMN metricas_dispositivo.dispositivo_id        IS 'FK al catálogo
 COMMENT ON COLUMN metricas_dispositivo.cpu_pct               IS 'Uso de CPU en porcentaje (0-100)';
 COMMENT ON COLUMN metricas_dispositivo.mem_ram_disponible_mb IS 'Memoria RAM disponible en MB';
 COMMENT ON COLUMN metricas_dispositivo.temp_chip             IS 'Temperatura interna del chip en °C';
-COMMENT ON COLUMN metricas_dispositivo.ai_processor_pct      IS 'Uso del procesador de IA (NPU) en porcentaje (0-100)';
 COMMENT ON COLUMN metricas_dispositivo.received_at           IS 'Marca temporal en que el backend recibió la métrica';
 
 -- Índice para la consulta más frecuente: historial por dispositivo ordenado por tiempo

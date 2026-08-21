@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
+	schema "github.com/angelobenedetti29/smart-check-automation/database"
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	consignaController "github.com/angelobenedetti29/smart-check-automation/internal/controller/consigna"
 	dispositivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/dispositivo"
@@ -68,6 +69,13 @@ func main() {
 	defer pgPool.Close()
 
 	log.Println("Pool de conexiones a PostgreSQL inicializado y verificado exitosamente.")
+
+	// Aplicar el schema idempotente: garantiza que las tablas, columnas e
+	// índices estén al día en bases existentes (CREATE/ADD IF NOT EXISTS).
+	if err := schema.Apply(context.Background(), pgPool); err != nil {
+		log.Fatalf("Error fatal al aplicar schema de base de datos: %v", err)
+	}
+	log.Println("Schema de base de datos aplicado/verificado correctamente.")
 
 	// 2. Instantiate Infrastructure Adapters (Providers Layer)
 	dbRepo := database.NewPostgresRepository()
