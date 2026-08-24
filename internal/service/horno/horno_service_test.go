@@ -8,7 +8,7 @@ import (
 )
 
 func TestHornoService_UpdateTemperature_Normal(t *testing.T) {
-	hRepo := database.NewMySQLRepository()
+	hRepo := database.NewPostgresRepository()
 	aRepo := hRepo // Simulates dual interface implementation
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500")
 
@@ -32,7 +32,7 @@ func TestHornoService_UpdateTemperature_Normal(t *testing.T) {
 }
 
 func TestHornoService_UpdateTemperature_Warning(t *testing.T) {
-	hRepo := database.NewMySQLRepository()
+	hRepo := database.NewPostgresRepository()
 	aRepo := hRepo
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500")
 
@@ -60,7 +60,7 @@ func TestHornoService_UpdateTemperature_Warning(t *testing.T) {
 }
 
 func TestHornoService_UpdateTemperature_Critical(t *testing.T) {
-	hRepo := database.NewMySQLRepository()
+	hRepo := database.NewPostgresRepository()
 	aRepo := hRepo
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500")
 

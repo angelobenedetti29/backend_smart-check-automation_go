@@ -1,0 +1,17 @@
+# Environment variables (contain credentials for Aiven PostgreSQL)
+.env
+
+# AI tool files — generados por/para agentes de IA, no para el equipo
+.claude/
+.agents/
+skills-lock.json
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

@@ -1,156 +1,298 @@
-# Smart-Check Automation Backend 🚀
+# Smart-Check Automation — Backend
 
-Este es el backend transaccional de la aplicación para **Fermar**, diseñado bajo una **Arquitectura de Capas / Clean Architecture** en **Golang**. El sistema se encarga de monitorear el estado de los hornos industriales, disparar alertas transaccionales ante anomalías y simular análisis de visión artificial mediante YOLO en la cinta transportadora de carga.
+Backend REST en Go para el sistema de supervisión inteligente de hornos túnel de Fermar S.A.
+Registra y consulta lotes productivos, monitorea temperaturas de hornos y recibe datos de nodos Raspberry Pi via HTTP.
 
----
+## Stack
 
-## 🏗️ Estructura del Proyecto
-El código se organiza siguiendo principios de diseño limpio y dominio desacoplado:
-*   `cmd/server/`: Punto de entrada (`main.go`) que inicializa las capas e inyecta dependencias.
-*   `internal/domain/`: Capa de dominio pura sin dependencias externas. Contiene entidades e interfaces (`horno`, `alerta`).
-*   `internal/service/`: Lógica de negocio (procesamiento de umbrales térmicos y disparadores de alertas).
-*   `internal/controller/`: Capa de presentación HTTP (manejadores de rutas y validación de entradas).
-*   `internal/provider/`: Adaptadores externos de infraestructura (Simulación de base de datos MySQL e integración YOLO).
-*   `pkg/`: Paquetes comunes compartidos (utilidades de respuestas JSON estándar).
+| Capa | Tecnología |
+|---|---|
+| Lenguaje | Go 1.25 |
+| Base de datos | PostgreSQL 16 |
+| Driver DB | pgx/v5 |
+| Infraestructura local | Docker + Docker Compose |
+| Autenticación | API Key (header `X-API-Key`) |
 
----
+## Arquitectura
 
-## 🛠️ Requisitos Previos
-*   **Go** versión `1.20` o superior instalado. Puedes comprobar tu versión ejecutando:
-    ```bash
-    go version
-    ```
+El proyecto sigue el patrón por capas: **Handler → Service → Repository → PostgreSQL**
 
----
-
-## 🚀 Cómo Levantar el Servidor en Local
-
-1.  **Abrir una terminal** en el directorio raíz del proyecto (`test_backend_go/`).
-2.  **Ejecutar el comando de arranque**:
-    ```bash
-    go run cmd/server/main.go
-    ```
-3.  El servidor iniciará e imprimirá los logs de inicialización de telemetría de Industria 4.0:
-    ```text
-    Initializing Smart-Check Automation Backend (Layered/Clean Architecture - Modular)...
-    Transactional server running on http://localhost:8080
-    ```
-
----
-
-## 🧪 Cómo Ejecutar las Pruebas Unitarias
-El proyecto cuenta con cobertura de pruebas automatizadas en todas sus capas críticas. Para correrlas, ejecuta:
-```bash
-go test ./internal/... -v
+```
+cmd/server/main.go              # Entry point, wiring de dependencias
+internal/
+  controller/                   # Handlers HTTP (capa de presentación)
+  service/                      # Lógica de negocio
+  domain/                       # Modelos y contratos (interfaces)
+  repository/                   # Repositorios reales contra PostgreSQL
+  provider/database/            # Conexión al pool de PostgreSQL
+database/schema.sql             # DDL: tablas, constraints, índices, seed
 ```
 
 ---
 
-## 📡 Guía de Interacción con los Endpoints
+## Endpoints
 
-El servidor expone los siguientes endpoints HTTP nativos en el puerto `8080`.
+### GET /health
 
-### 1. Endpoint Índice / Estado de Servidor (`GET /`)
-Comprueba si el servidor web está corriendo correctamente.
+Verifica conectividad con PostgreSQL.
 
-*   **Bash / cURL**:
-    ```bash
-    curl -i http://localhost:8080/
-    ```
-*   **Windows PowerShell**:
-    ```powershell
-    Invoke-RestMethod -Uri "http://localhost:8080/"
-    ```
+```
+200 OK    → {"status":"healthy"}
+503       → {"status":"unhealthy","reason":"database unreachable"}
+```
 
 ---
 
-### 2. Consulta de Estado de Horno (`GET /api/v1/horno`)
-Obtiene el estado en tiempo real del horno. Ejecuta una inspección automática de la cinta mediante visión computacional YOLO. Si detecta un defecto visual (15% de probabilidad simulada), registrará una alerta crítica y cambiará el estado del horno a `MANTENIMIENTO`.
+### GET /api/v1/lotes-productivos
 
-*   **Parámetros query requeridos**:
-    *   `id`: Identificador del horno (por defecto el inicializado es `horno-01`).
+Devuelve lotes productivos paginados, ordenados por `inicio_at` descendente.
 
-*   **Bash / cURL**:
-    ```bash
-    curl -i "http://localhost:8080/api/v1/horno?id=horno-01"
-    ```
-*   **Windows PowerShell**:
-    ```powershell
-    Invoke-RestMethod -Uri "http://localhost:8080/api/v1/horno?id=horno-01" | ConvertTo-Json -Depth 10
-    ```
+**Query params:**
+| Param | Default | Máximo |
+|---|---|---|
+| `page` | 1 | — |
+| `pageSize` | 10 | 100 |
 
-*   **Respuesta JSON esperada**:
-    ```json
-    {
-      "success": true,
-      "message": "Estado de Horno verificado exitosamente",
-      "data": {
-        "conveyor_checked": true,
-        "horno": {
-          "id": "horno-01",
-          "nombre": "Horno Rotativo de Clinkerización A-1",
-          "temperatura": 185.3,
-          "estado": "ACTIVO",
-          "ultimo_check": "2026-05-26T22:40:18.7404336-03:00"
-        },
-        "alertas_recientes": [],
-        "saludo": "Hola Mundo desde el controlador de Horno en Arquitectura de Capas Go!"
-      }
-    }
-    ```
+**Respuesta 200:**
+```json
+{
+  "success": true,
+  "message": "Lotes productivos obtenidos exitosamente",
+  "data": [{ ... }],
+  "total": 42,
+  "page": 1,
+  "pageSize": 10
+}
+```
 
 ---
 
-### 3. Actualizar Temperatura e Historial Transaccional (`POST /api/v1/horno/temperatura`)
-Actualiza manualmente la temperatura de un horno. Evalúa las siguientes reglas lógicas del servicio de forma automática:
-*   Si temperatura **> 180°C**: Genera una alerta transaccional de tipo `WARNING` y pasa el horno a estado `ATENCION`.
-*   Si temperatura **> 200°C**: Genera una alerta transaccional de tipo `CRITICAL` en base de datos y bloquea el horno en estado `MANTENIMIENTO`.
-*   Si temperatura **<= 180°C**: El horno opera en rango seguro, el estado es `ACTIVO`.
+### POST /api/v1/lotes
 
-*   **Esquema del Body JSON**:
-    ```json
+Registra un lote productivo enviado por la Raspberry Pi. Requiere `X-API-Key`.
+
+**Headers requeridos:**
+| Header | Valor |
+|---|---|
+| `Content-Type` | `application/json` |
+| `X-API-Key` | Valor de `API_KEY_SECRET` en `.env` |
+
+**Body:**
+```json
+{
+  "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "productoNombre": "Tostada Integral",
+  "turno": "tarde",
+  "inicioAt": "2026-06-12T14:00:00Z",
+  "finAt": "2026-06-12T18:00:00Z",
+  "totalUnidades": 500,
+  "correctos": 480,
+  "quemados": 20,
+  "crudas": null,
+  "correctosKg": 96.0,
+  "quemadosKg": 4.0,
+  "crudosKg": null,
+  "tempHorno1": 188.0,
+  "tempHorno2": 192.0,
+  "velocidadCinta": 1.1,
+  "createdAt": "2026-06-12T14:00:00Z",
+  "updatedAt": "2026-06-12T18:00:00Z"
+}
+```
+
+**Reglas de validación:**
+- `productoId` requerido y no vacío
+- `turno` debe ser `mañana`, `tarde` o `noche`
+- `correctos + quemados + crudas (si se envía) <= totalUnidades`
+- `finAt >= inicioAt`
+- Unidades, pesos y velocidad no negativos
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 201 | Lote creado |
+| 400 | JSON malformado o body > 1MB |
+| 401 | API key inválida o ausente |
+| 415 | Content-Type incorrecto |
+| 422 | Error de validación de negocio |
+| 500 | Error de base de datos |
+
+---
+
+### GET /api/v1/parametros-producto
+
+Devuelve todos los sets de parámetros y umbrales de control configurados, uno por producto, ordenados por nombre. Usado por el panel de configuración del Supervisor.
+
+**Respuesta 200:**
+```json
+{
+  "success": true,
+  "message": "Parámetros por producto obtenidos exitosamente",
+  "data": [
     {
-      "id": "horno-01",
-      "temperatura": 212.8
+      "id": "de91d67e-a9e1-4b69-a08a-46a965a4b728",
+      "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+      "productoNombre": "Tostada Integral",
+      "pesoReferenciaKg": 0.03,
+      "toleranciaPesoPct": 10,
+      "dimensionBaseCm": 8,
+      "toleranciaDimensionCm": 0.5,
+      "tempMin": 160,
+      "tempMax": 180,
+      "velocidadCintaMin": 0.1,
+      "velocidadCintaMax": 0.3,
+      "activo": true,
+      "createdAt": "2026-07-23T23:10:05Z",
+      "updatedAt": "2026-07-23T23:10:05Z"
     }
-    ```
+  ]
+}
+```
 
-*   **Bash / cURL**:
-    ```bash
-    curl -i -X POST \
-      -H "Content-Type: application/json" \
-      -d '{"id":"horno-01","temperatura":212.8}' \
-      http://localhost:8080/api/v1/horno/temperatura
-    ```
-*   **Windows PowerShell**:
-    ```powershell
-    Invoke-RestMethod -Uri "http://localhost:8080/api/v1/horno/temperatura" \
-      -Method Post \
-      -Body '{"id":"horno-01","temperatura":212.8}' \
-      -ContentType "application/json" | ConvertTo-Json -Depth 10
-    ```
+---
 
-*   **Respuesta JSON esperada (Disparo de Alerta Crítica)**:
-    ```json
-    {
-      "success": true,
-      "message": "Temperatura del horno actualizada transaccionalmente",
-      "data": {
-        "alertas_totales": 1,
-        "horno": {
-          "id": "horno-01",
-          "nombre": "Horno Rotativo de Clinkerización A-1",
-          "temperatura": 212.8,
-          "estado": "MANTENIMIENTO",
-          "ultimo_check": "2026-05-26T22:40:29.4106943-03:00"
-        },
-        "ultima_alerta": {
-          "id": "alt-temp-1779846029410694300",
-          "horno_id": "horno-01",
-          "nivel": "CRITICAL",
-          "mensaje": "Temperatura crítica excedida: 212.8°C. Límite seguro: 200.0°C (Previa: 185.3°C)",
-          "creada_en": "2026-05-26T22:40:29.4106943-03:00"
-        }
-      }
-    }
-    ```
+### POST /api/v1/parametros-producto
+
+Da de alta un nuevo set de parámetros para un producto que todavía no tiene uno cargado. No requiere `X-API-Key` (login con Google OAuth 2.0 pendiente — ver sección de tareas).
+
+**Body:**
+```json
+{
+  "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "pesoReferenciaKg": 0.03,
+  "toleranciaPesoPct": 10,
+  "dimensionBaseCm": 8,
+  "toleranciaDimensionCm": 0.5,
+  "tempMin": 160,
+  "tempMax": 180,
+  "velocidadCintaMin": 0.1,
+  "velocidadCintaMax": 0.3
+}
+```
+
+**Reglas de validación** (replican los CHECK constraints de `parametros_producto`):
+- `productoId` requerido y no vacío
+- `pesoReferenciaKg` y `dimensionBaseCm` deben ser mayores a 0
+- `toleranciaPesoPct` y `toleranciaDimensionCm` no pueden ser negativos
+- `tempMax` debe ser mayor a `tempMin`
+- `velocidadCintaMax` debe ser mayor a `velocidadCintaMin`
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 201 | Parámetros creados |
+| 400 | JSON malformado o body > 1MB |
+| 409 | El producto ya tiene un set de parámetros cargado |
+| 415 | Content-Type incorrecto |
+| 422 | Error de validación de negocio, o `productoId` inexistente en el catálogo |
+| 500 | Error de base de datos |
+
+---
+
+### PUT /api/v1/parametros-producto
+
+Modifica el set de parámetros existente de un producto. El `productoId` (dentro del body) identifica el registro a actualizar — no hay path param. El sistema aplica los nuevos rangos de inmediato a los próximos lotes de ese producto.
+
+**Body:** mismo formato que el POST, incluyendo todos los campos (reemplazo completo, no parcial).
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 200 | Parámetros actualizados |
+| 400 | JSON malformado o body > 1MB |
+| 404 | No existe un set de parámetros para el `productoId` indicado |
+| 415 | Content-Type incorrecto |
+| 422 | Error de validación de negocio |
+| 500 | Error de base de datos |
+
+---
+
+### GET /api/v1/horno?id=horno-01
+
+Consulta el estado del horno y ejecuta una inspección visual (YOLO).
+
+---
+
+### POST /api/v1/horno/temperatura
+
+Actualiza la temperatura del horno y aplica reglas de umbral:
+
+| Temperatura | Estado | Alerta |
+|---|---|---|
+| > 200°C | MANTENIMIENTO | CRITICAL |
+| 180–200°C | ATENCION | WARNING |
+| ≤ 180°C | ACTIVO | — |
+
+**Body:**
+```json
+{ "id": "horno-01", "temperatura": 212.8 }
+```
+
+---
+
+### POST /api/v1/dispositivos/ping
+
+Recibe el heartbeat de telemetría de una Raspberry Pi (cada ~10s): uso de CPU, memoria RAM, almacenamiento y temperatura interna del chip. Autenticado con header `X-API-Key`.
+
+**Body:**
+```json
+{
+  "dispositivoId": "b1c2d3e4-5678-90ab-cdef-1234567890ab",
+  "cpuPct": 42.5,
+  "memRamDisponibleMb": 512.0,
+  "memRamTotalMb": 1024.0,
+  "almacenamientoDisponibleMb": 20000.0,
+  "almacenamientoTotalMb": 64000.0,
+  "tempChip": 58.3
+}
+```
+
+`dispositivoId` debe ser un UUID válido. Los tres campos nuevos son opcionales. `almacenamientoDisponibleMb` y `almacenamientoTotalMb` deben informarse juntos; los pings legacy pueden omitirlos.
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 200 | Ping procesado. `data.estado` indica `online`/`offline` actual |
+| 400 | JSON malformado o body > 1MB |
+| 401 | API key inválida o ausente |
+| 415 | Content-Type incorrecto |
+| 422 | Error de validación, o `dispositivoId` inexistente en el catálogo |
+| 500 | Error interno |
+
+---
+
+### GET /api/v1/dispositivos
+
+Devuelve el estado de salud actual (`online`/`offline`) de todos los dispositivos, con la última métrica y `lastSeen`.
+Requiere la cookie JWT `session_token`; no aplica restricción de rol.
+La misma autenticación aplica a `POST`, `PUT` y `DELETE /api/v1/dispositivos`.
+
+---
+
+### GET /api/v1/dispositivos/metricas?dispositivoId=...&page=1&pageSize=10
+
+Devuelve el historial paginado de métricas de un dispositivo, ordenado por `receivedAt` descendente.
+Requiere la cookie JWT `session_token`; no aplica restricción de rol.
+
+**Códigos de respuesta:**
+| Código | Significado |
+|---|---|
+| 200 | Historial paginado obtenido |
+| 400 | Falta el parámetro `dispositivoId` |
+| 404 | El dispositivo no existe en el catálogo |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 500 | Error de base de datos |
+
+---
+
+### GET /api/v1/dispositivos/events
+
+Stream SSE de telemetría de dispositivos. Eventos:
+- Requiere la cookie JWT `session_token`; no aplica restricción de rol.
+- `dispositivo.metric`: se emite en cada ping con la última métrica.
+- `dispositivo.state`: se emite solo cuando un dispositivo transiciona `online`↔`offline`.
+
+```json
+event: dispositivo.state
+data: {"success":true,"message":"El estado del dispositivo cambió a offline","data":{...}}
+```

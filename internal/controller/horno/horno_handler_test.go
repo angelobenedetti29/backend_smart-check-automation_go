@@ -14,7 +14,7 @@ import (
 
 func TestHornoHandler_GetHornoStatus(t *testing.T) {
 	// Initialize core database providers and service layers
-	dbRepo := database.NewMySQLRepository()
+	dbRepo := database.NewPostgresRepository()
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500")
 	svc := service.NewHornoService(dbRepo, dbRepo, yolo)
 	handler := NewHornoHandler(svc, dbRepo)
@@ -51,7 +51,7 @@ func TestHornoHandler_GetHornoStatus(t *testing.T) {
 }
 
 func TestHornoHandler_UpdateTemperature(t *testing.T) {
-	dbRepo := database.NewMySQLRepository()
+	dbRepo := database.NewPostgresRepository()
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500")
 	svc := service.NewHornoService(dbRepo, dbRepo, yolo)
 	handler := NewHornoHandler(svc, dbRepo)
