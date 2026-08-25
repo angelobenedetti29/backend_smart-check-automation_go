@@ -52,8 +52,9 @@ func main() {
 	// Validar variables de entorno requeridas para auth antes de iniciar el servidor
 	googleClientID := os.Getenv("GOOGLE_CLIENT_ID")
 	jwtSecret := os.Getenv("JWT_SECRET")
-	if googleClientID == "" || jwtSecret == "" {
-		log.Fatal("GOOGLE_CLIENT_ID y JWT_SECRET son requeridos. Verifica el archivo .env")
+	apiKeySecret := os.Getenv("API_KEY_SECRET")
+	if googleClientID == "" || jwtSecret == "" || apiKeySecret == "" {
+		log.Fatal("GOOGLE_CLIENT_ID, JWT_SECRET y API_KEY_SECRET son requeridos. Verifica el archivo .env")
 	}
 
 	// 1. Initialize PostgreSQL connection pool
@@ -157,7 +158,7 @@ func main() {
 	// Rutas del dominio industrial
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoHandler.GetHornoStatus)))
 	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleSupervisor, user.RoleAdmin}, hornoHandler.UpdateTemperature))))
-	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
+	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(authController.APIKeyMiddleware(apiKeySecret, loteHandler.HandleCreateLote)))
 	mux.HandleFunc("/api/v1/lotes/inicio", loggingMiddleware(loteHandler.HandleIniciarLote))
 	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteProductivoHandler.GetAll)))
 	parametrosRoleAware := func(w http.ResponseWriter, r *http.Request) {
