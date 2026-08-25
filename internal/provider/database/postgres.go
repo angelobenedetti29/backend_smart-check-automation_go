@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,6 +31,14 @@ func NewPostgresPool(ctx context.Context, connString string) (*pgxpool.Pool, err
 	config.MinConns = 1
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
+
+	// Poolers en modo transaction (Supabase Supavisor/PgBouncer) rotan la
+	// conexión física por transacción, por lo que el statement cache de pgx
+	// (nombres estilo "stmtcache_...") puede colisionar con uno ya preparado
+	// por otra sesión en el mismo backend (SQLSTATE 42P05). DescribeExec sigue
+	// usando el protocolo extendido (binary, soporta arrays/JSON) pero prepara
+	// cada statement como "unnamed", sin cachear el nombre entre queries.
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
