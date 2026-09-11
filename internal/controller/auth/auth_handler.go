@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -15,6 +16,14 @@ import (
 // maxLoginBodyBytes limita el body del login a 8 KB.
 // Un Google ID Token típico pesa ~1–2 KB; este límite previene DoS por body enorme.
 const maxLoginBodyBytes = 8 * 1024
+
+// authRequestTimeout acota el tiempo total de las operaciones de login que
+// realizan I/O: consulta a PostgreSQL (bcrypt está acotado por costo fijo) y la
+// verificación de red del ID Token contra los servidores de Google.
+// 10s es holgado incluso para el primer fetch de las claves públicas de Google
+// desde una red lenta, y deja 5s de margen frente al WriteTimeout (15s) del
+// http.Server para poder responder el error controlado al cliente.
+const authRequestTimeout = 10 * time.Second
 
 // googleLoginRequest es el payload esperado del frontend al hacer login con Google.
 type googleLoginRequest struct {
@@ -63,9 +72,21 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jwtToken, err := h.svc.LoginWithCredentials(r.Context(), req.Email, req.Password)
+	// Deadline explícito: acota la consulta a PostgreSQL del flujo local.
+	// El ctx se propaga handler → service → repo; el defer cancel() libera el
+	// timer aunque el service retorne antes del vencimiento.
+	ctx, cancel := context.WithTimeout(r.Context(), authRequestTimeout)
+	defer cancel()
+
+	jwtToken, err := h.svc.LoginWithCredentials(ctx, req.Email, req.Password)
 	if err != nil {
 		log.Printf("[SECURITY] Login local fallido desde %s para email %s — razón: %v", r.RemoteAddr, req.Email, err)
+
+		// Deadline excedido: error controlado de infraestructura (no credenciales).
+		if errors.Is(err, context.DeadlineExceeded) {
+			response.Error(w, http.StatusGatewayTimeout, "Tiempo de espera agotado durante la autenticación", nil)
+			return
+		}
 
 		if errors.Is(err, user.ErrInvalidCredentials) || errors.Is(err, user.ErrUserNotFound) {
 			response.Error(w, http.StatusUnauthorized, "Credenciales inválidas", nil)
@@ -118,11 +139,23 @@ func (h *AuthHandler) LoginWithGoogle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jwtToken, err := h.svc.LoginWithGoogle(r.Context(), req.GoogleToken)
+	// Deadline explícito: cubre la llamada de red a Google (idtoken.Validate)
+	// y la posterior verificación del usuario en PostgreSQL. Se propaga
+	// handler → service → provider/repo; defer cancel() libera el timer.
+	ctx, cancel := context.WithTimeout(r.Context(), authRequestTimeout)
+	defer cancel()
+
+	jwtToken, err := h.svc.LoginWithGoogle(ctx, req.GoogleToken)
 	if err != nil {
 		// AUDIT: registrar el intento fallido con IP pero SIN el Google Token
 		// (podría contener información personal si se logueara completo)
 		log.Printf("[SECURITY] Login fallido desde %s — razón: %v", r.RemoteAddr, err)
+
+		// Deadline excedido (Google o PostgreSQL): error controlado, no 401.
+		if errors.Is(err, context.DeadlineExceeded) {
+			response.Error(w, http.StatusGatewayTimeout, "Tiempo de espera agotado durante la autenticación", nil)
+			return
+		}
 
 		if errors.Is(err, user.ErrInvalidToken) {
 			response.Error(w, http.StatusUnauthorized, "Token de Google inválido o expirado", nil)
@@ -163,6 +196,11 @@ func (h *AuthHandler) LoginWithGoogle(w http.ResponseWriter, r *http.Request) {
 // Logout procesa POST /api/v1/auth/logout.
 // Revoca la cookie de sesión enviando una cookie con MaxAge=-1,
 // lo que instruye al navegador a eliminarla inmediatamente.
+//
+// Nota sobre timeouts: Logout es puramente local (no consulta DB ni servicios
+// externos) — solo construye la cookie de borrado y responde. Por eso no
+// requiere un context.WithTimeout; agregarlo sería código muerto. El flujo
+// queda acotado de todos modos por el WriteTimeout del http.Server.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)

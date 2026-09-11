@@ -183,6 +183,37 @@ func TestLoginWithGoogle_ErrorDeInfraestructura(t *testing.T) {
 	assert.NotErrorIs(t, err, user.ErrInvalidToken)
 }
 
+func TestLoginWithGoogle_DeadlineExcedido(t *testing.T) {
+	// El verifier agota el deadline: el service debe propagar el error de
+	// contexto en vez de enmascararlo como token inválido.
+	verifier := &mockGoogleVerifier{
+		verifyFunc: func(ctx context.Context, idToken string) (*user.GoogleClaims, error) {
+			return nil, context.DeadlineExceeded
+		},
+	}
+	svc := newTestService(verifier, &mockUserRepo{})
+
+	_, err := svc.LoginWithGoogle(context.Background(), "valid-google-token")
+
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotErrorIs(t, err, user.ErrInvalidToken)
+}
+
+func TestLoginWithCredentials_DeadlineExcedido(t *testing.T) {
+	// El repo agota el deadline: el error de contexto debe llegar envuelto (%w)
+	// hasta el caller para que el handler responda un timeout controlado.
+	repo := &mockUserRepo{
+		findByEmailFunc: func(ctx context.Context, email string) (*user.User, error) {
+			return nil, context.DeadlineExceeded
+		},
+	}
+	svc := newTestService(nil, repo)
+
+	_, err := svc.LoginWithCredentials(context.Background(), "user@fermar.com.ar", "password123")
+
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 func TestLoginWithCredentials_CamposVacios(t *testing.T) {
 	svc := newTestService(nil, nil)
 
