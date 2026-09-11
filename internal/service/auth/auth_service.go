@@ -77,7 +77,13 @@ func (s *AuthService) LoginWithGoogle(ctx context.Context, googleToken string) (
 	// 1. Verificar firma y claims del token de Google
 	googleClaims, err := s.verifier.Verify(ctx, googleToken)
 	if err != nil {
-		// Cualquier error del verifier se trata como token inválido
+		// Preservar deadline/cancelación del contexto: permiten distinguir un
+		// timeout de infraestructura (Google no respondió) de un token inválido.
+		// El handler lo traduce a un 504 controlado en lugar de un 401.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return "", err
+		}
+		// Cualquier otro error del verifier se trata como token inválido
 		return "", user.ErrInvalidToken
 	}
 

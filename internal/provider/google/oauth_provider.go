@@ -2,6 +2,7 @@ package google
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"google.golang.org/api/idtoken"
@@ -29,6 +30,11 @@ func NewOAuthProvider(clientID string) *OAuthProvider {
 func (p *OAuthProvider) Verify(ctx context.Context, idToken string) (*user.GoogleClaims, error) {
 	payload, err := idtoken.Validate(ctx, idToken, p.clientID)
 	if err != nil {
+		// Preservar deadline/cancelación del contexto: permiten al service y al
+		// handler distinguir un timeout de red de Google de un token inválido.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, err
+		}
 		// Nunca propagar el error interno de Google hacia arriba:
 		// podría contener información sensible sobre la causa del fallo.
 		return nil, fmt.Errorf("%w: %v", user.ErrInvalidToken, "verificación fallida")

@@ -1,16 +1,24 @@
 package user
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
 	userService "github.com/angelobenedetti29/smart-check-automation/internal/service/user"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
+
+// userRequestTimeout acota el tiempo de las consultas de gestión de usuarios
+// contra PostgreSQL. 10s deja margen frente al WriteTimeout (15s) del
+// http.Server para poder responder un 504 controlado antes de que la conexión
+// se corte.
+const userRequestTimeout = 10 * time.Second
 
 type UserHandler struct {
 	svc *userService.Service
@@ -66,8 +74,15 @@ func (h *UserHandler) HandleUserByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := h.svc.ListUsers(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), userRequestTimeout)
+	defer cancel()
+
+	users, err := h.svc.ListUsers(ctx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			response.Error(w, http.StatusGatewayTimeout, "Tiempo de espera agotado al obtener usuarios", nil)
+			return
+		}
 		response.Error(w, http.StatusInternalServerError, "Error al obtener lista de usuarios", nil)
 		return
 	}
@@ -94,7 +109,10 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := h.svc.CreateUser(r.Context(), userService.CreateUserRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), userRequestTimeout)
+	defer cancel()
+
+	u, err := h.svc.CreateUser(ctx, userService.CreateUserRequest{
 		Email:    payload.Email,
 		Nombre:   payload.Nombre,
 		Rol:      payload.Rol,
@@ -102,6 +120,10 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			response.Error(w, http.StatusGatewayTimeout, "Tiempo de espera agotado al crear usuario", nil)
+			return
+		}
 		if errors.Is(err, user.ErrDuplicateEmail) {
 			response.Error(w, http.StatusConflict, err.Error(), nil)
 			return
@@ -149,7 +171,10 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		activoVal = *payload.Activo
 	}
 
-	u, err := h.svc.UpdateUser(r.Context(), userService.UpdateUserRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), userRequestTimeout)
+	defer cancel()
+
+	u, err := h.svc.UpdateUser(ctx, userService.UpdateUserRequest{
 		ID:         userID,
 		Nombre:     payload.Nombre,
 		Rol:        payload.Rol,
@@ -158,6 +183,10 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			response.Error(w, http.StatusGatewayTimeout, "Tiempo de espera agotado al actualizar usuario", nil)
+			return
+		}
 		if errors.Is(err, user.ErrUserNotFound) {
 			response.Error(w, http.StatusNotFound, "Usuario no encontrado", nil)
 			return

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ const (
 const (
 	maxNombreLength    = 100
 	maxUbicacionLength = 100
+	maxWhepURLLength   = 500
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -47,6 +49,7 @@ type Dispositivo struct {
 	ID        string    `json:"id"        db:"id"`
 	Nombre    string    `json:"nombre"    db:"nombre"`
 	Ubicacion string    `json:"ubicacion" db:"ubicacion"`
+	WhepURL   string    `json:"whepUrl,omitempty" db:"whep_url"`
 	CreatedAt time.Time `json:"createdAt" db:"created_at"`
 }
 
@@ -70,6 +73,7 @@ type EstadoDispositivo struct {
 	DispositivoID string              `json:"dispositivoId"`
 	Nombre        string              `json:"nombre"`
 	Ubicacion     string              `json:"ubicacion"`
+	WhepURL       string              `json:"whepUrl,omitempty"`
 	Estado        string              `json:"estado"`
 	UltimaMetrica *MetricaDispositivo `json:"ultimaMetrica,omitempty"`
 	LastSeen      *time.Time          `json:"lastSeen,omitempty"`
@@ -170,6 +174,7 @@ func (req PingRequest) Validate() error {
 type CreateDispositivoRequest struct {
 	Nombre    string `json:"nombre"`
 	Ubicacion string `json:"ubicacion"`
+	WhepURL   string `json:"whepUrl,omitempty"`
 }
 
 // Validate verifica las reglas de negocio del CreateDispositivoRequest,
@@ -178,6 +183,7 @@ type CreateDispositivoRequest struct {
 // o nil si el request es válido.
 func (req CreateDispositivoRequest) Validate() error {
 	errs := validateNombreUbicacion(req.Nombre, req.Ubicacion)
+	errs = append(errs, validateWhepURL(req.WhepURL)...)
 
 	if len(errs) > 0 {
 		return &ValidationError{Fields: errs}
@@ -206,12 +212,36 @@ func validateNombreUbicacion(nombre, ubicacion string) []string {
 	return errs
 }
 
+// validateWhepURL valida el campo opcional whepUrl de un dispositivo: si no está
+// vacío, debe ser una URL absoluta con esquema http/https y un host, y no puede
+// superar maxWhepURLLength runes (coherente con VARCHAR(500)). Retorna el listado
+// de campos inválidos (vacío si el valor es válido u omitido).
+func validateWhepURL(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+
+	var errs []string
+	if len([]rune(trimmed)) > maxWhepURLLength {
+		errs = append(errs, fmt.Sprintf("whepUrl: no puede superar los %d caracteres", maxWhepURLLength))
+	}
+
+	u, err := url.Parse(trimmed)
+	if err != nil || !u.IsAbs() || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		errs = append(errs, "whepUrl: debe ser una URL absoluta http o https")
+	}
+
+	return errs
+}
+
 // UpdateDispositivoRequest representa el payload JSON entrante para la
 // modificación (PUT) de un dispositivo existente desde el panel del operador.
 type UpdateDispositivoRequest struct {
 	DispositivoID string `json:"dispositivoId"`
 	Nombre        string `json:"nombre"`
 	Ubicacion     string `json:"ubicacion"`
+	WhepURL       string `json:"whepUrl,omitempty"`
 }
 
 // Validate verifica las reglas de negocio del UpdateDispositivoRequest: exige un
@@ -227,6 +257,7 @@ func (req UpdateDispositivoRequest) Validate() error {
 	}
 
 	errs = append(errs, validateNombreUbicacion(req.Nombre, req.Ubicacion)...)
+	errs = append(errs, validateWhepURL(req.WhepURL)...)
 
 	if len(errs) > 0 {
 		return &ValidationError{Fields: errs}

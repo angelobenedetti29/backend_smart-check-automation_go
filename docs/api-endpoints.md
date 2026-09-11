@@ -389,17 +389,30 @@ curl -b "session_token=$JWT" http://localhost:8080/api/v1/dispositivos
 {
   "success": true, "message": "Estados de dispositivos obtenidos exitosamente",
   "data": [
-    { "dispositivoId": "b1c2d3e4-...", "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A", "estado": "online", "ultimaMetrica": { "...": "..." }, "lastSeen": "..." }
+    { "dispositivoId": "b1c2d3e4-...", "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A", "whepUrl": "https://camaras.example.com/whep/horno-1", "estado": "online", "ultimaMetrica": { "...": "..." }, "lastSeen": "..." }
   ]
 }
 ```
 
 El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #9: además de `memRamDisponibleMb`, CPU, IA y temperatura, puede incluir `memRamTotalMb`, `almacenamientoDisponibleMb` y `almacenamientoTotalMb`. Los campos nuevos se omiten cuando el dispositivo todavía envía un ping legacy.
 
+El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: lo persiste el backend y viaja tanto en este catálogo como en los eventos SSE `dispositivo.state`/`dispositivo.metric`. Es opcional y nullable: se omite cuando el dispositivo no tiene cámara configurada.
+
+**Alta (`POST`) y modificación (`PUT`):** el body acepta `whepUrl` (string opcional). Si se omite o se envía vacío, el dispositivo queda sin stream (`NULL`). Si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario la validación devuelve 422.
+
+```json
+{ "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A", "whepUrl": "https://camaras.example.com/whep/horno-1" }
+```
+
 | Código | Motivo |
 |---|---|
 | 405 | Método distinto de GET |
 | 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 415 | `Content-Type` inválido en POST/PUT |
+| 400 | JSON inválido en POST/PUT |
+| 422 | Validación falló (incluye `whepUrl` no absoluta o mayor a 500 caracteres) |
+| 404 | `dispositivoId` no existe en el catálogo (PUT/DELETE) |
+| 500 | Error interno |
 
 ---
 

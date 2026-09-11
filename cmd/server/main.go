@@ -193,11 +193,16 @@ func main() {
 	}
 
 	server := &http.Server{
-		Addr:         ":" + port,
-		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:    ":" + port,
+		Handler: handler,
+		// ReadHeaderTimeout acota la lectura de los headers de la request.
+		// Sin él, una conexión que envía bytes lentamente puede retener el
+		// socket indefinidamente (ataque Slowloris). 10s es holgado para
+		// clientes legítimos y deja margen frente a ReadTimeout (15s).
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {

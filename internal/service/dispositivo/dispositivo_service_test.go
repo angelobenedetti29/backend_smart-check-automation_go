@@ -47,6 +47,7 @@ func (f *fakeDispositivoRepo) Update(ctx context.Context, d *dispositivo.Disposi
 	}
 	cur.Nombre = d.Nombre
 	cur.Ubicacion = d.Ubicacion
+	cur.WhepURL = d.WhepURL
 	f.dispositivos[d.ID] = cur
 	return nil
 }
@@ -583,5 +584,71 @@ func TestDelete_NotFound(t *testing.T) {
 	err := svc.Delete(context.Background(), "missing")
 	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
 		t.Fatalf("expected ErrDispositivoNotFound, got %v", err)
+	}
+}
+
+func TestCreate_PropagaWhepURL(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
+	store := database.NewMemoryDispositivoStateStore()
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker)
+	whep := "https://camaras.example.com/whep/horno-2"
+
+	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
+		Nombre:  "Raspberry Pi Horno 2",
+		WhepURL: whep,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.WhepURL != whep {
+		t.Fatalf("expected whepUrl in returned estado, got %q", estado.WhepURL)
+	}
+
+	persisted, err := repo.GetDispositivoByID(context.Background(), estado.DispositivoID)
+	if err != nil {
+		t.Fatalf("expected device persisted, got %v", err)
+	}
+	if persisted.WhepURL != whep {
+		t.Fatalf("expected whepUrl persisted, got %q", persisted.WhepURL)
+	}
+}
+
+func TestUpdate_PropagaWhepURL(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", WhepURL: "https://camaras.example.com/whep/viejo"},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", WhepURL: "https://camaras.example.com/whep/viejo"})
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker)
+	whep := "https://camaras.example.com/whep/horno-1"
+
+	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
+		DispositivoID: "d1",
+		Nombre:        "Pi 1",
+		Ubicacion:     "Línea A",
+		WhepURL:       whep,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.WhepURL != whep {
+		t.Fatalf("expected whepUrl in returned estado, got %q", estado.WhepURL)
+	}
+
+	persisted, err := repo.GetDispositivoByID(context.Background(), "d1")
+	if err != nil {
+		t.Fatalf("expected device persisted, got %v", err)
+	}
+	if persisted.WhepURL != whep {
+		t.Fatalf("expected whepUrl persisted on update, got %q", persisted.WhepURL)
+	}
+
+	cached, ok := store.Get("d1")
+	if !ok || cached.WhepURL != whep {
+		t.Fatalf("expected whepUrl propagated to cache, got %+v", cached)
 	}
 }

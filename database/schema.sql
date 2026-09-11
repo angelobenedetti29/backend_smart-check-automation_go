@@ -369,6 +369,16 @@ COMMENT ON COLUMN metricas_dispositivo.almacenamiento_disponible_mb IS 'Almacena
 COMMENT ON COLUMN metricas_dispositivo.almacenamiento_total_mb IS 'Almacenamiento total en MB (nullable para compatibilidad con pings legacy)';
 
 -- ============================================================================
+-- ALTER: dispositivos — cámara/stream WHEP por dispositivo
+-- Idempotente para bases existentes. La columna queda nullable: un dispositivo
+-- sin cámara configurada no expone stream.
+-- ============================================================================
+ALTER TABLE dispositivos
+    ADD COLUMN IF NOT EXISTS whep_url VARCHAR(500);
+
+COMMENT ON COLUMN dispositivos.whep_url IS 'URL del stream WHEP de la cámara asociada al dispositivo (nullable: sin cámara configurada)';
+
+-- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
 -- ============================================================================
 INSERT INTO productos (id, nombre) VALUES

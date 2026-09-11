@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/bcrypt"
@@ -263,6 +264,58 @@ func TestLocalLoginHandler_Exitoso_SeteaCookie(t *testing.T) {
 	assert.True(t, sessionCookie.Secure, "cookie debe ser Secure")
 	assert.Equal(t, http.SameSiteStrictMode, sessionCookie.SameSite)
 	assert.Greater(t, sessionCookie.MaxAge, 0)
+}
+
+// --- Tests de deadline excedido (timeout controlado) ---
+
+// expiredRequest devuelve una request con un contexto ya vencido. Al envolverlo
+// con context.WithTimeout en el handler, el deadline derivado queda vencido de
+// inmediato, lo que dispara el camino de timeout sin esperar 10s reales.
+func expiredRequest(t *testing.T, method, target string, body []byte) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(method, target, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancel)
+
+	return req.WithContext(ctx)
+}
+
+func TestLocalLoginHandler_DeadlineExcedido_504(t *testing.T) {
+	repo := &mockRepo{err: context.DeadlineExceeded}
+	svc := newMockAuthService(nil, repo)
+	handler := NewAuthHandler(svc)
+
+	body, _ := json.Marshal(map[string]string{"email": "admin@fermar.com.ar", "password": "password123"})
+	req := expiredRequest(t, http.MethodPost, "/api/v1/auth/login", body)
+	rr := httptest.NewRecorder()
+
+	handler.Login(rr, req)
+
+	assert.Equal(t, http.StatusGatewayTimeout, rr.Code)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	assert.False(t, resp["success"].(bool))
+}
+
+func TestLoginHandler_DeadlineExcedido_504(t *testing.T) {
+	// El verifier devuelve context.DeadlineExceeded: el service debe preservarlo
+	// (no convertirlo en ErrInvalidToken) para que el handler responda 504.
+	verifier := &mockVerifier{err: context.DeadlineExceeded}
+	svc := newMockAuthService(verifier, &mockRepo{})
+	handler := NewAuthHandler(svc)
+
+	body, _ := json.Marshal(map[string]string{"googleToken": "token-cualquiera"})
+	req := expiredRequest(t, http.MethodPost, "/api/v1/auth/google", body)
+	rr := httptest.NewRecorder()
+
+	handler.LoginWithGoogle(rr, req)
+
+	assert.Equal(t, http.StatusGatewayTimeout, rr.Code)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	assert.False(t, resp["success"].(bool))
 }
 
 // --- Helpers para construir un AuthService real con mocks de dominio ---
