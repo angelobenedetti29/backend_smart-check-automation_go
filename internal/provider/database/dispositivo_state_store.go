@@ -33,6 +33,7 @@ func (s *MemoryDispositivoStateStore) Register(d dispositivo.Dispositivo) {
 	if cur, ok := s.data[d.ID]; ok {
 		cur.Nombre = d.Nombre
 		cur.Ubicacion = d.Ubicacion
+		cur.WhepURL = d.WhepURL
 		return
 	}
 
@@ -40,6 +41,7 @@ func (s *MemoryDispositivoStateStore) Register(d dispositivo.Dispositivo) {
 		DispositivoID: d.ID,
 		Nombre:        d.Nombre,
 		Ubicacion:     d.Ubicacion,
+		WhepURL:       d.WhepURL,
 		Estado:        dispositivo.EstadoOffline,
 	}
 }
@@ -54,6 +56,7 @@ func (s *MemoryDispositivoStateStore) UpdateDispositivo(d dispositivo.Dispositiv
 	if cur, ok := s.data[d.ID]; ok {
 		cur.Nombre = d.Nombre
 		cur.Ubicacion = d.Ubicacion
+		cur.WhepURL = d.WhepURL
 	}
 }
 
@@ -78,6 +81,7 @@ func (s *MemoryDispositivoStateStore) Hydrate(items []dispositivo.DispositivoCon
 		if cur, ok := s.data[d.ID]; ok {
 			cur.Nombre = d.Nombre
 			cur.Ubicacion = d.Ubicacion
+			cur.WhepURL = d.WhepURL
 			continue
 		}
 
@@ -90,6 +94,7 @@ func (s *MemoryDispositivoStateStore) Hydrate(items []dispositivo.DispositivoCon
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
 			Ubicacion:     d.Ubicacion,
+			WhepURL:       d.WhepURL,
 			Estado:        estado,
 		}
 		if m := item.UltimaMetrica; m != nil {
@@ -118,6 +123,7 @@ func (s *MemoryDispositivoStateStore) Update(d dispositivo.Dispositivo, m dispos
 		DispositivoID: d.ID,
 		Nombre:        d.Nombre,
 		Ubicacion:     d.Ubicacion,
+		WhepURL:       d.WhepURL,
 		Estado:        dispositivo.EstadoOnline,
 		UltimaMetrica: &m,
 		LastSeen:      &lastSeen,

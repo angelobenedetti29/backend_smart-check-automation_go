@@ -220,3 +220,52 @@ func TestMemoryDispositivoStateStore_MarkOfflineIfStale_Boundary25s(t *testing.T
 		t.Fatalf("under 25s the device should stay online, got %v", offline)
 	}
 }
+
+func TestMemoryDispositivoStateStore_PropagaWhepURL(t *testing.T) {
+	store := NewMemoryDispositivoStateStore()
+	whep := "https://camaras.example.com/whep/horno-1"
+
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", WhepURL: whep})
+	estado, ok := store.Get("d1")
+	if !ok || estado.WhepURL != whep {
+		t.Fatalf("expected whepUrl propagated on register, got %+v", estado)
+	}
+
+	// El re-registro actualiza la URL del stream.
+	nuevo := "https://camaras.example.com/whep/horno-1b"
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", WhepURL: nuevo})
+	estado, _ = store.Get("d1")
+	if estado.WhepURL != nuevo {
+		t.Fatalf("expected whepUrl updated on re-register, got %q", estado.WhepURL)
+	}
+
+	// UpdateDispositivo también actualiza la URL.
+	store.UpdateDispositivo(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", WhepURL: whep})
+	estado, _ = store.Get("d1")
+	if estado.WhepURL != whep {
+		t.Fatalf("expected whepUrl updated on UpdateDispositivo, got %q", estado.WhepURL)
+	}
+
+	// Update reconstruye el estado conservando la URL.
+	_, _, estado = store.Update(
+		dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", WhepURL: nuevo},
+		dispositivo.MetricaDispositivo{DispositivoID: "d1", ReceivedAt: time.Now().UTC()},
+	)
+	if estado.WhepURL != nuevo {
+		t.Fatalf("expected whepUrl propagated on Update, got %q", estado.WhepURL)
+	}
+}
+
+func TestMemoryDispositivoStateStore_Hydrate_PropagaWhepURL(t *testing.T) {
+	store := NewMemoryDispositivoStateStore()
+	whep := "https://camaras.example.com/whep/horno-2"
+
+	store.Hydrate([]dispositivo.DispositivoConUltimaMetrica{
+		{Dispositivo: dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", WhepURL: whep}},
+	}, 25*time.Second, time.Now().UTC())
+
+	estado, ok := store.Get("d1")
+	if !ok || estado.WhepURL != whep {
+		t.Fatalf("expected whepUrl propagated on hydrate, got %+v", estado)
+	}
+}

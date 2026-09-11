@@ -58,3 +58,25 @@ func TestApply_CreaColumnaAiProcessorPct(t *testing.T) {
 	require.NoError(t, err, "fallo al consultar information_schema")
 	require.True(t, existe, "la columna ai_processor_pct no existe tras aplicar el schema")
 }
+
+// TestApply_CreaColumnaWhepURL verifica que la migración de cámaras por
+// dispositivo (whep_url en dispositivos) quede presente tras aplicar el
+// schema, incluso sobre una base preexistente.
+func TestApply_CreaColumnaWhepURL(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+
+	require.NoError(t, Apply(ctx, pool), "aplicación del schema falló")
+
+	var existe bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_name = 'dispositivos'
+			  AND column_name = 'whep_url'
+		)
+	`).Scan(&existe)
+	require.NoError(t, err, "fallo al consultar information_schema")
+	require.True(t, existe, "la columna whep_url no existe tras aplicar el schema")
+}

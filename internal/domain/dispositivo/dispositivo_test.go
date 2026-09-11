@@ -2,6 +2,7 @@ package dispositivo
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -268,5 +269,73 @@ func TestCreateDispositivoRequestValidate_NombreAtMaxLengthIsValid(t *testing.T)
 
 	if err := req.Validate(); err != nil {
 		t.Fatalf("expected valid at exactly 100 chars, got: %v", err)
+	}
+}
+
+func TestCreateDispositivoRequestValidate_WhepURLValida(t *testing.T) {
+	req := CreateDispositivoRequest{
+		Nombre:  "Raspberry Pi Horno 2",
+		WhepURL: "https://camaras.example.com/whep/horno-2",
+	}
+
+	if err := req.Validate(); err != nil {
+		t.Fatalf("expected valid whepUrl, got: %v", err)
+	}
+}
+
+func TestCreateDispositivoRequestValidate_WhepURLEsOpcional(t *testing.T) {
+	for _, raw := range []string{"", "   "} {
+		req := CreateDispositivoRequest{Nombre: "Raspberry Pi Horno 2", WhepURL: raw}
+		if err := req.Validate(); err != nil {
+			t.Fatalf("expected omitted/empty whepUrl to be valid, got: %v", err)
+		}
+	}
+}
+
+func TestCreateDispositivoRequestValidate_WhepURLInvalida(t *testing.T) {
+	invalids := []string{
+		"no-es-una-url",
+		"/whep/horno-2",
+		"ftp://camaras.example.com/whep/horno-2",
+		"https://",
+	}
+
+	for _, raw := range invalids {
+		req := CreateDispositivoRequest{Nombre: "Raspberry Pi Horno 2", WhepURL: raw}
+		err := req.Validate()
+		if err == nil || !strings.Contains(err.Error(), "whepUrl: debe ser una URL absoluta http o https") {
+			t.Errorf("expected invalid whepUrl error for %q, got: %v", raw, err)
+		}
+	}
+}
+
+func TestCreateDispositivoRequestValidate_WhepURLTooLong(t *testing.T) {
+	long := "https://camaras.example.com/whep/" + strings.Repeat("a", 500)
+	req := CreateDispositivoRequest{Nombre: "Raspberry Pi Horno 2", WhepURL: long}
+
+	err := req.Validate()
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("whepUrl: no puede superar los %d caracteres", maxWhepURLLength)) {
+		t.Fatalf("expected whepUrl length error, got: %v", err)
+	}
+}
+
+func TestCreateDispositivoRequestValidate_WhepURLAtMaxLengthIsValid(t *testing.T) {
+	base := "https://camaras.example.com/whep/"
+	req := CreateDispositivoRequest{Nombre: "Raspberry Pi Horno 2", WhepURL: base + strings.Repeat("a", maxWhepURLLength-len(base))}
+
+	if err := req.Validate(); err != nil {
+		t.Fatalf("expected valid whepUrl at exactly %d runes, got: %v", maxWhepURLLength, err)
+	}
+}
+
+func TestUpdateDispositivoRequestValidate_WhepURL(t *testing.T) {
+	valid := UpdateDispositivoRequest{DispositivoID: testDispositivoUUID, Nombre: "Pi 1", WhepURL: "http://camaras.example.com/whep/horno-1"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected valid whepUrl in update, got: %v", err)
+	}
+
+	invalid := UpdateDispositivoRequest{DispositivoID: testDispositivoUUID, Nombre: "Pi 1", WhepURL: "no-es-url"}
+	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "whepUrl: debe ser una URL absoluta http o https") {
+		t.Fatalf("expected invalid whepUrl error in update, got: %v", err)
 	}
 }

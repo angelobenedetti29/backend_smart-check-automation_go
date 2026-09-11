@@ -24,43 +24,52 @@ func NewPostgresDispositivoRepository(db *pgxpool.Pool) *PostgresDispositivoRepo
 
 // Create inserta un dispositivo nuevo en el catálogo. El UUID lo genera
 // PostgreSQL vía gen_random_uuid(); el método mapea id y created_at de vuelta
-// al struct. Si Ubicacion está vacía se inserta NULL para respetar la columna
-// nullable.
+// al struct. Si Ubicacion/WhepURL están vacías se inserta NULL para respetar la
+// columna nullable.
 func (r *PostgresDispositivoRepository) Create(ctx context.Context, d *dispositivo.Dispositivo) error {
 	const query = `
-		INSERT INTO dispositivos (nombre, ubicacion)
-		VALUES ($1, $2)
+		INSERT INTO dispositivos (nombre, ubicacion, whep_url)
+		VALUES ($1, $2, $3)
 		RETURNING id, created_at`
 
 	var ubicacion *string
 	if d.Ubicacion != "" {
 		ubicacion = &d.Ubicacion
 	}
+	var whepURL *string
+	if d.WhepURL != "" {
+		whepURL = &d.WhepURL
+	}
 
-	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion).Scan(&d.ID, &d.CreatedAt)
+	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion, whepURL).Scan(&d.ID, &d.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to insert dispositivo: %w", err)
 	}
 	return nil
 }
 
-// Update modifica nombre y ubicación de un dispositivo existente. El método
-// mapea id y created_at de vuelta al struct vía RETURNING. Si Ubicacion está
-// vacía se guarda NULL para respetar la columna nullable. Devuelve
-// dispositivo.ErrDispositivoNotFound si el dispositivo no existe.
+// Update modifica nombre, ubicación y whep_url de un dispositivo existente. El
+// método mapea id y created_at de vuelta al struct vía RETURNING. Si
+// Ubicacion/WhepURL están vacías se guarda NULL para respetar la columna
+// nullable. Devuelve dispositivo.ErrDispositivoNotFound si el dispositivo no
+// existe.
 func (r *PostgresDispositivoRepository) Update(ctx context.Context, d *dispositivo.Dispositivo) error {
 	const query = `
 		UPDATE dispositivos
-		SET nombre = $1, ubicacion = $2
-		WHERE id = $3
+		SET nombre = $1, ubicacion = $2, whep_url = $3
+		WHERE id = $4
 		RETURNING id, created_at`
 
 	var ubicacion *string
 	if d.Ubicacion != "" {
 		ubicacion = &d.Ubicacion
 	}
+	var whepURL *string
+	if d.WhepURL != "" {
+		whepURL = &d.WhepURL
+	}
 
-	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion, d.ID).Scan(&d.ID, &d.CreatedAt)
+	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion, whepURL, d.ID).Scan(&d.ID, &d.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return dispositivo.ErrDispositivoNotFound
@@ -117,7 +126,7 @@ func (r *PostgresDispositivoRepository) InsertMetrica(ctx context.Context, m *di
 func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx context.Context) ([]dispositivo.DispositivoConUltimaMetrica, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT ON (d.id)
-			d.id, d.nombre, d.ubicacion, d.created_at,
+			d.id, d.nombre, d.ubicacion, d.whep_url, d.created_at,
 			m.id, m.cpu_pct, m.mem_ram_disponible_mb, m.mem_ram_total_mb,
 			m.almacenamiento_disponible_mb, m.almacenamiento_total_mb,
 			m.temp_chip, m.ai_processor_pct, m.received_at
@@ -134,6 +143,7 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 	for rows.Next() {
 		var (
 			d                        dispositivo.Dispositivo
+			whepURL                  *string
 			m                        dispositivo.MetricaDispositivo
 			mID                      *string
 			cpu                      *float64
@@ -145,8 +155,11 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 			aiProc                   *float64
 			received                 *time.Time
 		)
-		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &d.CreatedAt, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
+		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &whepURL, &d.CreatedAt, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
 			return nil, fmt.Errorf("failed to scan dispositivo con ultima metrica: %w", err)
+		}
+		if whepURL != nil {
+			d.WhepURL = *whepURL
 		}
 
 		item := dispositivo.DispositivoConUltimaMetrica{Dispositivo: d}
@@ -176,16 +189,20 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 // Devuelve dispositivo.ErrDispositivoNotFound si no existe.
 func (r *PostgresDispositivoRepository) GetDispositivoByID(ctx context.Context, id string) (*dispositivo.Dispositivo, error) {
 	var d dispositivo.Dispositivo
+	var whepURL *string
 	err := r.db.QueryRow(ctx, `
-		SELECT id, nombre, ubicacion, created_at
+		SELECT id, nombre, ubicacion, whep_url, created_at
 		FROM dispositivos
 		WHERE id = $1
-	`, id).Scan(&d.ID, &d.Nombre, &d.Ubicacion, &d.CreatedAt)
+	`, id).Scan(&d.ID, &d.Nombre, &d.Ubicacion, &whepURL, &d.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, dispositivo.ErrDispositivoNotFound
 		}
 		return nil, fmt.Errorf("failed to query dispositivo by id: %w", err)
+	}
+	if whepURL != nil {
+		d.WhepURL = *whepURL
 	}
 
 	return &d, nil

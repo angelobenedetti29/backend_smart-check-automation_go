@@ -40,6 +40,7 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 	d := dispositivo.Dispositivo{
 		Nombre:    strings.TrimSpace(req.Nombre),
 		Ubicacion: strings.TrimSpace(req.Ubicacion),
+		WhepURL:   req.WhepURL,
 	}
 
 	if err := s.repo.Create(ctx, &d); err != nil {
@@ -54,6 +55,7 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
 			Ubicacion:     d.Ubicacion,
+			WhepURL:       d.WhepURL,
 			Estado:        dispositivo.EstadoOffline,
 		}
 	}
@@ -71,6 +73,7 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 		ID:        strings.TrimSpace(req.DispositivoID),
 		Nombre:    strings.TrimSpace(req.Nombre),
 		Ubicacion: strings.TrimSpace(req.Ubicacion),
+		WhepURL:   req.WhepURL,
 	}
 
 	if err := s.repo.Update(ctx, &d); err != nil {
@@ -85,6 +88,7 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
 			Ubicacion:     d.Ubicacion,
+			WhepURL:       d.WhepURL,
 			Estado:        dispositivo.EstadoOffline,
 		}
 	}

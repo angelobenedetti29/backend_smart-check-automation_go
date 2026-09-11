@@ -23,8 +23,10 @@ type fakeDispositivoService struct {
 	metrErr    error
 	createResp *dispositivo.EstadoDispositivo
 	createErr  error
+	createReq  dispositivo.CreateDispositivoRequest
 	updateResp *dispositivo.EstadoDispositivo
 	updateErr  error
+	updateReq  dispositivo.UpdateDispositivoRequest
 	deleteErr  error
 }
 
@@ -42,10 +44,12 @@ func (f *fakeDispositivoService) GetMetricas(ctx context.Context, id string, pag
 }
 
 func (f *fakeDispositivoService) Create(ctx context.Context, req dispositivo.CreateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	f.createReq = req
 	return f.createResp, f.createErr
 }
 
 func (f *fakeDispositivoService) Update(ctx context.Context, req dispositivo.UpdateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	f.updateReq = req
 	return f.updateResp, f.updateErr
 }
 
@@ -577,5 +581,133 @@ func TestHandleMetricas_Success(t *testing.T) {
 	}
 	if resp.Total != 1 || resp.Page != 1 || resp.PageSize != 10 {
 		t.Fatalf("unexpected pagination metadata: total=%d page=%d pageSize=%d", resp.Total, resp.Page, resp.PageSize)
+	}
+}
+
+func TestHandleCreate_RoundTripWhepURL(t *testing.T) {
+	const whep = "https://camaras.example.com/whep/horno-2"
+	estado := &dispositivo.EstadoDispositivo{
+		DispositivoID: "d-nuevo",
+		Nombre:        "Raspberry Pi Horno 2",
+		WhepURL:       whep,
+		Estado:        dispositivo.EstadoOffline,
+	}
+	svc := &fakeDispositivoService{createResp: estado}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","whepUrl":"` + whep + `"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rec.Code)
+	}
+	if svc.createReq.WhepURL != whep {
+		t.Fatalf("expected handler to decode whepUrl, got %q", svc.createReq.WhepURL)
+	}
+
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	data, ok := resp.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object, got %T", resp.Data)
+	}
+	if data["whepUrl"] != whep {
+		t.Fatalf("expected whepUrl in response, got %v", data["whepUrl"])
+	}
+}
+
+func TestHandleCreate_RejectsInvalidWhepURL(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","whepUrl":"no-es-url"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid whepUrl, got %d", rec.Code)
+	}
+	if svc.createReq.WhepURL != "" {
+		t.Fatalf("expected invalid request not to reach service, got %q", svc.createReq.WhepURL)
+	}
+}
+
+func TestHandleUpdate_RoundTripWhepURL(t *testing.T) {
+	const whep = "https://camaras.example.com/whep/horno-1"
+	estado := &dispositivo.EstadoDispositivo{
+		DispositivoID: "d1",
+		Nombre:        "Pi 1",
+		WhepURL:       whep,
+		Estado:        dispositivo.EstadoOffline,
+	}
+	svc := &fakeDispositivoService{updateResp: estado}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"Pi 1","whepUrl":"` + whep + `"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if svc.updateReq.WhepURL != whep {
+		t.Fatalf("expected handler to decode whepUrl, got %q", svc.updateReq.WhepURL)
+	}
+
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	data, ok := resp.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object, got %T", resp.Data)
+	}
+	if data["whepUrl"] != whep {
+		t.Fatalf("expected whepUrl in response, got %v", data["whepUrl"])
+	}
+}
+
+func TestHandleEstados_ExponeWhepURL(t *testing.T) {
+	const whep = "https://camaras.example.com/whep/horno-1"
+	estados := []dispositivo.EstadoDispositivo{
+		{DispositivoID: "d1", Nombre: "Pi 1", WhepURL: whep, Estado: dispositivo.EstadoOnline},
+	}
+	h := NewDispositivoHandler(&fakeDispositivoService{estados: estados})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dispositivos", nil)
+	rec := httptest.NewRecorder()
+
+	h.HandleEstados(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	items, ok := resp.Data.([]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected one device in data, got %T %+v", resp.Data, resp.Data)
+	}
+	item, ok := items[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected device object, got %T", items[0])
+	}
+	if item["whepUrl"] != whep {
+		t.Fatalf("expected whepUrl in catalog response, got %v", item["whepUrl"])
 	}
 }
