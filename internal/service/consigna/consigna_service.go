@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
@@ -64,6 +65,10 @@ func NewConsignaService(
 // (SCA-142). Se rechaza si el horno está en CONTROL_MANUAL por un fallo de
 // enlace previo: en ese estado solo se admite el envío manual (SCA-320).
 func (s *ConsignaService) DispatchAutomatico(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+	principal, ok := deviceauth.PrincipalFromContext(ctx)
+	if !ok || principal.Enrollment {
+		return nil, deviceauth.ErrInvalidProof
+	}
 	h, err := s.hornoRepo.GetByID(hornoID)
 	if err != nil {
 		return nil, consigna.ErrHornoNoExiste
@@ -149,6 +154,9 @@ func (s *ConsignaService) dispatch(
 		Exitosa:                result.Aplicada,
 		TemperaturaPrevia:      &prevTemp,
 		VelocidadCintaPrevia:   &prevVel,
+	}
+	if principal, ok := deviceauth.PrincipalFromContext(ctx); ok && !principal.Enrollment {
+		rec.DispositivoID = &principal.DeviceID
 	}
 
 	if !result.Aplicada {

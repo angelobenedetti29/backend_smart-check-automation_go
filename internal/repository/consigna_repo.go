@@ -25,7 +25,7 @@ func NewConsignaPostgresRepository(db *pgxpool.Pool) *ConsignaPostgresRepository
 }
 
 const selectHistorialConsignasColumns = `
-	id, horno_id, lote_id, producto_id,
+	id, dispositivo_id, horno_id, lote_id, producto_id,
 	temperatura_objetivo, velocidad_cinta_objetivo,
 	origen, usuario, exitosa, motivo_error,
 	temperatura_previa, velocidad_cinta_previa, creada_en`
@@ -36,16 +36,17 @@ const selectHistorialConsignasColumns = `
 func (r *ConsignaPostgresRepository) Save(ctx context.Context, c *consigna.Consigna) error {
 	const query = `
 		INSERT INTO historial_consignas (
-			horno_id, lote_id, producto_id,
+			dispositivo_id, horno_id, lote_id, producto_id,
 			temperatura_objetivo, velocidad_cinta_objetivo,
 			origen, usuario, exitosa, motivo_error,
 			temperatura_previa, velocidad_cinta_previa
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		)
 		RETURNING id, creada_en`
 
 	err := r.db.QueryRow(ctx, query,
+		c.DispositivoID,
 		c.HornoID,
 		c.LoteID,
 		c.ProductoID,
@@ -111,7 +112,7 @@ func scanHistorialConsignas(rows pgx.Rows) ([]consigna.Consigna, error) {
 	for rows.Next() {
 		var c consigna.Consigna
 		if err := rows.Scan(
-			&c.ID, &c.HornoID, &c.LoteID, &c.ProductoID,
+			&c.ID, &c.DispositivoID, &c.HornoID, &c.LoteID, &c.ProductoID,
 			&c.TemperaturaObjetivo, &c.VelocidadCintaObjetivo,
 			&c.Origen, &c.Usuario, &c.Exitosa, &c.MotivoError,
 			&c.TemperaturaPrevia, &c.VelocidadCintaPrevia, &c.CreadaEn,

@@ -8,10 +8,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
+
+func testDeviceContextFor(id string) context.Context {
+	return deviceauth.WithPrincipal(context.Background(), deviceauth.Principal{DeviceID: id, Fingerprint: "test-fingerprint"})
+}
+
+func testDeviceContext() context.Context {
+	return testDeviceContextFor("d1")
+}
 
 type fakeDispositivoRepo struct {
 	mu           sync.Mutex
@@ -143,7 +152,7 @@ func TestProcessPing_UpdatesStateAndBroadcasts(t *testing.T) {
 
 	svc := NewDispositivoService(repo, store, broker)
 
-	estado, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{
+	estado, err := svc.ProcessPing(testDeviceContext(), dispositivo.PingRequest{
 		DispositivoID:      "d1",
 		CpuPct:             20,
 		MemRamDisponibleMb: 400,
@@ -173,6 +182,18 @@ func TestProcessPing_UpdatesStateAndBroadcasts(t *testing.T) {
 	}
 }
 
+func TestProcessPing_RequiresOperationalPrincipal(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{"d1": {ID: "d1", Nombre: "Pi 1"}}}
+	svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
+	_, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{DispositivoID: "d1"})
+	if !errors.Is(err, deviceauth.ErrInvalidProof) {
+		t.Fatalf("expected invalid device proof, got %v", err)
+	}
+	if len(repo.inserted) != 0 {
+		t.Fatalf("metric persisted without principal: %d", len(repo.inserted))
+	}
+}
+
 func TestProcessPing_PropagaTelemetriaExtendidaAlEstadoHistorialYSSE(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
 		"d1": {ID: "d1", Nombre: "Pi 1"},
@@ -186,7 +207,7 @@ func TestProcessPing_PropagaTelemetriaExtendidaAlEstadoHistorialYSSE(t *testing.
 	almacenamientoDisponible := 20000.0
 	almacenamientoTotal := 64000.0
 	svc := NewDispositivoService(repo, store, broker)
-	estado, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{
+	estado, err := svc.ProcessPing(testDeviceContext(), dispositivo.PingRequest{
 		DispositivoID:              "d1",
 		MemRamDisponibleMb:         512,
 		MemRamTotalMb:              &memTotal,
@@ -243,12 +264,12 @@ func TestProcessPing_NoStateEventWhenAlreadyOnline(t *testing.T) {
 	svc := NewDispositivoService(repo, store, broker)
 
 	ping := dispositivo.PingRequest{DispositivoID: "d1", CpuPct: 20, MemRamDisponibleMb: 400, TempChip: 50, AiProcessorPct: 35}
-	if _, err := svc.ProcessPing(context.Background(), ping); err != nil {
+	if _, err := svc.ProcessPing(testDeviceContext(), ping); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	drainEvents(client, 100*time.Millisecond)
 
-	if _, err := svc.ProcessPing(context.Background(), ping); err != nil {
+	if _, err := svc.ProcessPing(testDeviceContext(), ping); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -265,7 +286,7 @@ func TestProcessPing_DispositivoNotFound(t *testing.T) {
 
 	svc := NewDispositivoService(repo, store, broker)
 
-	_, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{
+	_, err := svc.ProcessPing(testDeviceContextFor("missing"), dispositivo.PingRequest{
 		DispositivoID:      "missing",
 		CpuPct:             10,
 		MemRamDisponibleMb: 100,
@@ -285,7 +306,7 @@ func TestProcessPing_InsertsMetricaHistory(t *testing.T) {
 	broker := sse.NewBroker()
 
 	svc := NewDispositivoService(repo, store, broker)
-	if _, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{
+	if _, err := svc.ProcessPing(testDeviceContext(), dispositivo.PingRequest{
 		DispositivoID: "d1", CpuPct: 30, MemRamDisponibleMb: 500, TempChip: 55, AiProcessorPct: 40,
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)

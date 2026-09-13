@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
@@ -112,6 +113,10 @@ func (s *DispositivoService) Delete(ctx context.Context, id string) error {
 // existencia en el catálogo, persiste la métrica en el historial (fire-and-forget),
 // actualiza el estado actual a online y emite los eventos SSE correspondientes.
 func (s *DispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
+	principal, ok := deviceauth.PrincipalFromContext(ctx)
+	if !ok || principal.Enrollment || principal.DeviceID != req.DispositivoID {
+		return nil, deviceauth.ErrInvalidProof
+	}
 	d, err := s.repo.GetDispositivoByID(ctx, req.DispositivoID)
 	if err != nil {
 		return nil, err

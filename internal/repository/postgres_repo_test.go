@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -30,18 +29,7 @@ func testUUID() string {
 // running `go test ./...` never touches the Aiven production instance.
 // If TEST_DATABASE_URL is not set the test is skipped cleanly.
 func setupTestPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-
-	connStr := os.Getenv("TEST_DATABASE_URL")
-	if connStr == "" {
-		t.Skip("TEST_DATABASE_URL no configurada — saltando test de integración (no tocar producción)")
-	}
-
-	pool, err := pgxpool.New(context.Background(), connStr)
-	require.NoError(t, err, "fallo al crear pool de conexión a PostgreSQL de test")
-
-	t.Cleanup(pool.Close)
-	return pool
+	return repositoryTestPool(t)
 }
 
 // verifyLoteInDB reads back a Lote from the database and asserts it matches.

@@ -65,6 +65,7 @@ type LoteRequest struct {
 // in the PostgreSQL database.
 type Lote struct {
 	ID             string    `json:"id"`
+	DispositivoID  string    `json:"dispositivoId,omitempty"`
 	ProductoID     string    `json:"producto_id"`
 	Turno          string    `json:"turno"`
 	InicioAt       time.Time `json:"inicio_at"`

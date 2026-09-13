@@ -60,6 +60,7 @@ func IsValidationError(err error) bool {
 // controlador físico del horno, tal como se persiste en PostgreSQL.
 type Consigna struct {
 	ID                     string    `json:"id"                        db:"id"`
+	DispositivoID          *string   `json:"dispositivoId,omitempty"   db:"dispositivo_id"`
 	HornoID                string    `json:"hornoId"                   db:"horno_id"`
 	LoteID                 *string   `json:"loteId,omitempty"          db:"lote_id"`
 	ProductoID             *string   `json:"productoId,omitempty"      db:"producto_id"`

@@ -2,14 +2,15 @@ package controller
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/deviceproof"
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote"
 	loteProductivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_productivo"
@@ -37,19 +38,6 @@ type LoteHandler struct {
 // fetcher, and consigna service (usado por el inicio automático de lote, SCA-142).
 func NewLoteHandler(repo lote.Repository, broker *sse.Broker, fetcher LoteFetcher, consignaSvc consigna.Service) *LoteHandler {
 	return &LoteHandler{repo: repo, broker: broker, fetcher: fetcher, consignaSvc: consignaSvc}
-}
-
-// validateAPIKey valida el header X-API-Key con comparación de tiempo constante
-// (a prueba de timing attacks) contra el secreto configurado para escrituras
-// originadas por la Raspberry Pi. Devuelve false y ya escribe la respuesta 401 si es inválida.
-func validateAPIKey(w http.ResponseWriter, r *http.Request) bool {
-	apiKey := r.Header.Get("X-API-Key")
-	secret := os.Getenv("API_KEY_SECRET")
-	if apiKey == "" || subtle.ConstantTimeCompare([]byte(apiKey), []byte(secret)) != 1 {
-		response.Error(w, http.StatusUnauthorized, "API key inválida o ausente", nil)
-		return false
-	}
-	return true
 }
 
 // newCorrelationID genera un UUID v4 usado como identificador de correlación
@@ -81,18 +69,16 @@ func (h *LoteHandler) HandleCreateLote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Validate X-API-Key header using constant-time comparison (timing-attack safe)
-	if !validateAPIKey(w, r) {
+	// 2. The device-proof middleware has installed the trusted principal.
+	if principal, ok := deviceproof.PrincipalFromContext(r.Context()); !ok || principal.Enrollment {
+		response.Error(w, http.StatusUnauthorized, "Prueba de dispositivo inválida", map[string]string{"code": "invalid_device_proof"})
 		return
 	}
 
-	// 3. Limit body size to prevent memory-exhaustion DoS
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-
-	// 4. Decode JSON body into LoteRequest
+	// 3. Decode JSON body into LoteRequest (strict: bounded, single object,
+	// no duplicate members or case aliases)
 	var req lote.LoteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
 		return
 	}
 
@@ -105,6 +91,9 @@ func (h *LoteHandler) HandleCreateLote(w http.ResponseWriter, r *http.Request) {
 
 	// 6. Map request to domain entity
 	domainLote := lote.MapLoteRequestToLote(req)
+	if principal, ok := deviceproof.PrincipalFromContext(r.Context()); ok {
+		domainLote.DispositivoID = principal.DeviceID
+	}
 
 	// 7. Persist via repository
 	if err := h.repo.Create(r.Context(), &domainLote); err != nil {
@@ -148,18 +137,16 @@ func (h *LoteHandler) HandleIniciarLote(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 2. Validate X-API-Key header (mismo esquema que POST /api/v1/lotes: origen Raspberry Pi)
-	if !validateAPIKey(w, r) {
+	// 2. The device-proof middleware has installed the trusted principal.
+	if principal, ok := deviceproof.PrincipalFromContext(r.Context()); !ok || principal.Enrollment {
+		response.Error(w, http.StatusUnauthorized, "Prueba de dispositivo inválida", map[string]string{"code": "invalid_device_proof"})
 		return
 	}
 
-	// 3. Limit body size to prevent memory-exhaustion DoS
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-
-	// 4. Decode JSON body
+	// 3. Decode JSON body (strict: bounded, single object, no duplicate
+	// members or case aliases)
 	var req InicioLoteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
 		return
 	}
 	if req.HornoID == "" || req.ProductoID == "" {
@@ -179,6 +166,8 @@ func (h *LoteHandler) HandleIniciarLote(w http.ResponseWriter, r *http.Request) 
 	rec, err := h.consignaSvc.DispatchAutomatico(r.Context(), req.HornoID, loteID, req.ProductoID)
 	if err != nil {
 		switch {
+		case errors.Is(err, deviceauth.ErrInvalidProof):
+			response.Error(w, http.StatusUnauthorized, "Prueba de dispositivo inválida", map[string]string{"code": "invalid_device_proof"})
 		case errors.Is(err, consigna.ErrHornoNoExiste):
 			response.Error(w, http.StatusNotFound, "El horno indicado no existe", nil)
 		case errors.Is(err, consigna.ErrParametrosNoExiste):

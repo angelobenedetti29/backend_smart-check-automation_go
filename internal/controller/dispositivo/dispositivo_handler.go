@@ -1,15 +1,16 @@
 package controller
 
 import (
-	"crypto/subtle"
-	"encoding/json"
+	"context"
 	"errors"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/deviceproof"
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
@@ -20,11 +21,20 @@ const maxRequestBodyBytes = 1 << 20 // 1 MB
 // DispositivoHandler maneja los endpoints HTTP para dispositivos Raspberry Pi.
 type DispositivoHandler struct {
 	service dispositivo.Service
+	secure  interface {
+		Reads(context.Context) ([]dispositivo.DeviceRead, error)
+	}
 }
 
 // NewDispositivoHandler instancia el handler inyectando el servicio.
-func NewDispositivoHandler(svc dispositivo.Service) *DispositivoHandler {
-	return &DispositivoHandler{service: svc}
+func NewDispositivoHandler(svc dispositivo.Service, secure ...interface {
+	Reads(context.Context) ([]dispositivo.DeviceRead, error)
+}) *DispositivoHandler {
+	h := &DispositivoHandler{service: svc}
+	if len(secure) > 0 {
+		h.secure = secure[0]
+	}
+	return h
 }
 
 // Handle despacha GET /api/v1/dispositivos (listar estados), POST (alta), PUT
@@ -124,10 +134,7 @@ func (h *DispositivoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Re
 		return req, false
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
 		return req, false
 	}
 
@@ -150,10 +157,7 @@ func (h *DispositivoHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *h
 		return req, false
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
 		return req, false
 	}
 
@@ -192,18 +196,14 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	apiKey := r.Header.Get("X-API-Key")
-	secret := os.Getenv("API_KEY_SECRET")
-	if apiKey == "" || subtle.ConstantTimeCompare([]byte(apiKey), []byte(secret)) != 1 {
-		response.Error(w, http.StatusUnauthorized, "API key inválida o ausente", nil)
+	principal, ok := deviceproof.PrincipalFromContext(r.Context())
+	if !ok || principal.Enrollment {
+		response.Error(w, http.StatusUnauthorized, "Prueba de dispositivo inválida", map[string]string{"code": "invalid_device_proof"})
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-
 	var req dispositivo.PingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
 		return
 	}
 
@@ -211,9 +211,17 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 		response.Error(w, http.StatusUnprocessableEntity, "Datos del ping inválidos", err.Error())
 		return
 	}
+	if principal, ok := deviceproof.PrincipalFromContext(r.Context()); ok && req.DispositivoID != principal.DeviceID {
+		response.Error(w, http.StatusForbidden, "La identidad del dispositivo no coincide", map[string]string{"code": "device_identity_mismatch"})
+		return
+	}
 
 	estado, err := h.service.ProcessPing(r.Context(), req)
 	if err != nil {
+		if errors.Is(err, deviceauth.ErrInvalidProof) {
+			response.Error(w, http.StatusUnauthorized, "Prueba de dispositivo inválida", map[string]string{"code": "invalid_device_proof"})
+			return
+		}
 		if errors.Is(err, dispositivo.ErrDispositivoNotFound) {
 			response.Error(w, http.StatusUnprocessableEntity, "El dispositivo no existe en el catálogo", err.Error())
 			return
@@ -233,6 +241,30 @@ func (h *DispositivoHandler) HandleEstados(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if h.secure != nil {
+		reads, err := h.secure.Reads(r.Context())
+		if err != nil {
+			response.Error(w, http.StatusServiceUnavailable, "No se pudo consultar el estado de seguridad de los dispositivos", map[string]string{"code": "auth_store_unavailable"})
+			return
+		}
+		telemetry := make(map[string]dispositivo.EstadoDispositivo)
+		for _, state := range h.service.GetAllEstados() {
+			telemetry[state.DispositivoID] = state
+		}
+		out := make([]dispositivo.DeviceRead, 0, len(reads))
+		for _, read := range reads {
+			read.Estado = dispositivo.EstadoOffline
+			if state, ok := telemetry[read.DispositivoID]; ok {
+				read.Estado = state.Estado
+				read.UltimaMetrica = state.UltimaMetrica
+				read.LastSeen = state.LastSeen
+			}
+			out = append(out, read)
+		}
+		noStore(w)
+		response.OK(w, "Estados de dispositivos obtenidos exitosamente", out)
+		return
+	}
 	estados := h.service.GetAllEstados()
 	response.OK(w, "Estados de dispositivos obtenidos exitosamente", estados)
 }

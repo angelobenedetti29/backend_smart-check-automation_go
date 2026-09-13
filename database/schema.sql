@@ -16,6 +16,11 @@
 
 BEGIN;
 
+-- Serialize the complete migration before any extension, table or seed DDL.
+SELECT pg_advisory_xact_lock(hashtextextended('smart-check:schema', 0));
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- ============================================================================
 -- TABLA 1: productos (Catálogo maestro de productos panificados)
 -- ============================================================================
@@ -280,13 +285,6 @@ CREATE INDEX IF NOT EXISTS idx_metricas_dispositivo_disp_received
     ON metricas_dispositivo (dispositivo_id, received_at DESC);
 
 -- ============================================================================
--- SEED: Dispositivo de referencia
--- ============================================================================
-INSERT INTO dispositivos (id, nombre, ubicacion) VALUES
-    ('b1c2d3e4-5678-90ab-cdef-1234567890ab', 'Raspberry Pi Horno 1', 'Línea A')
-ON CONFLICT (id) DO NOTHING;
-
--- ============================================================================
 -- ALTER: parametros_producto — setpoints puntuales de cocción (SCA-142/SCA-320)
 -- ============================================================================
 ALTER TABLE parametros_producto
@@ -374,9 +372,23 @@ COMMENT ON COLUMN metricas_dispositivo.almacenamiento_total_mb IS 'Almacenamient
 -- sin cámara configurada no expone stream.
 -- ============================================================================
 ALTER TABLE dispositivos
-    ADD COLUMN IF NOT EXISTS whep_url VARCHAR(500);
+    ADD COLUMN IF NOT EXISTS whep_url VARCHAR(500),
+    ADD COLUMN IF NOT EXISTS auth_status VARCHAR(12) NOT NULL DEFAULT 'unenrolled',
+    ADD COLUMN IF NOT EXISTS current_key_fingerprint VARCHAR(128),
+    ADD COLUMN IF NOT EXISTS auth_updated_at TIMESTAMPTZ;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_dispositivos_auth_status') THEN
+        ALTER TABLE dispositivos ADD CONSTRAINT chk_dispositivos_auth_status
+            CHECK (auth_status IN ('unenrolled', 'active', 'disabled', 'revoked'));
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_dispositivos_current_key ON dispositivos (current_key_fingerprint);
 
 COMMENT ON COLUMN dispositivos.whep_url IS 'URL del stream WHEP de la cámara asociada al dispositivo (nullable: sin cámara configurada)';
+COMMENT ON COLUMN dispositivos.auth_status IS 'Estado de admisión criptográfica independiente del heartbeat';
 
 -- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
@@ -486,5 +498,81 @@ INSERT INTO usuarios (email, nombre, rol, password_hash) VALUES
     ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'),
     ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy')
 ON CONFLICT (email) DO NOTHING;
+
+-- Provenance for writes made by an authenticated device. Existing rows remain
+-- nullable so this upgrade never invents an owner for historical data.
+ALTER TABLE lotes_productivos ADD COLUMN IF NOT EXISTS dispositivo_id UUID;
+ALTER TABLE historial_consignas ADD COLUMN IF NOT EXISTS dispositivo_id UUID;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lotes_dispositivo') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT fk_lotes_dispositivo
+            FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_historial_consignas_dispositivo') THEN
+        ALTER TABLE historial_consignas ADD CONSTRAINT fk_historial_consignas_dispositivo
+            FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT;
+    END IF;
+END $$;
+
+-- Device identity and admission state. Secrets are deliberately absent: only a
+-- public key and its RFC7638 fingerprint are retained.
+CREATE TABLE IF NOT EXISTS device_credentials (
+    fingerprint VARCHAR(128) PRIMARY KEY,
+    dispositivo_id UUID NOT NULL REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    public_key BYTEA NOT NULL CHECK (octet_length(public_key) = 32),
+    enrollment_id VARCHAR(64) NOT NULL UNIQUE,
+    enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_device_credentials_current
+    ON device_credentials(dispositivo_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_device_credentials_device ON device_credentials(dispositivo_id);
+
+CREATE TABLE IF NOT EXISTS device_enrollments (
+    enrollment_id VARCHAR(64) PRIMARY KEY,
+    code_hash BYTEA UNIQUE,
+    target_dispositivo_id UUID REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    nombre VARCHAR(100) NOT NULL,
+    ubicacion VARCHAR(100),
+    whep_url VARCHAR(500),
+    created_by UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    cancelled_at TIMESTAMPTZ,
+    result_dispositivo_id UUID REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    result_key_fingerprint VARCHAR(128),
+    CONSTRAINT chk_enrollment_terminal_pair CHECK ((consumed_at IS NULL) OR (result_dispositivo_id IS NOT NULL AND result_key_fingerprint IS NOT NULL)),
+    CONSTRAINT chk_enrollment_code_state CHECK (NOT (consumed_at IS NOT NULL AND cancelled_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_device_enrollments_pending
+    ON device_enrollments(expires_at) WHERE consumed_at IS NULL AND cancelled_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_device_enrollments_pending_replacement
+    ON device_enrollments(target_dispositivo_id)
+    WHERE target_dispositivo_id IS NOT NULL AND consumed_at IS NULL AND cancelled_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS device_request_replays (
+    key_fingerprint VARCHAR(128) NOT NULL,
+    jti VARCHAR(64) NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (key_fingerprint, jti)
+);
+CREATE INDEX IF NOT EXISTS idx_device_request_replays_expiry ON device_request_replays(expires_at);
+
+CREATE TABLE IF NOT EXISTS device_lifecycle_audit (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
+    action VARCHAR(20) NOT NULL,
+    dispositivo_id UUID REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    enrollment_id VARCHAR(64),
+    old_status VARCHAR(12) NOT NULL,
+    new_status VARCHAR(12) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE device_lifecycle_audit ADD COLUMN IF NOT EXISTS enrollment_id VARCHAR(64);
+ALTER TABLE device_lifecycle_audit ALTER COLUMN dispositivo_id DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_device_lifecycle_audit_device ON device_lifecycle_audit(dispositivo_id, created_at DESC);
 
 COMMIT;

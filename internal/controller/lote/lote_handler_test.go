@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote"
 	loteProductivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_productivo"
@@ -78,7 +79,6 @@ func (m *mockLoteProductivoFetcher) GetByID(id string) (*loteProductivo.LoteProd
 
 func setupHandlerTest(t *testing.T, repo lote.Repository) *LoteHandler {
 	t.Helper()
-	t.Setenv("API_KEY_SECRET", "test-key-fermar")
 	consignaSvc := &mockConsignaService{
 		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
 			return &consigna.Consigna{HornoID: hornoID, Origen: consigna.OrigenAutomatico, Exitosa: true}, nil
@@ -92,7 +92,7 @@ func executeRequest(t *testing.T, handler *LoteHandler, method string, body []by
 	req := httptest.NewRequest(method, "/api/v1/lotes", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
+		req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "00000000-0000-0000-0000-000000000001", Fingerprint: "test-fingerprint"}))
 	}
 	rr := httptest.NewRecorder()
 	handler.HandleCreateLote(rr, req)
@@ -212,7 +212,7 @@ func executeIniciarLoteRequest(t *testing.T, handler *LoteHandler, method string
 	req := httptest.NewRequest(method, "/api/v1/lotes/inicio", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
+		req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "00000000-0000-0000-0000-000000000001", Fingerprint: "test-fingerprint"}))
 	}
 	rr := httptest.NewRecorder()
 	handler.HandleIniciarLote(rr, req)
@@ -220,7 +220,6 @@ func executeIniciarLoteRequest(t *testing.T, handler *LoteHandler, method string
 }
 
 func TestHandleIniciarLote_Success(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", "test-key-fermar")
 	consignaSvc := &mockConsignaService{
 		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
 			assert.Equal(t, "horno-01", hornoID)
@@ -243,7 +242,6 @@ func TestHandleIniciarLote_Success(t *testing.T) {
 }
 
 func TestHandleIniciarLote_ParametrosNoExiste(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", "test-key-fermar")
 	consignaSvc := &mockConsignaService{
 		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
 			return nil, consigna.ErrParametrosNoExiste
@@ -258,7 +256,6 @@ func TestHandleIniciarLote_ParametrosNoExiste(t *testing.T) {
 }
 
 func TestHandleIniciarLote_HornoNoExiste(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", "test-key-fermar")
 	consignaSvc := &mockConsignaService{
 		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
 			return nil, consigna.ErrHornoNoExiste
@@ -273,7 +270,6 @@ func TestHandleIniciarLote_HornoNoExiste(t *testing.T) {
 }
 
 func TestHandleIniciarLote_MissingFields(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", "test-key-fermar")
 	consignaSvc := &mockConsignaService{
 		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
 			t.Error("DispatchAutomatico should not be called with missing fields")
@@ -289,10 +285,9 @@ func TestHandleIniciarLote_MissingFields(t *testing.T) {
 }
 
 func TestHandleIniciarLote_Unauthorized(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", "test-key-fermar")
 	consignaSvc := &mockConsignaService{
 		dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
-			t.Error("DispatchAutomatico should not be called without API key")
+			t.Error("DispatchAutomatico should not be called without device principal")
 			return nil, nil
 		},
 	}
@@ -305,10 +300,48 @@ func TestHandleIniciarLote_Unauthorized(t *testing.T) {
 }
 
 func TestHandleIniciarLote_WrongMethod(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", "test-key-fermar")
 	handler := NewLoteHandler(&mockLoteRepo{}, sse.NewBroker(), &mockLoteProductivoFetcher{}, &mockConsignaService{})
 
 	rr := executeIniciarLoteRequest(t, handler, http.MethodGet, nil, "test-key-fermar")
 
 	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+// TestHandleCreateLote_RejectsDuplicateMembersBeforeRepo asserts the strict
+// boundary stops duplicate JSON members before any repository call.
+func TestHandleCreateLote_RejectsDuplicateMembersBeforeRepo(t *testing.T) {
+	mock := &mockLoteRepo{
+		createFunc: func(ctx context.Context, l *lote.Lote) error {
+			t.Error("Create should not be called on strict decode failure")
+			return nil
+		},
+	}
+	handler := setupHandlerTest(t, mock)
+
+	body := bytes.ReplaceAll(validLoteJSON(), []byte(`"productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab"`), []byte(`"productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab","productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab"`))
+	rr := executeRequest(t, handler, http.MethodPost, body, "test-key-fermar")
+
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// TestHandleIniciarLote_RejectsStrictJSONViolationsBeforeService asserts
+// duplicate members and case aliases fail before DispatchAutomatico runs.
+func TestHandleIniciarLote_RejectsStrictJSONViolationsBeforeService(t *testing.T) {
+	for name, body := range map[string]string{
+		"duplicate-hornoId":  `{"hornoId":"horno-01","hornoId":"horno-02","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}`,
+		"case-alias-hornoId": `{"HornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}`,
+		"trailing-doc":       `{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}{"x":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			consignaSvc := &mockConsignaService{
+				dispatchAutomaticoFunc: func(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
+					t.Error("DispatchAutomatico should not be called on strict decode failure")
+					return nil, nil
+				},
+			}
+			handler := NewLoteHandler(&mockLoteRepo{}, sse.NewBroker(), &mockLoteProductivoFetcher{}, consignaSvc)
+			rr := executeIniciarLoteRequest(t, handler, http.MethodPost, []byte(body), "test-key-fermar")
+			assert.Equal(t, http.StatusBadRequest, rr.Code)
+		})
+	}
 }

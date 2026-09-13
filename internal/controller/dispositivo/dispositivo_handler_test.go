@@ -10,24 +10,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
 
 type fakeDispositivoService struct {
-	pingResp   *dispositivo.EstadoDispositivo
-	pingErr    error
-	pingCalls  int
-	estados    []dispositivo.EstadoDispositivo
-	metricas   *dispositivo.PaginatedResult
-	metrErr    error
-	createResp *dispositivo.EstadoDispositivo
-	createErr  error
-	createReq  dispositivo.CreateDispositivoRequest
-	updateResp *dispositivo.EstadoDispositivo
-	updateErr  error
-	updateReq  dispositivo.UpdateDispositivoRequest
-	deleteErr  error
+	pingResp    *dispositivo.EstadoDispositivo
+	pingErr     error
+	pingCalls   int
+	estados     []dispositivo.EstadoDispositivo
+	metricas    *dispositivo.PaginatedResult
+	metrErr     error
+	createResp  *dispositivo.EstadoDispositivo
+	createErr   error
+	createReq   dispositivo.CreateDispositivoRequest
+	createCalls int
+	updateResp  *dispositivo.EstadoDispositivo
+	updateErr   error
+	updateReq   dispositivo.UpdateDispositivoRequest
+	updateCalls int
+	deleteErr   error
 }
 
 func (f *fakeDispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
@@ -44,11 +47,13 @@ func (f *fakeDispositivoService) GetMetricas(ctx context.Context, id string, pag
 }
 
 func (f *fakeDispositivoService) Create(ctx context.Context, req dispositivo.CreateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	f.createCalls++
 	f.createReq = req
 	return f.createResp, f.createErr
 }
 
 func (f *fakeDispositivoService) Update(ctx context.Context, req dispositivo.UpdateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	f.updateCalls++
 	f.updateReq = req
 	return f.updateResp, f.updateErr
 }
@@ -58,6 +63,10 @@ func (f *fakeDispositivoService) Delete(ctx context.Context, id string) error {
 }
 
 const testAPIKey = "test-secret-key"
+
+func withTestDevicePrincipal(req *http.Request) *http.Request {
+	return req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "b1c2d3e4-5678-90ab-cdef-1234567890ab", Fingerprint: "test-fingerprint"}))
+}
 
 func TestHandlePing_UnauthorizedWithoutAPIKey(t *testing.T) {
 	t.Setenv("API_KEY_SECRET", testAPIKey)
@@ -96,7 +105,7 @@ func TestHandlePing_InvalidContentType(t *testing.T) {
 	body := bytes.NewBufferString(`{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
-	req.Header.Set("X-API-Key", testAPIKey)
+	req = withTestDevicePrincipal(req)
 	rec := httptest.NewRecorder()
 
 	h.HandlePing(rec, req)
@@ -114,7 +123,7 @@ func TestHandlePing_InvalidJSON(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", testAPIKey)
+	req = withTestDevicePrincipal(req)
 	rec := httptest.NewRecorder()
 
 	h.HandlePing(rec, req)
@@ -132,7 +141,7 @@ func TestHandlePing_ValidationError(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", testAPIKey)
+	req = withTestDevicePrincipal(req)
 	rec := httptest.NewRecorder()
 
 	h.HandlePing(rec, req)
@@ -150,7 +159,7 @@ func TestHandlePing_MalformedDispositivoIDIsClientValidationError(t *testing.T) 
 	body := bytes.NewBufferString(`{"dispositivoId":"not-a-uuid","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", testAPIKey)
+	req = withTestDevicePrincipal(req)
 	rec := httptest.NewRecorder()
 
 	h.HandlePing(rec, req)
@@ -171,7 +180,7 @@ func TestHandlePing_DispositivoNoExiste(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", testAPIKey)
+	req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "00000000-0000-0000-0000-000000000000", Fingerprint: "test-fingerprint"}))
 	rec := httptest.NewRecorder()
 
 	h.HandlePing(rec, req)
@@ -200,7 +209,7 @@ func TestHandlePing_Success(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", testAPIKey)
+	req = withTestDevicePrincipal(req)
 	rec := httptest.NewRecorder()
 
 	h.HandlePing(rec, req)
@@ -709,5 +718,79 @@ func TestHandleEstados_ExponeWhepURL(t *testing.T) {
 	}
 	if item["whepUrl"] != whep {
 		t.Fatalf("expected whepUrl in catalog response, got %v", item["whepUrl"])
+	}
+}
+
+// TestHandleUpdate_RejectsStrictJSONViolationsBeforeService asserts duplicate
+// and case-alias members fail at the decode boundary, before the service.
+func TestHandleUpdate_RejectsStrictJSONViolationsBeforeService(t *testing.T) {
+	for name, body := range map[string]string{
+		"duplicate-nombre":  `{"dispositivoId":"d1","nombre":"Pi 1","nombre":"Pi 2"}`,
+		"case-alias-nombre": `{"dispositivoId":"d1","Nombre":"Pi 1"}`,
+		"trailing-doc":      `{"dispositivoId":"d1","nombre":"Pi 1"}{"x":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc := &fakeDispositivoService{}
+			h := NewDispositivoHandler(svc)
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			h.Handle(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", rec.Code)
+			}
+			if svc.updateCalls != 0 {
+				t.Fatalf("metadata update must not reach service, got %d calls", svc.updateCalls)
+			}
+		})
+	}
+}
+
+// TestHandleCreate_RejectsCaseAliasNombreBeforeService covers the catalog
+// metadata create path with an exact-field-name boundary.
+func TestHandleCreate_RejectsCaseAliasNombreBeforeService(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", bytes.NewBufferString(`{"Nombre":"Pi 1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if svc.createCalls != 0 {
+		t.Fatalf("metadata create must not reach service, got %d calls", svc.createCalls)
+	}
+}
+
+// TestHandlePing_RejectsStrictJSONViolationsBeforeService asserts duplicate
+// members and case aliases fail before ProcessPing is invoked.
+func TestHandlePing_RejectsStrictJSONViolationsBeforeService(t *testing.T) {
+	for name, body := range map[string]string{
+		"duplicate-dispositivoId":  `{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`,
+		"case-alias-dispositivoId": `{"DispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`,
+		"duplicate-cpuPct":         `{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":10,"cpuPct":11,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc := &fakeDispositivoService{}
+			h := NewDispositivoHandler(svc)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = withTestDevicePrincipal(req)
+			rec := httptest.NewRecorder()
+
+			h.HandlePing(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", rec.Code)
+			}
+			if svc.pingCalls != 0 {
+				t.Fatalf("ping must not reach service, got %d calls", svc.pingCalls)
+			}
+		})
 	}
 }

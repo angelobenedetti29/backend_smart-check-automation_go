@@ -25,7 +25,7 @@ func NewPostgresRepository(db *pgxpool.Pool) *PostgresRepository {
 func (r *PostgresRepository) Create(ctx context.Context, l *lote.Lote) error {
 	const query = `
 		INSERT INTO lotes_productivos (
-			id, producto_id, turno, inicio_at, fin_at,
+			id, dispositivo_id, producto_id, turno, inicio_at, fin_at,
 			total_unidades, correctos, quemados, crudas,
 			correctos_kg, quemados_kg, crudos_kg,
 			temp_horno_1, temp_comb_horno_1,
@@ -34,18 +34,19 @@ func (r *PostgresRepository) Create(ctx context.Context, l *lote.Lote) error {
 			created_at, updated_at
 		) VALUES (
 			CASE WHEN $1 = '' THEN gen_random_uuid() ELSE $1::uuid END,
-			$2, $3, $4, $5,
-			$6, $7, $8, $9,
-			$10, $11, $12,
-			$13, $14,
-			$15, $16,
-			$17,
-			$18, $19
+			NULLIF($2, '')::uuid, $3, $4, $5, $6,
+			$7, $8, $9, $10,
+			$11, $12, $13,
+			$14, $15,
+			$16, $17,
+			$18,
+			$19, $20
 		)
 		RETURNING id`
 
 	err := r.db.QueryRow(ctx, query,
 		l.ID,
+		l.DispositivoID,
 		l.ProductoID,
 		l.Turno,
 		l.InicioAt,
