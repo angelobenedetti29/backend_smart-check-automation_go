@@ -83,7 +83,9 @@ backend_smart-check-automation_go/
 │   ├── provider/
 │   │   ├── database/                                # NewPostgresPool, repos en memoria, StateStore
 │   │   ├── google/                                  # Implementa user.GoogleVerifier vía google/api/idtoken
-│   │   ├── oven_controller/                         # Cliente simulado del controlador del horno (PLC)
+│   │   ├── oven_controller/                         # Cliente simulado del controlador del horno (PLC) — ver "Driver del controlador físico del horno"
+│   │   │   ├── modbus/                              # Cliente Modbus TCP genérico, sin dependencias externas (agnóstico de marca)
+│   │   │   └── novus/                                # Driver NOVUS N1500 (temperatura) + variador (velocidad) vía Modbus TCP — implementado, NO conectado en main.go
 │   │   └── yolo_client/                             # Cliente HTTP para servicio YOLO de inspección visual
 │   ├── repository/
 │   │   ├── postgres_repo.go                         # PostgreSQL — CREATE lote
@@ -153,6 +155,18 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 - **Estado de dispositivos en caché en memoria + historial en PostgreSQL**: `MemoryDispositivoStateStore` para lecturas rápidas; historial append-only en `metricas_dispositivo`.
 - **Detección de offline con reaper en background**: `StartReaper` corre cada `DISPOSITIVO_REAPER_INTERVAL`.
 - **Mecanismo de consigna compartido**: `ConsignaService` gestiona tanto consignas automáticas (SCA-142) como manuales (SCA-320).
+
+## Driver del controlador físico del horno (SCA-142)
+
+`ConsignaService` depende de la interfaz `consigna.OvenController` (`SendSetpoint(hornoID, temperatura, velocidad) DispatchResult`), no de una implementación concreta — el modelo de horno/PLC es un punto de extensión intercambiable, no un valor fijo.
+
+- **`oven_controller.OvenControllerClient`** (`internal/provider/oven_controller/client.go`): simulador in-memory (latencia + ~5% de fallo aleatorio). Es el que está **wireado hoy en `cmd/server/main.go`** — el único que corre en dev/CI.
+- **`novus.N1500Client`** (`internal/provider/oven_controller/novus/n1500_client.go`): driver real para hornos con indicador/controlador NOVUS N1500 (temperatura) + variador de frecuencia (velocidad de cinta), vía Modbus TCP — típicamente contra un gateway RS-485↔Ethernet, ya que el N1500 nativamente solo habla Modbus RTU por RS-485. **Está implementado y testeado, pero NO conectado en `main.go`** — no hay hardware real contra el cual confirmar direcciones de registro/config, así que cablearlo hoy significaría apuntar a datos inventados.
+- **`modbus.Client`** (`internal/provider/oven_controller/modbus/client.go`): cliente Modbus TCP genérico (framing MBAP, sin dependencias externas), agnóstico de marca — lo usa `novus.N1500Client` pero cualquier otro driver de horno puede reutilizarlo.
+
+**Para cambiar de modelo de horno** (NOVUS u otro): escribir un paquete hermano de `novus/` que implemente `SendSetpoint` con la misma firma, e inyectarlo en lugar de `oven_controller.NewOvenControllerClient(...)` en `cmd/server/main.go` (una sola línea) — ni `ConsignaService` ni el resto del sistema necesitan cambios.
+
+**Antes de conectar `novus.N1500Client` a hardware real** falta confirmar contra la "Tabela de Registradores para Comunicação Serial" del firmware instalado: las direcciones de registro (`SetpointRegister`, `PVRegister`) y la escala (`Decimals`) en `novus.DeviceConfig` son placeholders de ejemplo, no valores verificados.
 
 ## Variables de entorno
 
