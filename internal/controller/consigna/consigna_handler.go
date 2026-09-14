@@ -15,10 +15,8 @@ const maxRequestBodyBytes = 1 << 20 // 1 MB
 
 // ConsignaHandler maneja los endpoints HTTP del envío manual de consigna
 // térmica al horno (SCA-320) y la consulta de su historial de auditoría.
-//
-// NOTA: este endpoint todavía no requiere autenticación de usuario porque el
-// login con Google OAuth 2.0 está pendiente (ver CLAUDE.md), igual que
-// parametros_producto. Cuando se implemente, debería restringirse a Operario/Supervisor.
+// Protegido con JWT cookie: DispatchManual requiere rol Operario/Supervisor/
+// Administrador; GetHistorial admite cualquier rol autenticado (ver wiring en cmd/server/main.go).
 type ConsignaHandler struct {
 	service consigna.Service
 }
