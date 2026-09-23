@@ -38,6 +38,7 @@ func isUUID(s string) bool { return uuidPattern.MatchString(s) }
 // LoteSectorService es el contrato que consume el handler.
 type LoteSectorService interface {
 	SectorDelDispositivo(ctx context.Context, deviceID string) (*loteSectorService.SectorInfo, error)
+	Sectores(ctx context.Context) ([]sector.Sector, error)
 	Abrir(ctx context.Context, deviceID, productoID, idempotencyKey string) (*lotesector.Lote, bool, error)
 	Abierto(ctx context.Context, sectorID string) (*lotesector.Lote, error)
 	RegistrarEventos(ctx context.Context, deviceID, loteID string, eventos []lotesector.Evento) (int, int, *lotesector.Lote, error)
@@ -131,6 +132,22 @@ func (h *LoteSectorHandler) HandleSector(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	response.OK(w, "Sector del dispositivo obtenido exitosamente", info)
+}
+
+// HandleSectores maneja GET /api/v1/sectores (cualquier usuario autenticado vía
+// OAuth): devuelve el listado de sectores ordenado por nombre.
+func (h *LoteSectorHandler) HandleSectores(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+
+	sectores, err := h.service.Sectores(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response.OK(w, "Sectores obtenidos exitosamente", sectores)
 }
 
 // HandleInicio maneja POST /api/v1/lotes/inicio (device-only): abre o se

@@ -87,6 +87,11 @@ func (s *Service) resolveSectorID(ctx context.Context, deviceID string) (string,
 	return *info.SectorID, nil
 }
 
+// Sectores devuelve todos los sectores del catálogo ordenados por nombre.
+func (s *Service) Sectores(ctx context.Context) ([]sector.Sector, error) {
+	return s.sectorRepo.List(ctx)
+}
+
 // SectorDelDispositivo devuelve el sector del dispositivo y sus compañeros.
 func (s *Service) SectorDelDispositivo(ctx context.Context, deviceID string) (*SectorInfo, error) {
 	info, err := s.sectorRepo.GetDeviceInfo(ctx, deviceID)

@@ -11,7 +11,7 @@ Los datos son enviados por nodos Raspberry Pi via HTTP.
 - Infraestructura: Docker + Docker Compose
 - Frontend: Next.js (React) — consumidor de esta API
 - Autenticación (usuarios): Google OAuth 2.0 + credenciales locales (bcrypt) → JWT HttpOnly cookie
-- Autenticación (Raspberry Pi → API): API Key via header `X-API-Key`
+- Autenticación (Raspberry Pi → API): secret por nodo vía header `Authorization: Bearer <secret>` (enrolamiento con identidad Ed25519)
 
 ## Convenciones del equipo
 - Nombres de structs: PascalCase
@@ -64,21 +64,26 @@ backend_smart-check-automation_go/
 │   ├── controller/
 │   │   ├── auth/                                    # POST /api/v1/auth/login|google|logout
 │   │   ├── consigna/                                # POST /api/v1/horno/consigna, GET /api/v1/horno/consigna/historial
-│   │   ├── dispositivo/                             # POST /api/v1/dispositivos/ping, GET|POST /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
+│   │   ├── dispositivo/                             # POST /api/v1/dispositivos/ping, GET|PUT /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
+│   │   ├── devicetoken/                             # Middleware BeforeMux: auth Bearer de nodos Raspberry Pi
+│   │   ├── dualauth/                                # Auth dual (Bearer de dispositivo o cookie JWT)
 │   │   ├── horno/                                   # GET /api/v1/horno, POST /api/v1/horno/temperatura
-│   │   ├── lote/                                    # POST /api/v1/lotes, POST /api/v1/lotes/inicio
-│   │   ├── lote_productivo/                         # GET /api/v1/lotes-productivos
+│   │   ├── lote_sector/                             # GET /api/v1/sectores|/dispositivos/sector, POST /api/v1/lotes/inicio|{id}/eventos|{id}/cierre, GET /api/v1/lotes|/lotes/abierto
 │   │   ├── parametros_producto/                     # Handler GET/POST/PUT /api/v1/parametros-producto
+│   │   ├── producto/                                # GET /api/v1/productos
+│   │   ├── registro/                                # POST|GET /api/v1/registration-requests (+ approve/reject)
 │   │   ├── sse/                                     # Handler SSE genérico
 │   │   └── user/                                    # GET|POST /api/v1/admin/usuarios, PATCH .../usuarios/{id}
 │   ├── domain/
 │   │   ├── alerta/                                  # Modelo Alerta
 │   │   ├── consigna/                                # Modelo Consigna (auditoría) + ConsignaManualRequest
-│   │   ├── dispositivo/                             # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo
+│   │   ├── dispositivo/                             # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo + DeviceRead
 │   │   ├── horno/                                   # Modelo Horno
-│   │   ├── lote/                                    # Modelo Lote + interfaces Repository/Service
-│   │   ├── lote_productivo/                         # Modelo LoteProductivo + PaginatedResult
+│   │   ├── lote_sector/                             # Modelo Lote + Evento + interfaces Repository/Service
 │   │   ├── parametros_producto/                     # Modelo ParametroProducto
+│   │   ├── producto/                                # Modelo Producto (catálogo maestro)
+│   │   ├── registro/                                # Modelo de solicitudes de enrolamiento
+│   │   ├── sector/                                  # Modelo Sector + contrato Repository
 │   │   └── user/                                    # Entidad User, constantes de roles, errores centinela
 │   ├── provider/
 │   │   ├── database/                                # NewPostgresPool, repos en memoria, StateStore
@@ -86,10 +91,13 @@ backend_smart-check-automation_go/
 │   │   ├── oven_controller/                         # Cliente simulado del controlador del horno (PLC)
 │   │   └── yolo_client/                             # Cliente HTTP para servicio YOLO de inspección visual
 │   ├── repository/
-│   │   ├── postgres_repo.go                         # PostgreSQL — CREATE lote
-│   │   ├── lote_productivo_repo.go                  # PostgreSQL — GET lotes (JOIN productos)
+│   │   ├── lote_sector_repo.go                      # PostgreSQL — ciclo de lote por sector
+│   │   ├── sector_repo.go                           # PostgreSQL — sectores y relación con dispositivos
+│   │   ├── producto_repo.go                         # PostgreSQL — catálogo de productos
 │   │   ├── parametros_producto_repo.go              # PostgreSQL — GET/CREATE/UPDATE parametros_producto
 │   │   ├── dispositivo_repo.go                      # PostgreSQL — Dispositivos y métricas
+│   │   ├── device_auth_repo.go                      # PostgreSQL — credenciales de nodos (secret_hash)
+│   │   ├── registro_repo.go                         # PostgreSQL — solicitudes de enrolamiento
 │   │   ├── consigna_repo.go                         # PostgreSQL — Historial de consignas
 │   │   └── user_postgres_repository.go              # PostgreSQL — CRUD usuarios
 │   └── service/
@@ -97,8 +105,10 @@ backend_smart-check-automation_go/
 │       ├── consigna/                                # Despacho automático/manual de consigna
 │       ├── dispositivo/                             # Lógica de ping, reaper y SSE
 │       ├── horno/                                   # Lógica de umbrales térmicos y alertas
-│       ├── lote_productivo/                         # Lógica de paginación
+│       ├── lote_sector/                             # Ciclo de lote por sector (apertura, eventos, cierre, historial)
 │       ├── parametros_producto/                     # Alta/consulta/actualización de parámetros
+│       ├── producto/                                # Catálogo de productos
+│       ├── registro/                                # Enrolamiento de dispositivos
 │       └── user/                                    # ListUsers, CreateUser, UpdateUser
 ├── pkg/response/response.go                         # Envelope JSON estándar {success, message, data, errors}
 ├── database/schema.sql                              # DDL: productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo + historial_consignas + usuarios
@@ -132,18 +142,27 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | PATCH | /api/v1/admin/usuarios/{id} | JWT cookie | Administrador |
 | GET | /api/v1/horno | JWT cookie | cualquier rol |
 | POST | /api/v1/horno/temperatura | JWT cookie | Supervisor, Admin |
-| POST | /api/v1/lotes | X-API-Key | — |
-| POST | /api/v1/lotes/inicio | X-API-Key | — |
-| GET | /api/v1/lotes-productivos | JWT cookie | cualquier rol |
-| GET/POST/PUT | /api/v1/parametros-producto | JWT cookie | Supervisor, Admin |
-| POST | /api/v1/dispositivos/ping | X-API-Key | — |
+| GET | /api/v1/productos | Bearer dispositivo o JWT cookie | — |
+| GET | /api/v1/dispositivos/sector | Bearer dispositivo | — |
+| GET | /api/v1/sectores | JWT cookie | cualquier rol |
+| POST | /api/v1/lotes/inicio | Bearer dispositivo | — |
+| GET | /api/v1/lotes/abierto | Bearer dispositivo o JWT cookie | — |
+| POST | /api/v1/lotes/{id}/eventos | Bearer dispositivo | — |
+| POST | /api/v1/lotes/{id}/cierre | Bearer dispositivo | — |
+| GET | /api/v1/lotes | Bearer dispositivo o JWT cookie | — |
+| GET | /api/v1/lotes/events | JWT cookie | cualquier rol |
+| GET/POST/PUT | /api/v1/parametros-producto | JWT cookie | Supervisor, Admin (escrituras) |
+| POST | /api/v1/dispositivos/ping | Bearer dispositivo | — |
 | GET | /api/v1/dispositivos | JWT cookie | cualquier rol |
-| POST | /api/v1/dispositivos | JWT cookie | Operario, Supervisor, Admin |
+| PUT | /api/v1/dispositivos | JWT cookie | Supervisor, Admin |
 | GET | /api/v1/dispositivos/metricas | JWT cookie | cualquier rol |
 | GET | /api/v1/dispositivos/events | JWT cookie | cualquier rol |
 | POST | /api/v1/horno/consigna | JWT cookie | Operario, Supervisor, Admin |
 | GET | /api/v1/horno/consigna/historial | JWT cookie | cualquier rol |
 | GET | /api/v1/horno/events | JWT cookie | cualquier rol |
+| POST/GET | /api/v1/registration-requests | — (POST/GET por id) · JWT Supervisor/Admin (listado y approve/reject) | — |
+
+Nota: `POST /api/v1/lotes/inicio` ya **no dispara consigna automática**; solo abre/persiste el lote abierto del sector. La consigna automática (SCA-142) dejó de despacharse desde ese endpoint.
 
 ## Decisiones de arquitectura tomadas
 
@@ -161,7 +180,7 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | `DATABASE_URL` | Conexión a PostgreSQL (Aiven o Docker local) |
 | `JWT_SECRET` | Clave de firma del JWT. Mínimo 32 chars. |
 | `GOOGLE_CLIENT_ID` | Client ID de Google Cloud Console |
-| `API_KEY_SECRET` | Clave para Raspberry Pi (`X-API-Key` header) |
+| `LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS` | Inactividad mínima (segundos) para aceptar un cierre de lote (default 0 = no enforce) |
 | `PORT` | Puerto HTTP (default 8080) |
 | `DISPOSITIVO_REAPER_INTERVAL` | Intervalo del reaper (default 5s) |
 | `DISPOSITIVO_OFFLINE_THRESHOLD` | Umbral de inactividad (default 25s) |

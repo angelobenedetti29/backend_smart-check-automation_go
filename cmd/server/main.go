@@ -22,7 +22,6 @@ import (
 	dispositivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/dualauth"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
-	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
 	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
 	parametrosProductoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/parametros_producto"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
@@ -41,7 +40,6 @@ import (
 	consignaService "github.com/angelobenedetti29/smart-check-automation/internal/service/consigna"
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
-	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
 	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
 	parametrosProductoService "github.com/angelobenedetti29/smart-check-automation/internal/service/parametros_producto"
 	productoService "github.com/angelobenedetti29/smart-check-automation/internal/service/producto"
@@ -95,7 +93,6 @@ func main() {
 	ovenController := oven_controller.NewOvenControllerClient("http://localhost:8600/plc/horno")
 
 	// Real PostgreSQL repositories
-	loteGetRepo := repository.NewLoteProductivoPostgresRepository(pgPool)
 	parametrosProductoRepo := repository.NewParametrosProductoPostgresRepository(pgPool)
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
 	consignaRepo := repository.NewConsignaPostgresRepository(pgPool)
@@ -110,22 +107,17 @@ func main() {
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
 
 	// SSE broker for real-time event streaming
-	sseBroker := sse.NewBroker()
-
 	// Dedicated SSE broker for dispositivo telemetry events (no cross-noise with lotes)
 	dispositivoSSEBroker := sse.NewBroker()
 
 	// Dedicated SSE broker for horno/consigna events (no cross-noise con lotes/dispositivos)
 	hornoSSEBroker := sse.NewBroker()
 
-	// Dedicated SSE broker for the new sector/lotes stream (GET /api/v1/lotes/events),
-	// kept apart from sseBroker to avoid cross-talk with the legacy
-	// GET /api/v1/lotes-productivos/events stream.
+	// Dedicated SSE broker for the sector/lotes stream (GET /api/v1/lotes/events).
 	loteSectorSSEBroker := sse.NewBroker()
 
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
-	loteProdSvc := loteProductivoService.NewLoteProductivoService(loteGetRepo)
 	parametrosProductoSvc := parametrosProductoService.NewParametrosProductoService(parametrosProductoRepo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker)
@@ -155,9 +147,7 @@ func main() {
 
 	// 4. Instantiate Presentation HTTP Handlers
 	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
-	loteProductivoHandler := loteProductivoController.NewLoteProductivoHandler(loteProdSvc)
 	parametrosProductoHandler := parametrosProductoController.NewParametrosProductoHandler(parametrosProductoSvc)
-	sseHandler := sseController.NewSSEHandler(sseBroker)
 	loteSectorSSEHandler := sseController.NewSSEHandler(loteSectorSSEBroker)
 	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc, dispositivoRepo)
 	registroHandler := registroController.NewHandler(registroSvc)
@@ -223,7 +213,7 @@ func main() {
 	}))
 	mux.HandleFunc("/api/v1/productos", loggingMiddleware(dualauth.DualAuth(deviceVerifier, jwtSecretBytes, productoHandler.Handle)))
 	mux.HandleFunc("/api/v1/dispositivos/sector", loggingMiddleware(loteSectorHandler.HandleSector))
-	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteProductivoHandler.GetAll)))
+	mux.HandleFunc("/api/v1/sectores", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteSectorHandler.HandleSectores)))
 	parametrosRoleAware := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost || r.Method == http.MethodPut {
 			authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, parametrosProductoHandler.Handle)(w, r)
@@ -232,7 +222,6 @@ func main() {
 		parametrosProductoHandler.Handle(w, r)
 	}
 	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, management(parametrosRoleAware))))
-	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, sseHandler.HandleSSE)))
 	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		dispositivoHandler.HandlePing(w, r)
 	}))

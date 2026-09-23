@@ -19,6 +19,7 @@ const (
 type DeviceRead struct {
 	EstadoDispositivo
 	Tipo          *string    `json:"type,omitempty"`
+	SectorID      *string    `json:"sectorId,omitempty"`
 	AuthStatus    AuthStatus `json:"authStatus"`
 	HasSecret     bool       `json:"hasSecret"`
 	AuthUpdatedAt *time.Time `json:"authUpdatedAt,omitempty"`

@@ -2,9 +2,6 @@
 // coordinado entre dos dispositivos (ENTRADA_HORNO/SALIDA_HORNO) de un mismo
 // sector: apertura idempotente, reporte de eventos en vivo y cierre con conteo
 // final autoritativo. Persiste sobre la tabla lotes_productivos y eventos_lote.
-//
-// Se mantiene separado de lote_productivo, que sigue siendo el read-model
-// legado de GET /lotes-productivos.
 package lote_sector
 
 import (

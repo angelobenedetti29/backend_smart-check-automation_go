@@ -12,6 +12,11 @@ import (
 	sector "github.com/angelobenedetti29/smart-check-automation/internal/domain/sector"
 )
 
+// pgErrCodeInvalidTextRepresentation es el código de PostgreSQL para input
+// inválido (p. ej. un UUID malformado contra una columna uuid). Compartido por
+// los repositorios que traducen ese 22P02 a un error de dominio.
+const pgErrCodeInvalidTextRepresentation = "22P02"
+
 // SectorPostgresRepository implementa sector.Repository usando pgxpool.
 type SectorPostgresRepository struct {
 	db *pgxpool.Pool
@@ -64,6 +69,28 @@ func (r *SectorPostgresRepository) GetByID(ctx context.Context, sectorID string)
 		return nil, fmt.Errorf("failed to query sector by id: %w", err)
 	}
 	return &s, nil
+}
+
+// List devuelve todos los sectores ordenados por nombre.
+func (r *SectorPostgresRepository) List(ctx context.Context) ([]sector.Sector, error) {
+	rows, err := r.db.Query(ctx, `SELECT id, nombre FROM sectores ORDER BY nombre`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query sectores: %w", err)
+	}
+	defer rows.Close()
+
+	out := []sector.Sector{}
+	for rows.Next() {
+		var s sector.Sector
+		if err := rows.Scan(&s.ID, &s.Nombre); err != nil {
+			return nil, fmt.Errorf("failed to scan sector: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
+	}
+	return out, nil
 }
 
 // ListCompaneros devuelve los demás dispositivos del sector, excluyendo al

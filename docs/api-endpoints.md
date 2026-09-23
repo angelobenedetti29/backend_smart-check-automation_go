@@ -12,21 +12,24 @@ Casi todos los endpoints (excepto SSE, `/`, `/health`) devuelven este formato (`
 { "success": true, "message": "texto descriptivo", "data": { ... }, "errors": null }
 ```
 
-Los endpoints paginados (`GET /api/v1/lotes-productivos`, `GET /api/v1/dispositivos/metricas`) devuelven `total`, `page` y `pageSize` como campos de primer nivel (no anidados en `data`):
+Los endpoints paginados (`GET /api/v1/lotes`, `GET /api/v1/dispositivos/metricas`) devuelven `total`, `page` y `pageSize` como campos de primer nivel (no anidados en `data`); `GET /api/v1/lotes` agrega además `siguiente_cursor` (omitido cuando no hay más páginas):
 
 ```json
-{ "success": true, "message": "...", "data": [ ... ], "total": 42, "page": 1, "pageSize": 10 }
+{ "success": true, "message": "...", "data": [ ... ], "total": 42, "page": 1, "pageSize": 20, "siguiente_cursor": "..." }
 ```
 
 ### Autenticación
 
-Solo los endpoints de telemetría/transacción llamados por la Raspberry requieren `X-API-Key` (comparación a prueba de timing attacks con `crypto/subtle`): `POST /api/v1/lotes`, `POST /api/v1/lotes/inicio` y `POST /api/v1/dispositivos/ping`. Las lecturas de dispositivos (`GET /api/v1/dispositivos`, `GET /api/v1/dispositivos/metricas`) y los tres endpoints SSE requieren la cookie JWT `session_token`, sin restricción de rol. El resto conserva las reglas de autenticación indicadas en cada endpoint.
+Hay dos esquemas de credencial, mutuamente excluyentes:
 
-El proxy del frontend debe reenviar la cookie HttpOnly `session_token` en esas lecturas y mantenerla en la conexión SSE; no debe enviar `X-API-Key` para reemplazar la autenticación JWT.
+- **Usuarios del panel (OAuth):** cookie HttpOnly `session_token` emitida por `/api/v1/auth/login` o `/api/v1/auth/google`. El proxy del frontend debe reenviar esa cookie, también en las conexiones SSE.
+- **Nodos Raspberry Pi:** header `Authorization: Bearer <secret>`, donde `<secret>` es el secreto por dispositivo enrolado.
+
+Algunos endpoints son **dual-auth**: aceptan el Bearer de dispositivo o la cookie JWT. Si la petición trae cualquier header `Authorization`, se resuelve exclusivamente como intento de dispositivo (un Bearer inválido es 401 plano, sin degradar a la cookie). Sin `Authorization`, se valida la cookie. Son dual-auth: `GET /api/v1/productos`, `GET /api/v1/lotes/abierto` y `GET /api/v1/lotes`.
 
 ### Errores de validación
 
-Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los devuelven como un único string en `errors`, separados por `"; "` — no como array estructurado.
+Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los devuelven como un único string en `errors`, separados por `"; "` — no como array estructurado. Los errores de negocio del ciclo de lotes usan `errors: { "code": "..." }`.
 
 ---
 
@@ -36,21 +39,26 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 |---|---|---|
 | 1 | `GET /api/v1/horno` | Consultar estado actual del horno |
 | 2 | `POST /api/v1/horno/temperatura` | Actualizar temperatura del horno (umbrales/alertas) |
-| 3 | `POST /api/v1/lotes` | Persistir un lote productivo ya finalizado |
-| 4 | `POST /api/v1/lotes/inicio` | Disparar consigna automática al iniciar un lote (IA) |
-| 5 | `GET /api/v1/lotes-productivos` | Listar/consultar lotes productivos (paginado) |
-| 6 | `GET /api/v1/parametros-producto` | Listar parámetros de control por producto |
-| 7 | `POST /api/v1/parametros-producto` | Alta de parámetros para un producto |
-| 8 | `PUT /api/v1/parametros-producto` | Modificar parámetros de un producto |
-| 9 | `POST /api/v1/dispositivos/ping` | Recibir telemetría de una Raspberry Pi |
-| 10 | `GET /api/v1/dispositivos` | Estado online/offline de todos los dispositivos |
-| 11 | `GET /api/v1/dispositivos/metricas` | Historial de métricas de un dispositivo (paginado) |
-| 12 | `POST /api/v1/horno/consigna` | Envío manual de consigna térmica al horno |
-| 13 | `GET /api/v1/horno/consigna/historial` | Historial de auditoría de consignas por lote |
-| 14 | `GET /api/v1/lotes-productivos/events` | SSE: nuevos lotes creados |
-| 15 | `GET /api/v1/dispositivos/events` | SSE: telemetría de dispositivos en tiempo real |
-| 16 | `GET /api/v1/horno/events` | SSE: consignas despachadas al horno |
-| 17 | `GET /health`, `GET /healthz`, `GET /` | Salud del servicio / info |
+| 3 | `GET /api/v1/productos` | Catálogo maestro de productos |
+| 4 | `GET /api/v1/dispositivos/sector` | Sector y compañeros del dispositivo autenticado |
+| 5 | `GET /api/v1/sectores` | Listar todos los sectores |
+| 6 | `POST /api/v1/lotes/inicio` | Abrir (o adjuntarse a) el lote abierto del sector |
+| 7 | `GET /api/v1/lotes/abierto` | Consultar el lote abierto del sector |
+| 8 | `POST /api/v1/lotes/{id}/eventos` | Reportar detecciones del lote |
+| 9 | `POST /api/v1/lotes/{id}/cierre` | Cerrar el lote con los conteos finales |
+| 10 | `GET /api/v1/lotes` | Historial paginado de lotes por sector |
+| 11 | `GET /api/v1/parametros-producto` | Listar parámetros de control por producto |
+| 12 | `POST /api/v1/parametros-producto` | Alta de parámetros para un producto |
+| 13 | `PUT /api/v1/parametros-producto` | Modificar parámetros de un producto |
+| 14 | `POST /api/v1/dispositivos/ping` | Recibir telemetría de una Raspberry Pi |
+| 15 | `GET /api/v1/dispositivos` | Estado online/offline de todos los dispositivos |
+| 16 | `GET /api/v1/dispositivos/metricas` | Historial de métricas de un dispositivo (paginado) |
+| 17 | `POST /api/v1/horno/consigna` | Envío manual de consigna térmica al horno |
+| 18 | `GET /api/v1/horno/consigna/historial` | Historial de auditoría de consignas por lote |
+| 19 | `GET /api/v1/lotes/events` | SSE: ciclo de vida de lotes (`lote.creado`/`actualizado`/`cerrado`) |
+| 20 | `GET /api/v1/dispositivos/events` | SSE: telemetría de dispositivos en tiempo real |
+| 21 | `GET /api/v1/horno/events` | SSE: consignas despachadas al horno |
+| 22 | `GET /health`, `GET /healthz`, `GET /` | Salud del servicio / info |
 
 ---
 
@@ -58,10 +66,10 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 
 Devuelve el estado activo del horno (temperatura, velocidad de cinta, producto/lote en curso) más sus alertas recientes. Internamente también dispara una inspección visual simulada de la cinta transportadora (IA de defectos).
 
-**Auth:** ninguna. **Query param:** `id` (requerido).
+**Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `id` (requerido).
 
 ```bash
-curl "http://localhost:8080/api/v1/horno?id=horno-01"
+curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno?id=horno-01"
 ```
 
 ```json
@@ -86,6 +94,7 @@ curl "http://localhost:8080/api/v1/horno?id=horno-01"
 |---|---|
 | 405 | Método distinto de GET |
 | 400 | Falta el query param `id` |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
 | 404 | No existe un horno con ese `id` |
 
 ---
@@ -94,67 +103,132 @@ curl "http://localhost:8080/api/v1/horno?id=horno-01"
 
 Endpoint "legacy" (previo a SCA-142/320) que actualiza la temperatura del horno con lógica de umbrales hardcodeada: `>200°C` → alerta CRITICAL + `MANTENIMIENTO`; `>180°C` → alerta WARNING + `ATENCION`; si no, `ACTIVO`. No usa `parametros_producto`.
 
-**Auth:** ninguna. Sin `Content-Type` ni límite de tamaño de body (a diferencia de casi todos los demás POST).
+**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador. Sin `Content-Type` ni límite de tamaño de body (a diferencia de casi todos los demás POST).
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/horno/temperatura \
-  -H "Content-Type: application/json" \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
   -d '{"id":"horno-01","temperatura":195.0}'
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de POST |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente (se requiere Supervisor o Administrador) |
+| 400 | JSON inválido o `id` ausente |
+| 500 | Error interno del servicio |
+
+---
+
+## 3. `GET /api/v1/productos` — Catálogo maestro de productos
+
+Devuelve el catálogo completo, incluidos los productos inactivos (la Raspberry filtra por vigencia; el panel puebla selectores). Lo consume tanto el nodo como el panel.
+
+**Auth:** dual-auth (Bearer de dispositivo o cookie JWT). Sin query params.
+
+```bash
+curl -H "Authorization: Bearer $DEVICE_SECRET" http://localhost:8080/api/v1/productos
 ```
 
 ```json
 {
-  "success": true,
-  "message": "Temperatura del horno actualizada transaccionalmente",
+  "success": true, "message": "Productos obtenidos exitosamente",
+  "data": [ { "id": "a1b2c3d4-5678-90ab-cdef-1234567890ab", "nombre": "Tostada Integral", "activo": true } ],
+  "errors": null
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Bearer de dispositivo inválido, o falta la cookie JWT / sesión expirada |
+| 500 | Error interno |
+
+---
+
+## 4. `GET /api/v1/dispositivos/sector` — Sector del dispositivo autenticado
+
+Devuelve el sector al que pertenece el dispositivo del Bearer, junto con sus compañeros de línea (el otro extremo ENTRADA_HORNO/SALIDA_HORNO). Es **device-only**.
+
+**Auth:** `Authorization: Bearer <secret>`.
+
+```bash
+curl -H "Authorization: Bearer $DEVICE_SECRET" http://localhost:8080/api/v1/dispositivos/sector
+```
+
+```json
+{
+  "success": true, "message": "Sector del dispositivo obtenido exitosamente",
   "data": {
-    "horno": { "id": "horno-01", "temperatura": 195, "estado": "ATENCION", "...": "..." },
-    "ultima_alerta": { "id": "...", "horno_id": "horno-01", "nivel": "WARNING", "mensaje": "...", "creada_en": "..." },
-    "alertas_totales": 3
+    "sector_id": "horno-e2e", "nombre": "Horno E2E", "tipo": "ENTRADA_HORNO",
+    "companeros": [ { "device_id": "22222222-...", "hostname": "pi-salida", "type": "SALIDA_HORNO" } ]
   }
 }
 ```
 
 | Código | Motivo |
 |---|---|
-| 405 | Método distinto de POST |
-| 400 | JSON inválido o `id` ausente |
-| 500 | Error interno del servicio |
+| 405 | Método distinto de GET |
+| 401 | Token de dispositivo inválido (respuesta plana `invalid_device_token`) |
+| 404 | El dispositivo no pertenece a ningún sector (`sin_sector`) |
+| 500 | Error interno |
 
 ---
 
-## 3. `POST /api/v1/lotes` — Persistir un lote productivo
+## 5. `GET /api/v1/sectores` — Listar sectores
 
-Lo llama la Raspberry Pi **cuando el lote ya terminó** (trae `inicioAt` y `finAt` juntos, con los conteos finales). Persiste en PostgreSQL y dispara un evento SSE `lote.created` en `/api/v1/lotes-productivos/events`.
+Devuelve todos los sectores ordenados por nombre. Lo usa el panel para poblar filtros de historial.
 
-**Auth:** `X-API-Key`. `Content-Type: application/json` obligatorio. Body máx. 1 MB.
+**Auth:** cookie JWT `session_token` (cualquier rol). Sin query params.
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/lotes \
-  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-    "turno": "mañana",
-    "inicioAt": "2026-08-06T08:00:00Z",
-    "finAt": "2026-08-06T09:00:00Z",
-    "totalUnidades": 1200,
-    "correctos": 1150,
-    "quemados": 50,
-    "crudas": null,
-    "correctosKg": 138.00,
-    "quemadosKg": 6.00,
-    "crudosKg": null,
-    "tempHorno1": 175.5,
-    "velocidadCinta": 0.20
-  }'
+curl -b "session_token=$JWT" http://localhost:8080/api/v1/sectores
 ```
 
-Respuesta `201 Created` con el `Lote` guardado (JSON en `snake_case`, distinto del request que es `camelCase`):
+```json
+{
+  "success": true, "message": "Sectores obtenidos exitosamente",
+  "data": [ { "id": "horno-e2e", "nombre": "Horno E2E" } ],
+  "errors": null
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 500 | Error interno |
+
+---
+
+## 6. `POST /api/v1/lotes/inicio` — Abrir lote del sector
+
+Lo llama la Raspberry Pi (ENTRADA_HORNO) al identificar el producto. **Abre y persiste** el lote abierto del sector; si ya hay uno, se adjunta (get-or-create). Es idempotente por `idempotency_key`. **No dispara consigna automática** (ese despacho ya no ocurre desde este endpoint).
+
+**Auth:** `Authorization: Bearer <secret>` (device-only). `Content-Type: application/json` obligatorio. Body máx. 1 MB.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/lotes/inicio \
+  -H "Authorization: Bearer $DEVICE_SECRET" -H "Content-Type: application/json" \
+  -d '{"idempotency_key":"0f8fad5b-d9cb-469f-a165-70867728950e","producto_id":"a1b2c3d4-5678-90ab-cdef-1234567890ab","momento":"2026-08-06T12:00:00Z"}'
+```
+
+`momento` es informativo: el servidor usa su propio reloj. Respuesta `201 Created` cuando el lote se crea y `200 OK` cuando se adjunta a uno existente:
 
 ```json
 {
   "success": true, "message": "Lote creado exitosamente",
-  "data": { "id": "550e8400-...", "producto_id": "a1b2c3d4-...", "turno": "mañana", "total_unidades": 1200, "correctos": 1150, "quemados": 50, "...": "..." },
+  "data": {
+    "creado": true,
+    "lote": {
+      "id": "d1a2b3c4-d5e6-4789-8abc-def012345678", "sector_id": "horno-e2e", "estado": "ABIERTO",
+      "producto_id": "a1b2c3d4-...", "producto_nombre": "Tostada Integral",
+      "abierto_en": "2026-08-06T12:00:00Z", "abierto_por": { "device_id": "11111111-...", "type": "ENTRADA_HORNO" },
+      "conteos": { "ok": null, "crudo": null, "quemado": null, "total": 0 },
+      "ultimo_evento_en": null, "inactividad_segundos": 0
+    }
+  },
   "errors": null
 }
 ```
@@ -162,94 +236,150 @@ Respuesta `201 Created` con el `Lote` guardado (JSON en `snake_case`, distinto d
 | Código | Motivo |
 |---|---|
 | 405 | Método distinto de POST |
-| 415 | `Content-Type` distinto de `application/json` |
-| 401 | `X-API-Key` ausente o inválida |
+| 401 | Token de dispositivo inválido |
 | 400 | JSON inválido o body > 1 MB |
-| 422 | Validación de negocio falló (ver abajo) |
-| 500 | Error al persistir en PostgreSQL |
-
-**Reglas de validación:** `productoId` requerido · `turno` ∈ {`mañana`,`tarde`,`noche`} · `finAt >= inicioAt` · `totalUnidades/correctos/quemados/crudas >= 0` · **`correctos + quemados + crudas <= totalUnidades`** · pesos ≥ 0.
+| 404 | El dispositivo no pertenece a ningún sector (`sin_sector`) |
+| 409 | La `idempotency_key` ya fue usada por un lote de otro sector (`idempotency_key_conflicto`) |
+| 422 | El `producto_id` no existe en el catálogo (`producto_desconocido`) |
+| 500 | Error interno |
 
 ---
 
-## 4. `POST /api/v1/lotes/inicio` — Iniciar lote (consigna automática) — SCA-142
+## 7. `GET /api/v1/lotes/abierto` — Lote abierto del sector
 
-Lo llama la Raspberry Pi **apenas la IA identifica el producto**, antes de que el lote termine. Dispara el despacho automático de consigna (temperatura + velocidad de cinta) al controlador del horno. No crea fila en `lotes_productivos` — genera un `loteId` de correlación.
+Devuelve el lote ABIERTO del sector, o `lote: null` si no hay ninguno (nunca 404 por ausencia).
 
-**Auth:** `X-API-Key` (mismo esquema que #3). `Content-Type: application/json` obligatorio.
+**Auth:** dual-auth. Un dispositivo deriva su sector del Bearer; un usuario OAuth debe enviar el query param `sector_id`.
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/lotes/inicio \
-  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}'
+curl -H "Authorization: Bearer $DEVICE_SECRET" http://localhost:8080/api/v1/lotes/abierto
+curl -b "session_token=$JWT" "http://localhost:8080/api/v1/lotes/abierto?sector_id=horno-e2e"
+```
+
+```json
+{ "success": true, "message": "Lote abierto consultado", "data": { "lote": null }, "errors": null }
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Bearer inválido o cookie JWT ausente/expirada |
+| 400 | OAuth sin `sector_id` (`payload_invalido`) |
+| 404 | El dispositivo no pertenece a ningún sector (`sin_sector`) |
+| 500 | Error interno |
+
+---
+
+## 8. `POST /api/v1/lotes/{id}/eventos` — Reportar detecciones
+
+Lo llama la Raspberry Pi (SALIDA_HORNO) con un batch de detecciones. Deduplica por `evento_id`: un reintento del mismo batch devuelve `aceptados=0` y `duplicados=N` sin volver a contar. Emite `lote.actualizado` sólo si el batch acepta al menos un evento.
+
+**Auth:** `Authorization: Bearer <secret>` (device-only). `Content-Type: application/json` obligatorio. Body máx. 1 MB. Máximo 100 eventos por batch.
+
+```bash
+curl -X POST "http://localhost:8080/api/v1/lotes/$LOTE/eventos" \
+  -H "Authorization: Bearer $DEVICE_SECRET" -H "Content-Type: application/json" \
+  -d '{"eventos":[
+    {"evento_id":"c1a2b3c4-d5e6-4789-8abc-def012345678","producto_id":"a1b2c3d4-...","estado":"ok","confianza":0.95,"pista":7,"frame":1234,"modelo_id":"tostadas-v2"},
+    {"evento_id":"e2b3c4d5-e6f7-4890-9abc-def012345679","producto_id":"a1b2c3d4-...","estado":"quemado","confianza":0.91}
+  ]}'
 ```
 
 ```json
 {
-  "success": true,
-  "message": "Lote iniciado: consigna despachada al horno",
-  "data": {
-    "loteId": "1d1e9071-e707-4821-b089-10d4a404d023",
-    "consigna": {
-      "id": "e7727358-...", "hornoId": "horno-01", "loteId": "1d1e9071-...",
-      "productoId": "a1b2c3d4-...", "temperaturaObjetivo": 170, "velocidadCintaObjetivo": 0.2,
-      "origen": "AUTOMATICO", "exitosa": true,
-      "temperaturaPrevia": 185.3, "velocidadCintaPrevia": 0.2, "creadaEn": "2026-08-06T12:00:00Z"
-    }
-  }
+  "success": true, "message": "Eventos procesados exitosamente",
+  "data": { "aceptados": 2, "duplicados": 0, "lote": { "...": "objeto lote actualizado" } },
+  "errors": null
 }
 ```
 
 | Código | Motivo |
 |---|---|
 | 405 | Método distinto de POST |
-| 415 | `Content-Type` inválido |
-| 401 | `X-API-Key` ausente o inválida |
-| 400 | JSON inválido |
-| 422 | Falta `hornoId`/`productoId`, o el producto no tiene `temp_setpoint`/`velocidad_cinta_setpoint` cargados |
-| 404 | El horno indicado no existe |
-| 409 | El horno está en `CONTROL_MANUAL` (fallo de enlace previo sin resolver) |
-| 502 | El controlador físico rechazó la consigna (queda auditado igual, `data` trae el registro fallido) |
+| 401 | Token de dispositivo inválido |
+| 400 | JSON inválido, batch vacío, `evento_id`/`producto_id` no-UUID, `estado` fuera de `{ok,crudo,quemado}`, `confianza` fuera de `[0,1]` (`payload_invalido`) |
+| 404 | `lote_id` inexistente o no-UUID (`lote_no_encontrado`), o dispositivo sin sector (`sin_sector`) |
+| 403 | El lote pertenece a otro sector (`lote_ajeno`) |
+| 409 | El lote ya está cerrado (`lote_cerrado`) |
+| 413 | Más de 100 eventos en el batch (`demasiados_eventos`) |
+| 422 | El producto de un evento no coincide con el del lote (`producto_inconsistente`) |
 | 500 | Error interno |
 
 ---
 
-## 5. `GET /api/v1/lotes-productivos` — Listar lotes productivos
+## 9. `POST /api/v1/lotes/{id}/cierre` — Cerrar el lote
 
-Lectura paginada de lotes ya persistidos (JOIN con `productos` para el nombre). Soporta filtro opcional por producto.
+Lo llama la Raspberry Pi para fijar el **conteo final autoritativo** del lote. `conteos` es obligatorio: sin él se rechaza en vez de pisar los conteos vivos. Es idempotente: un reintento devuelve 200 con el mismo estado. Si hay umbral configurado (`LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS`), rechaza con 409 mientras el sector siga activo.
 
-**Auth:** ninguna. **Query params (todos opcionales):** `productoId`, `page` (default 1), `pageSize` (default 10, máx. 100).
+**Auth:** `Authorization: Bearer <secret>` (device-only). `Content-Type: application/json` obligatorio.
 
 ```bash
-curl "http://localhost:8080/api/v1/lotes-productivos?productoId=a1b2c3d4-5678-90ab-cdef-1234567890ab&page=1&pageSize=10"
+curl -X POST "http://localhost:8080/api/v1/lotes/$LOTE/cierre" \
+  -H "Authorization: Bearer $DEVICE_SECRET" -H "Content-Type: application/json" \
+  -d '{"idempotency_key":"7c9e6679-7425-40de-944b-e07fc1f90ae7","motivo":"sin_detecciones","conteos":{"ok":1,"crudo":null,"quemado":1,"total":2}}'
 ```
 
 ```json
 {
-  "success": true, "message": "Lotes productivos obtenidos exitosamente",
-  "data": [
-    { "id": "550e8400-...", "productoId": "a1b2c3d4-...", "productoNombre": "Tostada Integral", "turno": "mañana", "totalUnidades": 1200, "correctos": 1150, "...": "..." }
-  ],
-  "total": 1, "page": 1, "pageSize": 10
+  "success": true, "message": "Lote cerrado exitosamente",
+  "data": { "cerrado": true, "lote": { "estado": "CERRADO", "...": "..." } },
+  "errors": null
 }
 ```
 
+`motivo` ∈ {`sin_detecciones`, `manual`, `apagado`, `seguridad`}. `total` debe ser la suma de los buckets no nulos.
+
 | Código | Motivo |
 |---|---|
-| 405 | Método distinto de GET |
-| 404 | `productoId` indicado no existe en el catálogo |
+| 405 | Método distinto de POST |
+| 401 | Token de dispositivo inválido |
+| 400 | JSON inválido, `conteos` ausente, `motivo` fuera del conjunto, conteos inconsistentes o negativos (`payload_invalido`) |
+| 404 | `lote_id` inexistente o no-UUID (`lote_no_encontrado`), o dispositivo sin sector (`sin_sector`) |
+| 403 | El lote pertenece a otro sector (`lote_ajeno`) |
+| 409 | El sector todavía está activo (`sector_activo`) |
 | 500 | Error interno |
 
 ---
 
-## 6. `GET /api/v1/parametros-producto` — Listar parámetros de control por producto
+## 10. `GET /api/v1/lotes` — Historial de lotes por sector
+
+Devuelve una página de lotes del sector (más nuevos primero) y el total que matchea los filtros. Paginación por cursor opaco.
+
+**Auth:** dual-auth. Un dispositivo deriva su sector del Bearer; un usuario OAuth debe enviar `sector_id`. **Query params:** `sector_id` (obligatorio con OAuth), `producto_id` (opcional, UUID), `limite` (default 20, máx. 100), `antes_de` (cursor opaco de la página anterior).
+
+```bash
+curl -H "Authorization: Bearer $DEVICE_SECRET" "http://localhost:8080/api/v1/lotes?limite=20"
+curl -b "session_token=$JWT" "http://localhost:8080/api/v1/lotes?sector_id=horno-e2e&producto_id=a1b2c3d4-..."
+```
+
+```json
+{
+  "success": true, "message": "Lotes obtenidos exitosamente",
+  "data": [ { "id": "d1a2b3c4-...", "sector_id": "horno-e2e", "estado": "CERRADO", "conteos": { "ok": 1, "crudo": null, "quemado": 1, "total": 2 }, "...": "..." } ],
+  "total": 1, "page": 1, "pageSize": 20, "siguiente_cursor": "...", "errors": null
+}
+```
+
+`siguiente_cursor` se omite cuando la página no está completa (no hay más resultados). Para la página anterior, reenviarlo como `antes_de`.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Bearer inválido o cookie JWT ausente/expirada |
+| 400 | OAuth sin `sector_id`, `producto_id` no-UUID o cursor malformado (`payload_invalido`) |
+| 404 | El dispositivo no pertenece a ningún sector (`sin_sector`) |
+| 500 | Error interno |
+
+---
+
+## 11. `GET /api/v1/parametros-producto` — Listar parámetros de control por producto
 
 Devuelve el ABM completo: rangos de temperatura/velocidad y setpoints puntuales por producto (JOIN con `productos`).
 
-**Auth:** ninguna (TODO: restringir a Supervisor con OAuth).
+**Auth:** cookie JWT `session_token` (cualquier rol).
 
 ```bash
-curl http://localhost:8080/api/v1/parametros-producto
+curl -b "session_token=$JWT" http://localhost:8080/api/v1/parametros-producto
 ```
 
 ```json
@@ -270,20 +400,21 @@ curl http://localhost:8080/api/v1/parametros-producto
 
 | Código | Motivo |
 |---|---|
-| 405 | Método distinto de GET/POST/PUT (los tres endpoints #6/7/8 comparten un único `Handle()` que despacha por `r.Method`) |
+| 405 | Método distinto de GET/POST/PUT (los tres endpoints #11/12/13 comparten un único `Handle()` que despacha por `r.Method`) |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
 | 500 | Error interno |
 
 ---
 
-## 7. `POST /api/v1/parametros-producto` — Alta de parámetros para un producto
+## 12. `POST /api/v1/parametros-producto` — Alta de parámetros para un producto
 
 Da de alta el set de umbrales de control para un producto que todavía no lo tiene (relación 1:1). No acepta `tempSetpoint`/`velocidadCintaSetpoint` en el body — esos se cargan aparte.
 
-**Auth:** ninguna. `Content-Type: application/json` obligatorio.
+**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador. `Content-Type: application/json` obligatorio.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/parametros-producto \
-  -H "Content-Type: application/json" \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
   -d '{
     "productoId": "b2c3d4e5-6789-01ab-cdef-234567890abc",
     "pesoReferenciaKg": 0.5, "toleranciaPesoPct": 8.0,
@@ -297,6 +428,7 @@ Respuesta `201 Created` con el registro creado (`activo: true` por defecto).
 
 | Código | Motivo |
 |---|---|
+| 403 | Rol insuficiente (se requiere Supervisor o Administrador) |
 | 415 | `Content-Type` inválido |
 | 400 | JSON inválido |
 | 422 | Validación falló (ver reglas abajo), o `productoId` no existe en el catálogo (FK) |
@@ -307,15 +439,15 @@ Respuesta `201 Created` con el registro creado (`activo: true` por defecto).
 
 ---
 
-## 8. `PUT /api/v1/parametros-producto` — Modificar parámetros de un producto
+## 13. `PUT /api/v1/parametros-producto` — Modificar parámetros de un producto
 
 Actualiza el set existente. El producto a modificar se identifica por `productoId` **en el body**, no en la URL (mismo endpoint que el GET/POST, dispatch por `r.Method`).
 
-**Auth:** ninguna. Mismas reglas de Content-Type/validación que el POST.
+**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador. Mismas reglas de Content-Type/validación que el POST.
 
 ```bash
 curl -X PUT http://localhost:8080/api/v1/parametros-producto \
-  -H "Content-Type: application/json" \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
   -d '{
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
     "pesoReferenciaKg": 0.035, "toleranciaPesoPct": 10.0,
@@ -329,6 +461,7 @@ Respuesta `200 OK` con el registro actualizado.
 
 | Código | Motivo |
 |---|---|
+| 403 | Rol insuficiente |
 | 415 | `Content-Type` inválido |
 | 400 | JSON inválido |
 | 422 | Validación falló |
@@ -337,15 +470,15 @@ Respuesta `200 OK` con el registro actualizado.
 
 ---
 
-## 9. `POST /api/v1/dispositivos/ping` — Telemetría de Raspberry Pi
+## 14. `POST /api/v1/dispositivos/ping` — Telemetría de Raspberry Pi
 
 Cada Raspberry Pi manda esto cada ~10s con su estado de salud (CPU/RAM/almacenamiento/temperatura del chip). Actualiza el caché de estado online/offline en memoria, persiste el historial en Postgres (fire-and-forget) y emite SSE.
 
-**Auth:** `X-API-Key`. `Content-Type: application/json` obligatorio.
+**Auth:** `Authorization: Bearer <secret>` (device-only). `Content-Type: application/json` obligatorio.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
-  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
+  -H "Authorization: Bearer $DEVICE_SECRET" -H "Content-Type: application/json" \
   -d '{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":35.2,"memRamDisponibleMb":512.0,"memRamTotalMb":1024.0,"almacenamientoDisponibleMb":20000.0,"almacenamientoTotalMb":64000.0,"tempChip":45.5,"aiProcessorPct":42.0}'
 ```
 
@@ -365,19 +498,18 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
 |---|---|
 | 405 | Método distinto de POST |
 | 415 | `Content-Type` inválido |
-| 401 | `X-API-Key` ausente o inválida |
+| 401 | Token de dispositivo inválido |
 | 400 | JSON inválido |
 | 422 | Validación de negocio falló, o `dispositivoId` no existe en el catálogo |
 | 500 | Error interno |
 
-**Reglas de validación:** `dispositivoId` requerido y UUID válido · `cpuPct` ∈ [0,100] · `memRamDisponibleMb >= 0` · `memRamTotalMb` opcional y >= 0; si se informa, `memRamDisponibleMb <= memRamTotalMb` · `almacenamientoDisponibleMb` y `almacenamientoTotalMb` forman un par opcional: deben omitirse ambos o informarse ambos, ser >= 0 y cumplir `almacenamientoDisponibleMb <= almacenamientoTotalMb` · `tempChip` ∈ [-40,120] · `aiProcessorPct` ∈ [0,100]. Los tres campos nuevos pueden omitirse para mantener compatibilidad con pings legacy.
+**Reglas de validación:** `dispositivoId` requerido y UUID válido · `cpuPct` ∈ [0,100] · `memRamDisponibleMb >= 0` · `memRamTotalMb` opcional y >= 0; si se informa, `memRamDisponibleMb <= memRamTotalMb` · `almacenamientoDisponibleMb` y `almacenamientoTotalMb` forman un par opcional: deben omitirse ambos o informarse ambos, ser >= 0 y cumplir `almacenamientoDisponibleMb <= almacenamientoTotalMb` · `tempChip` ∈ [-40,120] · `aiProcessorPct` ∈ [0,100].
 
 ---
 
-## 10. `GET /api/v1/dispositivos` — Estado online/offline de todos los dispositivos
+## 15. `GET /api/v1/dispositivos` — Estado online/offline de todos los dispositivos
 
-Lectura desde el caché en memoria (no toca Postgres) — rápida, para refrescar el panel.
-La misma ruta para `POST`, `PUT` y `DELETE` administra el catálogo y también requiere JWT, sin restricción de rol.
+Lectura desde el caché en memoria (no toca Postgres) — rápida, para refrescar el panel. La misma ruta para `PUT` administra el catálogo (requiere JWT con rol Supervisor/Admin).
 
 **Auth:** cookie JWT `session_token` obligatoria; cualquier rol autenticado.
 
@@ -394,11 +526,9 @@ curl -b "session_token=$JWT" http://localhost:8080/api/v1/dispositivos
 }
 ```
 
-El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #9: además de `memRamDisponibleMb`, CPU, IA y temperatura, puede incluir `memRamTotalMb`, `almacenamientoDisponibleMb` y `almacenamientoTotalMb`. Los campos nuevos se omiten cuando el dispositivo todavía envía un ping legacy.
+El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #14. El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: es opcional y nullable; se omite cuando el dispositivo no tiene cámara configurada.
 
-El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: lo persiste el backend y viaja tanto en este catálogo como en los eventos SSE `dispositivo.state`/`dispositivo.metric`. Es opcional y nullable: se omite cuando el dispositivo no tiene cámara configurada.
-
-**Alta (`POST`) y modificación (`PUT`):** el body acepta `whepUrl` (string opcional). Si se omite o se envía vacío, el dispositivo queda sin stream (`NULL`). Si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario la validación devuelve 422.
+**Modificación (`PUT`):** el body acepta `whepUrl` (string opcional). Si se omite o se envía vacío, el dispositivo queda sin stream (`NULL`). Si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario la validación devuelve 422.
 
 ```json
 { "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A", "whepUrl": "https://camaras.example.com/whep/horno-1" }
@@ -406,21 +536,22 @@ El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del disposit
 
 | Código | Motivo |
 |---|---|
-| 405 | Método distinto de GET |
+| 405 | Método distinto de GET/PUT |
 | 401 | Falta la cookie JWT o la sesión es inválida/expirada |
-| 415 | `Content-Type` inválido en POST/PUT |
-| 400 | JSON inválido en POST/PUT |
+| 403 | Rol insuficiente en PUT |
+| 415 | `Content-Type` inválido en PUT |
+| 400 | JSON inválido en PUT |
 | 422 | Validación falló (incluye `whepUrl` no absoluta o mayor a 500 caracteres) |
-| 404 | `dispositivoId` no existe en el catálogo (PUT/DELETE) |
+| 404 | `dispositivoId` no existe en el catálogo (PUT) |
 | 500 | Error interno |
 
 ---
 
-## 11. `GET /api/v1/dispositivos/metricas` — Historial de métricas de un dispositivo
+## 16. `GET /api/v1/dispositivos/metricas` — Historial de métricas de un dispositivo
 
 Historial paginado desde Postgres (`metricas_dispositivo`), no el caché.
 
-**Auth:** cookie JWT `session_token` obligatoria; cualquier rol. **Query params:** `dispositivoId` (requerido), `page`/`pageSize` (igual que #5).
+**Auth:** cookie JWT `session_token` obligatoria; cualquier rol. **Query params:** `dispositivoId` (requerido), `page`/`pageSize` (default 1/10, máx. 100).
 
 ```bash
 curl -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos/metricas?dispositivoId=b1c2d3e4-5678-90ab-cdef-1234567890ab&page=1&pageSize=20"
@@ -444,15 +575,15 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos/metricas
 
 ---
 
-## 12. `POST /api/v1/horno/consigna` — Envío manual de consigna térmica — SCA-320
+## 17. `POST /api/v1/horno/consigna` — Envío manual de consigna térmica — SCA-320
 
 Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual, que es el que usa el flujo automático).
 
-**Auth:** ninguna (TODO: OAuth + rol Supervisor/Operario). `Content-Type: application/json` obligatorio.
+**Auth:** cookie JWT `session_token` con rol Operario, Supervisor o Administrador. `Content-Type: application/json` obligatorio.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/horno/consigna \
-  -H "Content-Type: application/json" \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
   -d '{
     "hornoId": "horno-01",
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
@@ -476,11 +607,13 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
 }
 ```
 
-`usuario` y `loteId` son opcionales; `productoId` es **obligatorio** (siempre valida contra datos reales, sin límites hardcodeados).
+`usuario` y `loteId` son opcionales; `productoId` es **obligatorio**.
 
 | Código | Motivo |
 |---|---|
 | 405 | Método distinto de POST |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente |
 | 415 | `Content-Type` inválido |
 | 400 | JSON inválido |
 | 422 | Validación de forma falló, el producto no tiene parámetros cargados, o los valores están fuera del rango seguro |
@@ -490,14 +623,14 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
 
 ---
 
-## 13. `GET /api/v1/horno/consigna/historial` — Historial de auditoría por lote
+## 18. `GET /api/v1/horno/consigna/historial` — Historial de auditoría por lote
 
 Devuelve todas las consignas (automáticas y manuales) asociadas a un `loteId`, ordenadas de más reciente a más antigua.
 
-**Auth:** ninguna. **Query param:** `loteId` (requerido).
+**Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `loteId` (requerido).
 
 ```bash
-curl "http://localhost:8080/api/v1/horno/consigna/historial?loteId=1d1e9071-e707-4821-b089-10d4a404d023"
+curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno/consigna/historial?loteId=1d1e9071-e707-4821-b089-10d4a404d023"
 ```
 
 ```json
@@ -514,31 +647,32 @@ curl "http://localhost:8080/api/v1/horno/consigna/historial?loteId=1d1e9071-e707
 |---|---|
 | 405 | Método distinto de GET |
 | 400 | Falta `loteId` |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
 | 500 | Error interno |
 
 ---
 
-## 14–16. Endpoints SSE (Server-Sent Events)
+## 19–21. Endpoints SSE (Server-Sent Events)
 
 Los tres comparten el mismo handler genérico, cada uno con su propio broker (sin cruce de eventos entre sí). Requieren la cookie JWT `session_token` y aceptan cualquier rol autenticado. No usan el envelope JSON estándar — son streams `text/event-stream`.
 
 | Endpoint | Eventos que emite |
 |---|---|
-| `GET /api/v1/lotes-productivos/events` | `lote.created` — cuando se persiste un lote (#3) |
+| `GET /api/v1/lotes/events` | `lote.creado`, `lote.actualizado` y `lote.cerrado` — el payload es el objeto lote crudo |
 | `GET /api/v1/dispositivos/events` | `dispositivo.metric` (cada ping) y `dispositivo.state` (transición online↔offline) |
 | `GET /api/v1/horno/events` | `horno.consigna` — cada vez que se despacha una consigna (automática o manual, exitosa o fallida) |
 
-El evento `dispositivo.metric` contiene el mismo envelope y estado que el ping REST. En `data.ultimaMetrica`, los campos `memRamTotalMb`, `almacenamientoDisponibleMb` y `almacenamientoTotalMb` aparecen cuando fueron informados por la Raspberry; los pings legacy los omiten.
+El evento `dispositivo.metric` contiene el mismo envelope y estado que el ping REST.
 
 ```bash
-curl -N -b "session_token=$JWT" http://localhost:8080/api/v1/horno/events
+curl -N -b "session_token=$JWT" http://localhost:8080/api/v1/lotes/events
 ```
 
 ```
 : connected
 
-event: horno.consigna
-data: {"success":true,"message":"Consigna despachada al horno","data":{"id":"...","origen":"MANUAL","exitosa":true,"...":"..."}}
+event: lote.creado
+data: {"id":"d1a2b3c4-...","sector_id":"horno-e2e","estado":"ABIERTO","conteos":{"ok":null,"crudo":null,"quemado":null,"total":0},"...":"..."}
 
 : heartbeat
 
@@ -554,7 +688,7 @@ Se manda un comentario `: heartbeat` cada 30s para mantener la conexión viva. L
 
 ---
 
-## 17. Salud del servicio
+## 22. Salud del servicio
 
 **`GET /health`, `GET /healthz`** — hacen `ping` a PostgreSQL con timeout de 2s.
 
@@ -566,7 +700,7 @@ curl http://localhost:8080/health
 ```
 Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database unreachable" }` (JSON simple, no el envelope estándar).
 
-**`GET /`** — página de texto plano con la lista de endpoints disponibles (informativa, sin JSON).
+**`GET /`** — página de texto plano informativa, sin JSON.
 
 ---
 
@@ -574,13 +708,19 @@ Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database un
 
 | Endpoint | Auth | Content-Type obligatorio | Límite body 1MB |
 |---|---|---|---|
-| `POST /api/v1/lotes` | X-API-Key | ✅ | ✅ |
-| `POST /api/v1/lotes/inicio` | X-API-Key | ✅ | ✅ |
-| `POST /api/v1/dispositivos/ping` | X-API-Key | ✅ | ✅ |
-| `POST/PUT/DELETE /api/v1/dispositivos` | JWT cookie (`session_token`) | Según método | Según método |
-| `POST /api/v1/horno/temperatura` | — | ❌ | ❌ |
-| `POST/PUT /api/v1/parametros-producto` | — | ✅ | ✅ |
-| `POST /api/v1/horno/consigna` | — | ✅ | ✅ |
+| `GET /api/v1/productos` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
+| `GET /api/v1/dispositivos/sector` | Bearer de dispositivo | — | — |
+| `GET /api/v1/sectores` | JWT cookie (`session_token`) | — | — |
+| `POST /api/v1/lotes/inicio` | Bearer de dispositivo | ✅ | ✅ |
+| `GET /api/v1/lotes/abierto` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
+| `POST /api/v1/lotes/{id}/eventos` | Bearer de dispositivo | ✅ | ✅ |
+| `POST /api/v1/lotes/{id}/cierre` | Bearer de dispositivo | ✅ | ✅ |
+| `GET /api/v1/lotes` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
+| `POST /api/v1/dispositivos/ping` | Bearer de dispositivo | ✅ | ✅ |
+| `PUT /api/v1/dispositivos` | JWT cookie (`session_token`), Supervisor/Admin | ✅ | ✅ |
+| `POST /api/v1/horno/temperatura` | JWT cookie, Supervisor/Admin | ❌ | ❌ |
+| `POST/PUT /api/v1/parametros-producto` | JWT cookie, Supervisor/Admin | ✅ | ✅ |
+| `POST /api/v1/horno/consigna` | JWT cookie, Operario/Supervisor/Admin | ✅ | ✅ |
 | `GET /api/v1/dispositivos` | JWT cookie (`session_token`) | — | — |
 | `GET /api/v1/dispositivos/metricas` | JWT cookie (`session_token`) | — | — |
 | `GET /*/events` (los 3 SSE) | JWT cookie (`session_token`) | — | — |

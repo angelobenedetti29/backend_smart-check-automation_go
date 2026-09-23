@@ -79,6 +79,8 @@ type fakeSectorRepo struct {
 	sectorErr     error
 	companeros    []sector.Companero
 	companerosErr error
+	sectores      []sector.Sector
+	sectoresErr   error
 }
 
 func (f *fakeSectorRepo) GetDeviceInfo(context.Context, string) (*sector.DeviceInfo, error) {
@@ -91,6 +93,10 @@ func (f *fakeSectorRepo) GetByID(context.Context, string) (*sector.Sector, error
 
 func (f *fakeSectorRepo) ListCompaneros(context.Context, string, string) ([]sector.Companero, error) {
 	return f.companeros, f.companerosErr
+}
+
+func (f *fakeSectorRepo) List(context.Context) ([]sector.Sector, error) {
+	return f.sectores, f.sectoresErr
 }
 
 type fakeProductoRepo struct {

@@ -46,4 +46,6 @@ type Repository interface {
 	// ListCompaneros devuelve los demás dispositivos del sector, excluyendo al
 	// dispositivo indicado.
 	ListCompaneros(ctx context.Context, sectorID, excludeDeviceID string) ([]Companero, error)
+	// List devuelve todos los sectores ordenados por nombre.
+	List(ctx context.Context) ([]Sector, error)
 }

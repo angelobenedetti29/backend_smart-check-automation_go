@@ -282,7 +282,7 @@ func (r *PostgresDispositivoRepository) GetMetricasByDispositivo(ctx context.Con
 func (r *PostgresDispositivoRepository) ListDeviceReads(ctx context.Context) ([]dispositivo.DeviceRead, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT d.id, d.nombre, COALESCE(d.ubicacion, ''), COALESCE(d.whep_url, ''),
-			d.tipo, d.auth_status, (d.secret_hash IS NOT NULL), d.auth_updated_at
+			d.tipo, d.sector_id, d.auth_status, (d.secret_hash IS NOT NULL), d.auth_updated_at
 		FROM dispositivos d
 		ORDER BY d.nombre
 	`)
@@ -299,7 +299,7 @@ func (r *PostgresDispositivoRepository) ListDeviceReads(ctx context.Context) ([]
 			status  string
 			updated *time.Time
 		)
-		if err := rows.Scan(&x.DispositivoID, &x.Nombre, &x.Ubicacion, &x.WhepURL, &tipo, &status, &x.HasSecret, &updated); err != nil {
+		if err := rows.Scan(&x.DispositivoID, &x.Nombre, &x.Ubicacion, &x.WhepURL, &tipo, &x.SectorID, &status, &x.HasSecret, &updated); err != nil {
 			return nil, fmt.Errorf("failed to scan device read: %w", err)
 		}
 		x.Tipo = tipo
