@@ -14,8 +14,6 @@ services:
         # Session pooler de Supabase — puerto 5432, NO el transaction pooler (6543).
         # Ver DEPLOYMENT.md § "Connection string de Supabase".
         sync: false
-      - key: API_KEY_SECRET
-        sync: false
       - key: JWT_SECRET
         sync: false
       - key: GOOGLE_CLIENT_ID
@@ -33,8 +31,6 @@ services:
     autoDeploy: false
     envVars:
       - key: DATABASE_URL
-        sync: false
-      - key: API_KEY_SECRET
         sync: false
       - key: JWT_SECRET
         sync: false

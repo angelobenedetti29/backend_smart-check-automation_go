@@ -16,6 +16,29 @@ const (
 	EstadoOffline = "offline"
 )
 
+// TipoDispositivo identifica la ubicación funcional del nodo dentro de la línea
+// de horneado. Es el enum canónico del dominio: entrada o salida del horno.
+type TipoDispositivo string
+
+// Tipos de dispositivo admitidos por el contrato.
+const (
+	TipoEntradaHorno TipoDispositivo = "ENTRADA_HORNO"
+	TipoSalidaHorno  TipoDispositivo = "SALIDA_HORNO"
+)
+
+// ParseTipoDispositivo normaliza (trim + upper) y valida un tipo de dispositivo.
+// Devuelve ok=false si el valor está vacío o no corresponde a un tipo conocido.
+func ParseTipoDispositivo(raw string) (TipoDispositivo, bool) {
+	switch TipoDispositivo(strings.ToUpper(strings.TrimSpace(raw))) {
+	case TipoEntradaHorno:
+		return TipoEntradaHorno, true
+	case TipoSalidaHorno:
+		return TipoSalidaHorno, true
+	default:
+		return "", false
+	}
+}
+
 // Límites de largo de los campos de un dispositivo, coherentes con los
 // VARCHAR(100) de la tabla dispositivos (database/schema.sql).
 const (
@@ -50,6 +73,7 @@ type Dispositivo struct {
 	Nombre    string    `json:"nombre"    db:"nombre"`
 	Ubicacion string    `json:"ubicacion" db:"ubicacion"`
 	WhepURL   string    `json:"whepUrl,omitempty" db:"whep_url"`
+	Tipo      *string   `json:"type,omitempty" db:"tipo"`
 	CreatedAt time.Time `json:"createdAt" db:"created_at"`
 }
 
@@ -74,6 +98,7 @@ type EstadoDispositivo struct {
 	Nombre        string              `json:"nombre"`
 	Ubicacion     string              `json:"ubicacion"`
 	WhepURL       string              `json:"whepUrl,omitempty"`
+	Tipo          *string             `json:"type,omitempty"`
 	Estado        string              `json:"estado"`
 	UltimaMetrica *MetricaDispositivo `json:"ultimaMetrica,omitempty"`
 	LastSeen      *time.Time          `json:"lastSeen,omitempty"`
@@ -112,10 +137,9 @@ type PingRequest struct {
 func (req PingRequest) Validate() error {
 	var errs []string
 
-	// Campo obligatorio: dispositivo_id
-	if strings.TrimSpace(req.DispositivoID) == "" {
-		errs = append(errs, "dispositivoId: es requerido")
-	} else if !uuidPattern.MatchString(req.DispositivoID) {
+	// Campo opcional: dispositivo_id. Un dispositivo registrado se autentica con
+	// su Bearer secret y el servidor inyecta su id; si se informa, debe ser UUID.
+	if trimmed := strings.TrimSpace(req.DispositivoID); trimmed != "" && !uuidPattern.MatchString(trimmed) {
 		errs = append(errs, "dispositivoId: debe ser un UUID válido")
 	}
 
@@ -175,6 +199,7 @@ type CreateDispositivoRequest struct {
 	Nombre    string `json:"nombre"`
 	Ubicacion string `json:"ubicacion"`
 	WhepURL   string `json:"whepUrl,omitempty"`
+	Tipo      string `json:"type"`
 }
 
 // Validate verifica las reglas de negocio del CreateDispositivoRequest,
@@ -184,6 +209,11 @@ type CreateDispositivoRequest struct {
 func (req CreateDispositivoRequest) Validate() error {
 	errs := validateNombreUbicacion(req.Nombre, req.Ubicacion)
 	errs = append(errs, validateWhepURL(req.WhepURL)...)
+
+	// Campo obligatorio: tipo, enum canónico ENTRADA_HORNO/SALIDA_HORNO.
+	if _, ok := ParseTipoDispositivo(req.Tipo); !ok {
+		errs = append(errs, "type: debe ser ENTRADA_HORNO o SALIDA_HORNO")
+	}
 
 	if len(errs) > 0 {
 		return &ValidationError{Fields: errs}
@@ -265,6 +295,21 @@ func (req UpdateDispositivoRequest) Validate() error {
 	return nil
 }
 
+// RenameDispositivoRequest representa el payload del rename que emite la
+// propia Raspberry autenticada con su secret.
+type RenameDispositivoRequest struct {
+	Nombre string `json:"nombre"`
+}
+
+// Validate aplica las reglas de nombre compartidas con el alta/modificación.
+func (req RenameDispositivoRequest) Validate() error {
+	errs := validateNombreUbicacion(req.Nombre, "")
+	if len(errs) > 0 {
+		return &ValidationError{Fields: errs}
+	}
+	return nil
+}
+
 // Repository define el contrato de persistencia de dispositivos y métricas.
 // Las implementaciones viven en la capa de infraestructura (internal/repository).
 type Repository interface {
@@ -293,6 +338,7 @@ type StateStore interface {
 type Service interface {
 	Create(ctx context.Context, req CreateDispositivoRequest) (*EstadoDispositivo, error)
 	Update(ctx context.Context, req UpdateDispositivoRequest) (*EstadoDispositivo, error)
+	Rename(ctx context.Context, deviceID, nombre string) (*EstadoDispositivo, error)
 	Delete(ctx context.Context, id string) error
 	ProcessPing(ctx context.Context, req PingRequest) (*EstadoDispositivo, error)
 	GetAllEstados() []EstadoDispositivo

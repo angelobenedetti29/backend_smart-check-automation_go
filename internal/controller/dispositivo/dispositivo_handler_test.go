@@ -19,6 +19,7 @@ type fakeDispositivoService struct {
 	pingResp    *dispositivo.EstadoDispositivo
 	pingErr     error
 	pingCalls   int
+	pingReq     dispositivo.PingRequest
 	estados     []dispositivo.EstadoDispositivo
 	metricas    *dispositivo.PaginatedResult
 	metrErr     error
@@ -30,11 +31,17 @@ type fakeDispositivoService struct {
 	updateErr   error
 	updateReq   dispositivo.UpdateDispositivoRequest
 	updateCalls int
+	renameResp  *dispositivo.EstadoDispositivo
+	renameErr   error
+	renameID    string
+	renameName  string
+	renameCalls int
 	deleteErr   error
 }
 
 func (f *fakeDispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
 	f.pingCalls++
+	f.pingReq = req
 	return f.pingResp, f.pingErr
 }
 
@@ -58,18 +65,22 @@ func (f *fakeDispositivoService) Update(ctx context.Context, req dispositivo.Upd
 	return f.updateResp, f.updateErr
 }
 
+func (f *fakeDispositivoService) Rename(ctx context.Context, deviceID, nombre string) (*dispositivo.EstadoDispositivo, error) {
+	f.renameCalls++
+	f.renameID = deviceID
+	f.renameName = nombre
+	return f.renameResp, f.renameErr
+}
+
 func (f *fakeDispositivoService) Delete(ctx context.Context, id string) error {
 	return f.deleteErr
 }
 
-const testAPIKey = "test-secret-key"
-
 func withTestDevicePrincipal(req *http.Request) *http.Request {
-	return req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "b1c2d3e4-5678-90ab-cdef-1234567890ab", Fingerprint: "test-fingerprint"}))
+	return req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "b1c2d3e4-5678-90ab-cdef-1234567890ab"}))
 }
 
 func TestHandlePing_UnauthorizedWithoutAPIKey(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{})
 	body := bytes.NewBufferString(`{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
@@ -99,7 +110,6 @@ func TestHandlePing_WrongMethod(t *testing.T) {
 }
 
 func TestHandlePing_InvalidContentType(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{})
 	body := bytes.NewBufferString(`{"dispositivoId":"b1c2d3e4-5678-90ab-cdef-1234567890ab"}`)
@@ -116,7 +126,6 @@ func TestHandlePing_InvalidContentType(t *testing.T) {
 }
 
 func TestHandlePing_InvalidJSON(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{})
 	body := bytes.NewBufferString(`{"dispositivoId":`)
@@ -134,7 +143,6 @@ func TestHandlePing_InvalidJSON(t *testing.T) {
 }
 
 func TestHandlePing_ValidationError(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{})
 	body := bytes.NewBufferString(`{"dispositivoId":"","cpuPct":200,"memRamDisponibleMb":-1,"tempChip":500,"aiProcessorPct":150}`)
@@ -151,8 +159,7 @@ func TestHandlePing_ValidationError(t *testing.T) {
 	}
 }
 
-func TestHandlePing_MalformedDispositivoIDIsClientValidationError(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", testAPIKey)
+func TestHandlePing_PrincipalOverridesBodyDispositivoID(t *testing.T) {
 
 	service := &fakeDispositivoService{}
 	h := NewDispositivoHandler(service)
@@ -164,23 +171,25 @@ func TestHandlePing_MalformedDispositivoIDIsClientValidationError(t *testing.T) 
 
 	h.HandlePing(rec, req)
 
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for malformed dispositivoId, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if service.pingCalls != 0 {
-		t.Fatalf("expected malformed ping not to reach service, got %d calls", service.pingCalls)
+	if service.pingCalls != 1 {
+		t.Fatalf("expected ping to reach service, got %d calls", service.pingCalls)
+	}
+	if service.pingReq.DispositivoID != "b1c2d3e4-5678-90ab-cdef-1234567890ab" {
+		t.Fatalf("expected principal id injected, got %q", service.pingReq.DispositivoID)
 	}
 }
 
 func TestHandlePing_DispositivoNoExiste(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	h := NewDispositivoHandler(&fakeDispositivoService{pingErr: dispositivo.ErrDispositivoNotFound})
 	body := bytes.NewBufferString(`{"dispositivoId":"00000000-0000-0000-0000-000000000000","cpuPct":10,"memRamDisponibleMb":500,"tempChip":50,"aiProcessorPct":42}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/ping", body)
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "00000000-0000-0000-0000-000000000000", Fingerprint: "test-fingerprint"}))
+	req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "00000000-0000-0000-0000-000000000000"}))
 	rec := httptest.NewRecorder()
 
 	h.HandlePing(rec, req)
@@ -191,7 +200,6 @@ func TestHandlePing_DispositivoNoExiste(t *testing.T) {
 }
 
 func TestHandlePing_Success(t *testing.T) {
-	t.Setenv("API_KEY_SECRET", testAPIKey)
 
 	now := time.Now().UTC()
 	estado := &dispositivo.EstadoDispositivo{
@@ -280,7 +288,7 @@ func TestHandleCreate_Success(t *testing.T) {
 		Estado:        dispositivo.EstadoOffline,
 	}
 	h := NewDispositivoHandler(&fakeDispositivoService{createResp: estado})
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","ubicacion":"Línea B"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","ubicacion":"Línea B","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -314,7 +322,7 @@ func TestHandleCreate_Success(t *testing.T) {
 
 func TestHandleCreate_EmptyNombre(t *testing.T) {
 	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"nombre":"   ","ubicacion":"Línea B"}`)
+	body := bytes.NewBufferString(`{"nombre":"   ","ubicacion":"Línea B","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -332,6 +340,66 @@ func TestHandleCreate_EmptyNombre(t *testing.T) {
 	}
 	if resp.Success {
 		t.Fatal("expected success=false")
+	}
+}
+
+func TestHandleCreate_SinType(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for missing type, got %d", rec.Code)
+	}
+	if svc.createCalls != 0 {
+		t.Fatalf("invalid request must not reach service, got %d calls", svc.createCalls)
+	}
+}
+
+func TestHandleCreate_TypeInvalido(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","type":"HORNO"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid type, got %d", rec.Code)
+	}
+	if svc.createCalls != 0 {
+		t.Fatalf("invalid request must not reach service, got %d calls", svc.createCalls)
+	}
+}
+
+// TestHandleUpdate_TypeInmutable verifica que el tipo no se pueda cambiar por
+// PUT: al no formar parte del DTO de actualización, el decode estricto rechaza
+// el campo con 400 antes de tocar el service.
+func TestHandleUpdate_TypeInmutable(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"Pi 1","type":"SALIDA_HORNO"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for immutable type, got %d", rec.Code)
+	}
+	if svc.updateCalls != 0 {
+		t.Fatalf("update must not reach service, got %d calls", svc.updateCalls)
 	}
 }
 
@@ -367,7 +435,7 @@ func TestHandleCreate_InvalidContentType(t *testing.T) {
 
 func TestHandleCreate_InternalError(t *testing.T) {
 	h := NewDispositivoHandler(&fakeDispositivoService{createErr: errors.New("db caída")})
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -603,7 +671,7 @@ func TestHandleCreate_RoundTripWhepURL(t *testing.T) {
 	}
 	svc := &fakeDispositivoService{createResp: estado}
 	h := NewDispositivoHandler(svc)
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","whepUrl":"` + whep + `"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","whepUrl":"` + whep + `","type":"SALIDA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -634,7 +702,7 @@ func TestHandleCreate_RoundTripWhepURL(t *testing.T) {
 func TestHandleCreate_RejectsInvalidWhepURL(t *testing.T) {
 	svc := &fakeDispositivoService{}
 	h := NewDispositivoHandler(svc)
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","whepUrl":"no-es-url"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","whepUrl":"no-es-url","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -685,6 +753,53 @@ func TestHandleUpdate_RoundTripWhepURL(t *testing.T) {
 	}
 	if data["whepUrl"] != whep {
 		t.Fatalf("expected whepUrl in response, got %v", data["whepUrl"])
+	}
+}
+
+// fakeSecureReader implementa la superficie de lectura del catálogo con estado
+// de registro para ejercitar la rama "secure" del handler.
+type fakeSecureReader struct {
+	reads []dispositivo.DeviceRead
+}
+
+func (f fakeSecureReader) ListDeviceReads(context.Context) ([]dispositivo.DeviceRead, error) {
+	return f.reads, nil
+}
+
+// TestHandleEstados_DeviceReadExponeTipo verifica que la vista enriquecida del
+// catálogo (rama secure) serialice el tipo del dispositivo.
+func TestHandleEstados_DeviceReadExponeTipo(t *testing.T) {
+	tipo := "ENTRADA_HORNO"
+	secure := fakeSecureReader{reads: []dispositivo.DeviceRead{
+		{
+			EstadoDispositivo: dispositivo.EstadoDispositivo{DispositivoID: "d1", Nombre: "Pi 1"},
+			Tipo:              &tipo,
+			AuthStatus:        dispositivo.AuthActive,
+		},
+	}}
+	h := NewDispositivoHandler(&fakeDispositivoService{}, secure)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dispositivos", nil)
+	rec := httptest.NewRecorder()
+	h.HandleEstados(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	items, ok := resp.Data.([]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected one device in data, got %T %+v", resp.Data, resp.Data)
+	}
+	item, ok := items[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected device object, got %T", items[0])
+	}
+	if item["type"] != tipo {
+		t.Fatalf("expected type in catalog response, got %v", item["type"])
 	}
 }
 
@@ -792,5 +907,136 @@ func TestHandlePing_RejectsStrictJSONViolationsBeforeService(t *testing.T) {
 				t.Fatalf("ping must not reach service, got %d calls", svc.pingCalls)
 			}
 		})
+	}
+}
+
+// TestHandleRename_UnauthorizedWithoutPrincipal verifica que sin principal
+// verificado el rename responde 401 con el código invalid_device_token.
+func TestHandleRename_UnauthorizedWithoutPrincipal(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"nombre":"Pi Renombrada"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.HandleRename(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleRename_WrongMethod(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos/nombre", nil)
+	rec := httptest.NewRecorder()
+
+	h.HandleRename(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestHandleRename_InvalidContentType(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"nombre":"Pi Renombrada"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos/nombre", body)
+	req.Header.Set("Content-Type", "text/plain")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRename(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d", rec.Code)
+	}
+}
+
+func TestHandleRename_InvalidBody(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"nombre":"   "}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRename(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", rec.Code)
+	}
+	if svc.renameCalls != 0 {
+		t.Fatalf("invalid request must not reach service, got %d calls", svc.renameCalls)
+	}
+}
+
+func TestHandleRename_NotFound(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{renameErr: dispositivo.ErrDispositivoNotFound})
+	body := bytes.NewBufferString(`{"nombre":"Pi Renombrada"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRename(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+// TestHandleRename_Success verifica el 200 con el nombre renombrado y que el
+// servicio recibe el id del principal, nunca uno del body.
+func TestHandleRename_Success(t *testing.T) {
+	estado := &dispositivo.EstadoDispositivo{
+		DispositivoID: "b1c2d3e4-5678-90ab-cdef-1234567890ab",
+		Nombre:        "Pi Renombrada",
+		Ubicacion:     "Línea A",
+		Estado:        dispositivo.EstadoOffline,
+	}
+	svc := &fakeDispositivoService{renameResp: estado}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"nombre":"Pi Renombrada"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if svc.renameCalls != 1 {
+		t.Fatalf("expected rename to reach service, got %d calls", svc.renameCalls)
+	}
+	if svc.renameID != "b1c2d3e4-5678-90ab-cdef-1234567890ab" {
+		t.Fatalf("expected principal id, got %q", svc.renameID)
+	}
+	if svc.renameName != "Pi Renombrada" {
+		t.Fatalf("expected nombre passed to service, got %q", svc.renameName)
+	}
+
+	var resp response.Response
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("error decoding response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success=true")
+	}
+	data, ok := resp.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object, got %T", resp.Data)
+	}
+	if data["nombre"] != "Pi Renombrada" {
+		t.Fatalf("expected renamed name in response, got %v", data["nombre"])
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/angelobenedetti29/smart-check-automation/internal/controller/deviceproof"
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
@@ -22,13 +21,13 @@ const maxRequestBodyBytes = 1 << 20 // 1 MB
 type DispositivoHandler struct {
 	service dispositivo.Service
 	secure  interface {
-		Reads(context.Context) ([]dispositivo.DeviceRead, error)
+		ListDeviceReads(context.Context) ([]dispositivo.DeviceRead, error)
 	}
 }
 
 // NewDispositivoHandler instancia el handler inyectando el servicio.
 func NewDispositivoHandler(svc dispositivo.Service, secure ...interface {
-	Reads(context.Context) ([]dispositivo.DeviceRead, error)
+	ListDeviceReads(context.Context) ([]dispositivo.DeviceRead, error)
 }) *DispositivoHandler {
 	h := &DispositivoHandler{service: svc}
 	if len(secure) > 0 {
@@ -196,9 +195,9 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	principal, ok := deviceproof.PrincipalFromContext(r.Context())
-	if !ok || principal.Enrollment {
-		response.Error(w, http.StatusUnauthorized, "Prueba de dispositivo inválida", map[string]string{"code": "invalid_device_proof"})
+	principal, ok := deviceauth.PrincipalFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "Token de dispositivo inválido", map[string]string{"code": "invalid_device_token"})
 		return
 	}
 
@@ -207,19 +206,19 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// El id del dispositivo es autoritativo del principal: el nodo puede omitirlo
+	// en el body y el servidor inyecta el suyo antes de validar.
+	req.DispositivoID = principal.DeviceID
+
 	if err := req.Validate(); err != nil {
 		response.Error(w, http.StatusUnprocessableEntity, "Datos del ping inválidos", err.Error())
-		return
-	}
-	if principal, ok := deviceproof.PrincipalFromContext(r.Context()); ok && req.DispositivoID != principal.DeviceID {
-		response.Error(w, http.StatusForbidden, "La identidad del dispositivo no coincide", map[string]string{"code": "device_identity_mismatch"})
 		return
 	}
 
 	estado, err := h.service.ProcessPing(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, deviceauth.ErrInvalidProof) {
-			response.Error(w, http.StatusUnauthorized, "Prueba de dispositivo inválida", map[string]string{"code": "invalid_device_proof"})
+		if errors.Is(err, deviceauth.ErrInvalidToken) {
+			response.Error(w, http.StatusUnauthorized, "Token de dispositivo inválido", map[string]string{"code": "invalid_device_token"})
 			return
 		}
 		if errors.Is(err, dispositivo.ErrDispositivoNotFound) {
@@ -233,6 +232,50 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 	response.JSON(w, http.StatusOK, true, "Ping recibido correctamente", estado, nil)
 }
 
+// HandleRename maneja PUT /api/v1/dispositivos/nombre — la propia Raspberry,
+// autenticada con su secret, cambia únicamente su nombre. El id del dispositivo
+// es siempre el del principal verificado, nunca el del body.
+func (h *DispositivoHandler) HandleRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+		return
+	}
+
+	principal, ok := deviceauth.PrincipalFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "Token de dispositivo inválido", map[string]string{"code": "invalid_device_token"})
+		return
+	}
+
+	var req dispositivo.RenameDispositivoRequest
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		return
+	}
+
+	estado, err := h.service.Rename(r.Context(), principal.DeviceID, req.Nombre)
+	if err != nil {
+		if errors.Is(err, dispositivo.ErrDispositivoNotFound) {
+			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+			return
+		}
+		log.Printf("[ERROR] Error al renombrar dispositivo: %v", err)
+		response.Error(w, http.StatusInternalServerError, "Error al renombrar el dispositivo", nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, true, "Dispositivo renombrado exitosamente", estado, nil)
+}
+
 // HandleEstados maneja GET /api/v1/dispositivos.
 // Devuelve el estado de salud actual (online/offline) de todos los dispositivos.
 func (h *DispositivoHandler) HandleEstados(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +285,7 @@ func (h *DispositivoHandler) HandleEstados(w http.ResponseWriter, r *http.Reques
 	}
 
 	if h.secure != nil {
-		reads, err := h.secure.Reads(r.Context())
+		reads, err := h.secure.ListDeviceReads(r.Context())
 		if err != nil {
 			response.Error(w, http.StatusServiceUnavailable, "No se pudo consultar el estado de seguridad de los dispositivos", map[string]string{"code": "auth_store_unavailable"})
 			return
@@ -298,3 +341,6 @@ func (h *DispositivoHandler) HandleMetricas(w http.ResponseWriter, r *http.Reque
 
 	response.Paginated(w, "Métricas del dispositivo obtenidas exitosamente", result.Items, result.Total, result.Page, result.PageSize)
 }
+
+// noStore marca la respuesta como no cacheable para datos sensibles de seguridad.
+func noStore(w http.ResponseWriter) { w.Header().Set("Cache-Control", "no-store") }

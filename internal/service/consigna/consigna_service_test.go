@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
 	parametrosproducto "github.com/angelobenedetti29/smart-check-automation/internal/domain/parametros_producto"
@@ -14,10 +13,6 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
-
-func automaticDeviceContext() context.Context {
-	return deviceauth.WithPrincipal(context.Background(), deviceauth.Principal{DeviceID: "00000000-0000-0000-0000-000000000001", Fingerprint: "test"})
-}
 
 // fakeController es un doble de prueba determinista de OvenController: en vez
 // del ~5% de fallo aleatorio del cliente simulado real, siempre devuelve el
@@ -150,58 +145,6 @@ func newTestServiceWithController(paramRepo *fakeParamRepo, ctrl OvenController)
 	broker := sse.NewBroker()
 	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
 	return svc, hornoRepo, consignaRepo
-}
-
-func TestDispatchAutomatico_SinSetpointCargado(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	p := baseParametros()
-	p.TempSetpoint = nil
-	paramRepo.byProducto[testProductoID] = p
-
-	svc, _, consignaRepo := newTestService(paramRepo)
-
-	_, err := svc.DispatchAutomatico(automaticDeviceContext(), "horno-01", "lote-1", testProductoID)
-	if !errors.Is(err, consigna.ErrParametrosNoExiste) {
-		t.Fatalf("expected ErrParametrosNoExiste, got %v", err)
-	}
-	if consignaRepo.count() != 0 {
-		t.Fatalf("no debería auditarse un intento que ni siquiera llega al controlador")
-	}
-}
-
-func TestDispatchAutomatico_RequiresOperationalPrincipal(t *testing.T) {
-	params := newFakeParamRepo()
-	params.byProducto[testProductoID] = baseParametros()
-	controller := &fakeController{result: oven_controller.DispatchResult{Aplicada: true}}
-	svc, _, _ := newTestServiceWithController(params, controller)
-	_, err := svc.DispatchAutomatico(context.Background(), "horno-01", "lote-1", testProductoID)
-	if !errors.Is(err, deviceauth.ErrInvalidProof) {
-		t.Fatalf("expected invalid device proof, got %v", err)
-	}
-	if controller.calls != 0 {
-		t.Fatalf("controller called without principal: %d", controller.calls)
-	}
-}
-
-func TestDispatchAutomatico_ProductoSinParametros(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	svc, _, _ := newTestService(paramRepo)
-
-	_, err := svc.DispatchAutomatico(automaticDeviceContext(), "horno-01", "lote-1", "producto-inexistente")
-	if !errors.Is(err, consigna.ErrParametrosNoExiste) {
-		t.Fatalf("expected ErrParametrosNoExiste, got %v", err)
-	}
-}
-
-func TestDispatchAutomatico_HornoInexistente(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, _, _ := newTestService(paramRepo)
-
-	_, err := svc.DispatchAutomatico(automaticDeviceContext(), "horno-inexistente", "lote-1", testProductoID)
-	if !errors.Is(err, consigna.ErrHornoNoExiste) {
-		t.Fatalf("expected ErrHornoNoExiste, got %v", err)
-	}
 }
 
 func TestDispatchManual_FueraDeRango(t *testing.T) {
@@ -354,26 +297,6 @@ func TestDispatch_Fallido_GeneraAlertaCriticaYPasaAControlManual(t *testing.T) {
 	}
 	if alertas[0].Nivel != "CRITICAL" {
 		t.Errorf("expected nivel CRITICAL, got %s", alertas[0].Nivel)
-	}
-}
-
-func TestDispatchAutomatico_BloqueadoSiHornoEnControlManual(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, hornoRepo, _ := newTestServiceWithController(paramRepo, &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}})
-
-	h, err := hornoRepo.GetByID("horno-01")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	h.Estado = horno.EstadoControlManual
-	if err := hornoRepo.Update(h); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	_, err = svc.DispatchAutomatico(automaticDeviceContext(), "horno-01", "lote-1", testProductoID)
-	if !errors.Is(err, consigna.ErrHornoEnControlManual) {
-		t.Fatalf("expected ErrHornoEnControlManual, got %v", err)
 	}
 }
 

@@ -24,11 +24,11 @@ type OvenController interface {
 	SendSetpoint(hornoID string, temperatura, velocidad float64) oven_controller.DispatchResult
 }
 
-// ConsignaService implementa consigna.Service. Es el mecanismo compartido por
-// el envío automático de consigna (SCA-142) y el envío manual (SCA-320):
-// resuelve el setpoint, lo despacha al controlador físico del horno, actualiza
-// el estado activo del horno y audita el resultado. Ante un fallo de enlace,
-// genera una alerta crítica y fuerza al horno a modo CONTROL_MANUAL.
+// ConsignaService implementa consigna.Service. Es el mecanismo del envío
+// manual de consigna (SCA-320): resuelve el setpoint, lo despacha al
+// controlador físico del horno, actualiza el estado activo del horno y audita
+// el resultado. Ante un fallo de enlace, genera una alerta crítica y fuerza al
+// horno a modo CONTROL_MANUAL.
 type ConsignaService struct {
 	consignaRepo consigna.Repository
 	hornoRepo    horno.Repository
@@ -59,41 +59,11 @@ func NewConsignaService(
 	}
 }
 
-// DispatchAutomatico resuelve el setpoint puntual cargado en parametros_producto
-// para productoID y lo despacha automáticamente al horno. Se usa cuando la IA
-// del nodo de entrada identifica la variedad de producto al iniciar un lote
-// (SCA-142). Se rechaza si el horno está en CONTROL_MANUAL por un fallo de
-// enlace previo: en ese estado solo se admite el envío manual (SCA-320).
-func (s *ConsignaService) DispatchAutomatico(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
-	principal, ok := deviceauth.PrincipalFromContext(ctx)
-	if !ok || principal.Enrollment {
-		return nil, deviceauth.ErrInvalidProof
-	}
-	h, err := s.hornoRepo.GetByID(hornoID)
-	if err != nil {
-		return nil, consigna.ErrHornoNoExiste
-	}
-	if h.Estado == horno.EstadoControlManual {
-		return nil, consigna.ErrHornoEnControlManual
-	}
-
-	p, err := s.paramRepo.GetByProductoID(ctx, productoID)
-	if err != nil {
-		return nil, consigna.ErrParametrosNoExiste
-	}
-	if p.TempSetpoint == nil || p.VelocidadCintaSetpoint == nil {
-		return nil, consigna.ErrParametrosNoExiste
-	}
-
-	lote, prod := loteID, productoID
-	return s.dispatch(ctx, hornoID, &lote, &prod, *p.TempSetpoint, *p.VelocidadCintaSetpoint, consigna.OrigenAutomatico, nil)
-}
-
 // DispatchManual valida el request contra el rango seguro cargado en
 // parametros_producto para req.ProductoID y, si es válido, despacha la
-// consigna solicitada por el operario desde el panel (SCA-320). A diferencia
-// del automático, no se bloquea si el horno está en CONTROL_MANUAL — es
-// justamente la vía de escape para reactivarlo.
+// consigna solicitada por el operario desde el panel (SCA-320). No se bloquea
+// si el horno está en CONTROL_MANUAL — es justamente la vía de escape para
+// reactivarlo.
 func (s *ConsignaService) DispatchManual(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
 	p, err := s.paramRepo.GetByProductoID(ctx, req.ProductoID)
 	if err != nil {
@@ -155,7 +125,7 @@ func (s *ConsignaService) dispatch(
 		TemperaturaPrevia:      &prevTemp,
 		VelocidadCintaPrevia:   &prevVel,
 	}
-	if principal, ok := deviceauth.PrincipalFromContext(ctx); ok && !principal.Enrollment {
+	if principal, ok := deviceauth.PrincipalFromContext(ctx); ok {
 		rec.DispositivoID = &principal.DeviceID
 	}
 
@@ -188,8 +158,7 @@ func (s *ConsignaService) dispatch(
 }
 
 // handleFalloDeEnlace reacciona a un fallo de enlace con el controlador físico:
-// fuerza al horno a CONTROL_MANUAL (bloqueando nuevos despachos automáticos,
-// ver DispatchAutomatico) y registra una alerta CRITICAL para que quede
+// fuerza al horno a CONTROL_MANUAL y registra una alerta CRITICAL para que quede
 // visible en el panel, además del registro de auditoría ya guardado.
 func (s *ConsignaService) handleFalloDeEnlace(h *horno.Horno, motivo string, origen consigna.Origen) {
 	h.Estado = horno.EstadoControlManual

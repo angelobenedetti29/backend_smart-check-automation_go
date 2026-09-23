@@ -15,7 +15,7 @@ import (
 )
 
 func testDeviceContextFor(id string) context.Context {
-	return deviceauth.WithPrincipal(context.Background(), deviceauth.Principal{DeviceID: id, Fingerprint: "test-fingerprint"})
+	return deviceauth.WithPrincipal(context.Background(), deviceauth.Principal{DeviceID: id})
 }
 
 func testDeviceContext() context.Context {
@@ -186,8 +186,8 @@ func TestProcessPing_RequiresOperationalPrincipal(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{"d1": {ID: "d1", Nombre: "Pi 1"}}}
 	svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
 	_, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{DispositivoID: "d1"})
-	if !errors.Is(err, deviceauth.ErrInvalidProof) {
-		t.Fatalf("expected invalid device proof, got %v", err)
+	if !errors.Is(err, deviceauth.ErrInvalidToken) {
+		t.Fatalf("expected invalid device token, got %v", err)
 	}
 	if len(repo.inserted) != 0 {
 		t.Fatalf("metric persisted without principal: %d", len(repo.inserted))
@@ -337,6 +337,7 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
 		Nombre:    "  Raspberry Pi Horno 2  ",
 		Ubicacion: "  Línea B  ",
+		Tipo:      "ENTRADA_HORNO",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -349,6 +350,9 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	if estado.Nombre != "Raspberry Pi Horno 2" || estado.Ubicacion != "Línea B" {
 		t.Fatalf("expected trimmed metadata, got %+v", estado)
 	}
+	if estado.Tipo == nil || *estado.Tipo != "ENTRADA_HORNO" {
+		t.Fatalf("expected tipo propagated, got %+v", estado.Tipo)
+	}
 	if estado.UltimaMetrica != nil || estado.LastSeen != nil {
 		t.Fatalf("expected no metric/lastSeen for new device, got %+v", estado)
 	}
@@ -360,6 +364,9 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	}
 	if persisted.Nombre != "Raspberry Pi Horno 2" || persisted.Ubicacion != "Línea B" {
 		t.Fatalf("unexpected persisted device: %+v", persisted)
+	}
+	if persisted.Tipo == nil || *persisted.Tipo != "ENTRADA_HORNO" {
+		t.Fatalf("expected persisted tipo, got %+v", persisted.Tipo)
 	}
 
 	// Quedó registrado en el store: aparece de inmediato en GetAllEstados.
@@ -385,7 +392,7 @@ func TestCreate_PropagatesRepoError(t *testing.T) {
 
 	svc := NewDispositivoService(repo, store, broker)
 
-	_, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{Nombre: "Pi X"})
+	_, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{Nombre: "Pi X", Tipo: "ENTRADA_HORNO"})
 	if err == nil {
 		t.Fatal("expected error propagated from repo")
 	}
@@ -556,6 +563,71 @@ func TestUpdate_ActualizaCacheYEmiteSSE(t *testing.T) {
 	}
 }
 
+// TestRename_PreservaUbicacionYWhepURL verifica que el rename de la propia
+// Raspberry cambia solo el nombre, preservando ubicación/whepUrl, persiste en el
+// repositorio, actualiza el caché y emite el evento SSE dispositivo.state.
+func TestRename_PreservaUbicacionYWhepURL(t *testing.T) {
+	const whep = "https://camaras.example.com/whep/horno-1"
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", WhepURL: whep},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", WhepURL: whep})
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	svc := NewDispositivoService(repo, store, broker)
+
+	estado, err := svc.Rename(context.Background(), "d1", "  Pi 1 Renombrada  ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.Nombre != "Pi 1 Renombrada" {
+		t.Fatalf("expected trimmed renamed name, got %q", estado.Nombre)
+	}
+	if estado.Ubicacion != "Línea A" || estado.WhepURL != whep {
+		t.Fatalf("expected ubicacion/whepUrl preserved, got %+v", estado)
+	}
+
+	// Persistió el nombre nuevo sin tocar ubicación/whepUrl.
+	persisted, err := repo.GetDispositivoByID(context.Background(), "d1")
+	if err != nil {
+		t.Fatalf("expected device persisted, got %v", err)
+	}
+	if persisted.Nombre != "Pi 1 Renombrada" || persisted.Ubicacion != "Línea A" || persisted.WhepURL != whep {
+		t.Fatalf("unexpected persisted device: %+v", persisted)
+	}
+
+	// El caché devuelve el nombre nuevo preservando ubicación/whepUrl.
+	cached, ok := store.Get("d1")
+	if !ok {
+		t.Fatal("expected device in store")
+	}
+	if cached.Nombre != "Pi 1 Renombrada" || cached.Ubicacion != "Línea A" || cached.WhepURL != whep {
+		t.Fatalf("expected updated cache, got %+v", cached)
+	}
+
+	// Emite el evento SSE dispositivo.state.
+	types := drainEvents(client, 500*time.Millisecond)
+	if !containsAll(types, "dispositivo.state") {
+		t.Fatalf("expected dispositivo.state event, got %v", types)
+	}
+}
+
+func TestRename_NotFound(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
+	store := database.NewMemoryDispositivoStateStore()
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker)
+
+	_, err := svc.Rename(context.Background(), "missing", "Pi X")
+	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
+		t.Fatalf("expected ErrDispositivoNotFound, got %v", err)
+	}
+}
+
 func TestUpdate_NotFound(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
 	store := database.NewMemoryDispositivoStateStore()
@@ -619,6 +691,7 @@ func TestCreate_PropagaWhepURL(t *testing.T) {
 	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
 		Nombre:  "Raspberry Pi Horno 2",
 		WhepURL: whep,
+		Tipo:    "SALIDA_HORNO",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -671,5 +744,99 @@ func TestUpdate_PropagaWhepURL(t *testing.T) {
 	cached, ok := store.Get("d1")
 	if !ok || cached.WhepURL != whep {
 		t.Fatalf("expected whepUrl propagated to cache, got %+v", cached)
+	}
+}
+
+// TestCreate_TipoInvalido verifica que el alta exija un tipo canónico y que un
+// tipo inválido no llegue a persistirse.
+func TestCreate_TipoInvalido(t *testing.T) {
+	for _, tipo := range []string{"", "   ", "HORNO", "entrada-horno"} {
+		t.Run(tipo, func(t *testing.T) {
+			repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
+			svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
+
+			_, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{Nombre: "Pi", Tipo: tipo})
+			if err == nil {
+				t.Fatal("expected validation error for invalid type")
+			}
+			if !dispositivo.IsValidationError(err) {
+				t.Fatalf("expected *ValidationError, got %T", err)
+			}
+			if len(repo.dispositivos) != 0 {
+				t.Fatalf("invalid create must not persist, got %d", len(repo.dispositivos))
+			}
+		})
+	}
+}
+
+// TestCreate_NormalizaTipo verifica que el tipo se normalice a mayúsculas antes
+// de persistirlo.
+func TestCreate_NormalizaTipo(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
+	svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
+
+	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{Nombre: "Pi", Tipo: "  salida_horno "})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.Tipo == nil || *estado.Tipo != "SALIDA_HORNO" {
+		t.Fatalf("expected normalized tipo SALIDA_HORNO, got %+v", estado.Tipo)
+	}
+}
+
+// TestUpdate_PreservaTipo verifica que la modificación no pise el tipo.
+func TestUpdate_PreservaTipo(t *testing.T) {
+	tipo := "SALIDA_HORNO"
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", Tipo: &tipo},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", Tipo: &tipo})
+	svc := NewDispositivoService(repo, store, sse.NewBroker())
+
+	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
+		DispositivoID: "d1",
+		Nombre:        "Pi 1 Renombrado",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.Tipo == nil || *estado.Tipo != tipo {
+		t.Fatalf("expected tipo preserved in estado, got %+v", estado.Tipo)
+	}
+	cached, _ := store.Get("d1")
+	if cached.Tipo == nil || *cached.Tipo != tipo {
+		t.Fatalf("expected tipo preserved in cache, got %+v", cached.Tipo)
+	}
+	persisted, _ := repo.GetDispositivoByID(context.Background(), "d1")
+	if persisted.Tipo == nil || *persisted.Tipo != tipo {
+		t.Fatalf("expected tipo preserved in repo, got %+v", persisted.Tipo)
+	}
+}
+
+// TestRename_PreservaTipo verifica que el rename de la Raspberry no pise el tipo.
+func TestRename_PreservaTipo(t *testing.T) {
+	tipo := "ENTRADA_HORNO"
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", Tipo: &tipo},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", Tipo: &tipo})
+	svc := NewDispositivoService(repo, store, sse.NewBroker())
+
+	estado, err := svc.Rename(context.Background(), "d1", "Pi 1 Renombrada")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.Tipo == nil || *estado.Tipo != tipo {
+		t.Fatalf("expected tipo preserved in estado, got %+v", estado.Tipo)
+	}
+	cached, _ := store.Get("d1")
+	if cached.Tipo == nil || *cached.Tipo != tipo {
+		t.Fatalf("expected tipo preserved in cache, got %+v", cached.Tipo)
+	}
+	persisted, _ := repo.GetDispositivoByID(context.Background(), "d1")
+	if persisted.Tipo == nil || *persisted.Tipo != tipo {
+		t.Fatalf("expected tipo preserved in repo, got %+v", persisted.Tipo)
 	}
 }

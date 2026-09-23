@@ -58,9 +58,9 @@ func (r *LoteProductivoPostgresRepository) GetAll(productoID string, page, pageS
 			return nil, fmt.Errorf("failed to count lotes: %w", err)
 		}
 		rows, err = r.db.Query(ctx, `
-			SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
-			       lp.total_unidades, lp.correctos, lp.quemados, lp.crudas,
-			       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
+			SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, COALESCE(lp.turno,'') AS turno, lp.inicio_at, lp.fin_at,
+			       COALESCE(lp.total_unidades,0) AS total_unidades, COALESCE(lp.correctos,0) AS correctos, COALESCE(lp.quemados,0) AS quemados, lp.crudas,
+			       COALESCE(lp.correctos_kg,0) AS correctos_kg, COALESCE(lp.quemados_kg,0) AS quemados_kg, lp.crudos_kg,
 			       lp.temp_horno_1, lp.temp_comb_horno_1,
 			       lp.temp_horno_2, lp.temp_comb_horno_2,
 			       lp.velocidad_cinta, lp.created_at, lp.updated_at
@@ -78,9 +78,9 @@ func (r *LoteProductivoPostgresRepository) GetAll(productoID string, page, pageS
 			return nil, fmt.Errorf("failed to count lotes: %w", err)
 		}
 		rows, err = r.db.Query(ctx, `
-			SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
-			       lp.total_unidades, lp.correctos, lp.quemados, lp.crudas,
-			       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
+			SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, COALESCE(lp.turno,'') AS turno, lp.inicio_at, lp.fin_at,
+			       COALESCE(lp.total_unidades,0) AS total_unidades, COALESCE(lp.correctos,0) AS correctos, COALESCE(lp.quemados,0) AS quemados, lp.crudas,
+			       COALESCE(lp.correctos_kg,0) AS correctos_kg, COALESCE(lp.quemados_kg,0) AS quemados_kg, lp.crudos_kg,
 			       lp.temp_horno_1, lp.temp_comb_horno_1,
 			       lp.temp_horno_2, lp.temp_comb_horno_2,
 			       lp.velocidad_cinta, lp.created_at, lp.updated_at
@@ -129,9 +129,9 @@ func (r *LoteProductivoPostgresRepository) GetByID(id string) (*lote.LoteProduct
 
 	var l lote.LoteProductivo
 	err := r.db.QueryRow(ctx, `
-		SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, lp.turno, lp.inicio_at, lp.fin_at,
-		       lp.total_unidades, lp.correctos, lp.quemados, lp.crudas,
-		       lp.correctos_kg, lp.quemados_kg, lp.crudos_kg,
+		SELECT lp.id, lp.producto_id, pr.nombre AS producto_nombre, COALESCE(lp.turno,'') AS turno, lp.inicio_at, lp.fin_at,
+		       COALESCE(lp.total_unidades,0) AS total_unidades, COALESCE(lp.correctos,0) AS correctos, COALESCE(lp.quemados,0) AS quemados, lp.crudas,
+		       COALESCE(lp.correctos_kg,0) AS correctos_kg, COALESCE(lp.quemados_kg,0) AS quemados_kg, lp.crudos_kg,
 		       lp.temp_horno_1, lp.temp_comb_horno_1,
 		       lp.temp_horno_2, lp.temp_comb_horno_2,
 		       lp.velocidad_cinta, lp.created_at, lp.updated_at

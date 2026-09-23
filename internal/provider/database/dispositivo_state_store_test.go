@@ -269,3 +269,44 @@ func TestMemoryDispositivoStateStore_Hydrate_PropagaWhepURL(t *testing.T) {
 		t.Fatalf("expected whepUrl propagated on hydrate, got %+v", estado)
 	}
 }
+
+func TestMemoryDispositivoStateStore_PropagaTipo(t *testing.T) {
+	store := NewMemoryDispositivoStateStore()
+	tipo := "ENTRADA_HORNO"
+
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Tipo: &tipo})
+	estado, ok := store.Get("d1")
+	if !ok || estado.Tipo == nil || *estado.Tipo != tipo {
+		t.Fatalf("expected tipo propagated on register, got %+v", estado)
+	}
+
+	// UpdateDispositivo sin tipo no debe pisar el existente (tipo inmutable).
+	store.UpdateDispositivo(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1b"})
+	estado, _ = store.Get("d1")
+	if estado.Tipo == nil || *estado.Tipo != tipo {
+		t.Fatalf("expected tipo preserved on UpdateDispositivo, got %+v", estado.Tipo)
+	}
+
+	// Update con métrica reconstruye el estado conservando el tipo.
+	_, _, estado = store.Update(
+		dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Tipo: &tipo},
+		dispositivo.MetricaDispositivo{DispositivoID: "d1", ReceivedAt: time.Now().UTC()},
+	)
+	if estado.Tipo == nil || *estado.Tipo != tipo {
+		t.Fatalf("expected tipo propagated on Update, got %+v", estado.Tipo)
+	}
+}
+
+func TestMemoryDispositivoStateStore_Hydrate_PropagaTipo(t *testing.T) {
+	store := NewMemoryDispositivoStateStore()
+	tipo := "SALIDA_HORNO"
+
+	store.Hydrate([]dispositivo.DispositivoConUltimaMetrica{
+		{Dispositivo: dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Tipo: &tipo}},
+	}, 25*time.Second, time.Now().UTC())
+
+	estado, ok := store.Get("d1")
+	if !ok || estado.Tipo == nil || *estado.Tipo != tipo {
+		t.Fatalf("expected tipo propagated on hydrate, got %+v", estado)
+	}
+}

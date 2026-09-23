@@ -24,12 +24,12 @@ func NewPostgresDispositivoRepository(db *pgxpool.Pool) *PostgresDispositivoRepo
 
 // Create inserta un dispositivo nuevo en el catálogo. El UUID lo genera
 // PostgreSQL vía gen_random_uuid(); el método mapea id y created_at de vuelta
-// al struct. Si Ubicacion/WhepURL están vacías se inserta NULL para respetar la
-// columna nullable.
+// al struct. Si Ubicacion/WhepURL/Tipo están vacías se inserta NULL para
+// respetar las columnas nullable.
 func (r *PostgresDispositivoRepository) Create(ctx context.Context, d *dispositivo.Dispositivo) error {
 	const query = `
-		INSERT INTO dispositivos (nombre, ubicacion, whep_url)
-		VALUES ($1, $2, $3)
+		INSERT INTO dispositivos (nombre, ubicacion, whep_url, tipo)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at`
 
 	var ubicacion *string
@@ -40,8 +40,12 @@ func (r *PostgresDispositivoRepository) Create(ctx context.Context, d *dispositi
 	if d.WhepURL != "" {
 		whepURL = &d.WhepURL
 	}
+	var tipo *string
+	if d.Tipo != nil && *d.Tipo != "" {
+		tipo = d.Tipo
+	}
 
-	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion, whepURL).Scan(&d.ID, &d.CreatedAt)
+	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion, whepURL, tipo).Scan(&d.ID, &d.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to insert dispositivo: %w", err)
 	}
@@ -49,10 +53,10 @@ func (r *PostgresDispositivoRepository) Create(ctx context.Context, d *dispositi
 }
 
 // Update modifica nombre, ubicación y whep_url de un dispositivo existente. El
-// método mapea id y created_at de vuelta al struct vía RETURNING. Si
-// Ubicacion/WhepURL están vacías se guarda NULL para respetar la columna
-// nullable. Devuelve dispositivo.ErrDispositivoNotFound si el dispositivo no
-// existe.
+// tipo es inmutable: no forma parte del SET. El método mapea id y created_at de
+// vuelta al struct vía RETURNING. Si Ubicacion/WhepURL están vacías se guarda
+// NULL para respetar la columna nullable. Devuelve
+// dispositivo.ErrDispositivoNotFound si el dispositivo no existe.
 func (r *PostgresDispositivoRepository) Update(ctx context.Context, d *dispositivo.Dispositivo) error {
 	const query = `
 		UPDATE dispositivos
@@ -126,7 +130,7 @@ func (r *PostgresDispositivoRepository) InsertMetrica(ctx context.Context, m *di
 func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx context.Context) ([]dispositivo.DispositivoConUltimaMetrica, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT ON (d.id)
-			d.id, d.nombre, d.ubicacion, d.whep_url, d.created_at,
+			d.id, d.nombre, COALESCE(d.ubicacion, ''), d.whep_url, d.created_at, d.tipo,
 			m.id, m.cpu_pct, m.mem_ram_disponible_mb, m.mem_ram_total_mb,
 			m.almacenamiento_disponible_mb, m.almacenamiento_total_mb,
 			m.temp_chip, m.ai_processor_pct, m.received_at
@@ -144,6 +148,7 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 		var (
 			d                        dispositivo.Dispositivo
 			whepURL                  *string
+			tipo                     *string
 			m                        dispositivo.MetricaDispositivo
 			mID                      *string
 			cpu                      *float64
@@ -155,12 +160,13 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 			aiProc                   *float64
 			received                 *time.Time
 		)
-		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &whepURL, &d.CreatedAt, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
+		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &whepURL, &d.CreatedAt, &tipo, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
 			return nil, fmt.Errorf("failed to scan dispositivo con ultima metrica: %w", err)
 		}
 		if whepURL != nil {
 			d.WhepURL = *whepURL
 		}
+		d.Tipo = tipo
 
 		item := dispositivo.DispositivoConUltimaMetrica{Dispositivo: d}
 		if mID != nil {
@@ -190,11 +196,12 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 func (r *PostgresDispositivoRepository) GetDispositivoByID(ctx context.Context, id string) (*dispositivo.Dispositivo, error) {
 	var d dispositivo.Dispositivo
 	var whepURL *string
+	var tipo *string
 	err := r.db.QueryRow(ctx, `
-		SELECT id, nombre, ubicacion, whep_url, created_at
+		SELECT id, nombre, COALESCE(ubicacion, ''), whep_url, created_at, tipo
 		FROM dispositivos
 		WHERE id = $1
-	`, id).Scan(&d.ID, &d.Nombre, &d.Ubicacion, &whepURL, &d.CreatedAt)
+	`, id).Scan(&d.ID, &d.Nombre, &d.Ubicacion, &whepURL, &d.CreatedAt, &tipo)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, dispositivo.ErrDispositivoNotFound
@@ -204,6 +211,7 @@ func (r *PostgresDispositivoRepository) GetDispositivoByID(ctx context.Context, 
 	if whepURL != nil {
 		d.WhepURL = *whepURL
 	}
+	d.Tipo = tipo
 
 	return &d, nil
 }
@@ -266,4 +274,43 @@ func (r *PostgresDispositivoRepository) GetMetricasByDispositivo(ctx context.Con
 		Page:     page,
 		PageSize: pageSize,
 	}, nil
+}
+
+// ListDeviceReads devuelve el catálogo con el estado de registro de cada
+// dispositivo (auth_status, si tiene secret y cuándo se actualizó). El estado de
+// salud se inicializa como offline: el caché en memoria lo hidrata luego.
+func (r *PostgresDispositivoRepository) ListDeviceReads(ctx context.Context) ([]dispositivo.DeviceRead, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT d.id, d.nombre, COALESCE(d.ubicacion, ''), COALESCE(d.whep_url, ''),
+			d.tipo, d.auth_status, (d.secret_hash IS NOT NULL), d.auth_updated_at
+		FROM dispositivos d
+		ORDER BY d.nombre
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query device reads: %w", err)
+	}
+	defer rows.Close()
+
+	out := []dispositivo.DeviceRead{}
+	for rows.Next() {
+		var (
+			x       dispositivo.DeviceRead
+			tipo    *string
+			status  string
+			updated *time.Time
+		)
+		if err := rows.Scan(&x.DispositivoID, &x.Nombre, &x.Ubicacion, &x.WhepURL, &tipo, &status, &x.HasSecret, &updated); err != nil {
+			return nil, fmt.Errorf("failed to scan device read: %w", err)
+		}
+		x.Tipo = tipo
+		x.EstadoDispositivo.Tipo = tipo
+		x.AuthStatus = dispositivo.AuthStatus(status)
+		x.AuthUpdatedAt = updated
+		x.Estado = dispositivo.EstadoOffline
+		out = append(out, x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
+	}
+	return out, nil
 }

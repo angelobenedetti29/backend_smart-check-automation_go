@@ -19,15 +19,9 @@ services:
   app:
     build: .
     env_file:
-      - .env
+      .env
     ports:
       - "${PORT}:${PORT}"
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
-      API_KEY_SECRET: ${API_KEY_SECRET}
-      PORT: ${PORT}
-      DISPOSITIVO_REAPER_INTERVAL: ${DISPOSITIVO_REAPER_INTERVAL:-5s}
-      DISPOSITIVO_OFFLINE_THRESHOLD: ${DISPOSITIVO_OFFLINE_THRESHOLD:-25s}
     depends_on:
       db:
         condition: service_healthy

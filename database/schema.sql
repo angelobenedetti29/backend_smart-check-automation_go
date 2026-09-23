@@ -367,15 +367,20 @@ COMMENT ON COLUMN metricas_dispositivo.almacenamiento_disponible_mb IS 'Almacena
 COMMENT ON COLUMN metricas_dispositivo.almacenamiento_total_mb IS 'Almacenamiento total en MB (nullable para compatibilidad con pings legacy)';
 
 -- ============================================================================
--- ALTER: dispositivos — cámara/stream WHEP por dispositivo
--- Idempotente para bases existentes. La columna queda nullable: un dispositivo
--- sin cámara configurada no expone stream.
+-- ALTER: dispositivos — cámara/stream WHEP y credencial de registro
+-- Idempotente para bases existentes. whep_url y secret_hash quedan nullable:
+-- un dispositivo sin cámara no expone stream y uno no registrado no tiene secret.
 -- ============================================================================
 ALTER TABLE dispositivos
     ADD COLUMN IF NOT EXISTS whep_url VARCHAR(500),
     ADD COLUMN IF NOT EXISTS auth_status VARCHAR(12) NOT NULL DEFAULT 'unenrolled',
-    ADD COLUMN IF NOT EXISTS current_key_fingerprint VARCHAR(128),
-    ADD COLUMN IF NOT EXISTS auth_updated_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS auth_updated_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS secret_hash VARCHAR(64);
+
+-- El registro por solicitud/aprobación reemplaza la identidad Ed25519: el secret
+-- se persiste sólo como SHA-256 hexadecimal (64 chars) y se resuelve por ese hash.
+ALTER TABLE dispositivos DROP COLUMN IF EXISTS current_key_fingerprint;
+DROP INDEX IF EXISTS idx_dispositivos_current_key;
 
 DO $$
 BEGIN
@@ -383,12 +388,34 @@ BEGIN
         ALTER TABLE dispositivos ADD CONSTRAINT chk_dispositivos_auth_status
             CHECK (auth_status IN ('unenrolled', 'active', 'disabled', 'revoked'));
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_dispositivos_secret_revoked') THEN
+        ALTER TABLE dispositivos ADD CONSTRAINT chk_dispositivos_secret_revoked
+            CHECK (secret_hash IS NULL OR auth_status <> 'revoked');
+    END IF;
 END $$;
 
-CREATE INDEX IF NOT EXISTS idx_dispositivos_current_key ON dispositivos (current_key_fingerprint);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_dispositivos_secret_hash
+    ON dispositivos (secret_hash) WHERE secret_hash IS NOT NULL;
 
 COMMENT ON COLUMN dispositivos.whep_url IS 'URL del stream WHEP de la cámara asociada al dispositivo (nullable: sin cámara configurada)';
-COMMENT ON COLUMN dispositivos.auth_status IS 'Estado de admisión criptográfica independiente del heartbeat';
+COMMENT ON COLUMN dispositivos.auth_status IS 'Estado de admisión del dispositivo (unenrolled/active/disabled/revoked), independiente del heartbeat';
+COMMENT ON COLUMN dispositivos.secret_hash IS 'SHA-256 hexadecimal del secret del dispositivo; NULL si no está registrado o fue revocado';
+
+-- ============================================================================
+-- ALTER: dispositivos — tipo de dispositivo (ENTRADA_HORNO/SALIDA_HORNO)
+-- Idempotente para bases existentes. Nullable para no invalidar filas legadas.
+-- ============================================================================
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS tipo VARCHAR(16);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_dispositivos_tipo') THEN
+        ALTER TABLE dispositivos ADD CONSTRAINT chk_dispositivos_tipo
+            CHECK (tipo IS NULL OR tipo IN ('ENTRADA_HORNO', 'SALIDA_HORNO'));
+    END IF;
+END $$;
+
+COMMENT ON COLUMN dispositivos.tipo IS 'Tipo/ubicación funcional del nodo en la línea: ENTRADA_HORNO o SALIDA_HORNO (nullable para filas legadas)';
 
 -- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
@@ -491,13 +518,21 @@ CREATE INDEX IF NOT EXISTS idx_usuarios_email ON usuarios (email);
 
 -- ============================================================================
 -- SEED: Usuarios de prueba (modificar con emails corporativos reales)
--- Contraseña por defecto para usuarios seed: password123 ($2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy)
+-- Contraseña por defecto para usuarios seed: password123
 -- ============================================================================
 INSERT INTO usuarios (email, nombre, rol, password_hash) VALUES
-    ('admin@fermar.com.ar',      'Administrador Fermar',  'Administrador', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'),
-    ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'),
-    ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy')
+    ('admin@fermar.com.ar',      'Administrador Fermar',  'Administrador', '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy'),
+    ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy'),
+    ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy')
 ON CONFLICT (email) DO NOTHING;
+
+-- Reparación idempotente de bases ya sembradas con el hash roto (el literal
+-- anterior NO correspondía a password123). Sólo reemplaza filas que todavía
+-- llevan ese hash exacto, así que nunca pisa una contraseña ya cambiada.
+UPDATE usuarios
+SET password_hash = '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy'
+WHERE email IN ('admin@fermar.com.ar', 'supervisor@fermar.com.ar', 'operario@fermar.com.ar')
+  AND password_hash = '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
 
 -- Provenance for writes made by an authenticated device. Existing rows remain
 -- nullable so this upgrade never invents an owner for historical data.
@@ -515,64 +550,241 @@ BEGIN
     END IF;
 END $$;
 
--- Device identity and admission state. Secrets are deliberately absent: only a
--- public key and its RFC7638 fingerprint are retained.
-CREATE TABLE IF NOT EXISTS device_credentials (
-    fingerprint VARCHAR(128) PRIMARY KEY,
-    dispositivo_id UUID NOT NULL REFERENCES dispositivos(id) ON DELETE RESTRICT,
-    public_key BYTEA NOT NULL CHECK (octet_length(public_key) = 32),
-    enrollment_id VARCHAR(64) NOT NULL UNIQUE,
-    enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    revoked_at TIMESTAMPTZ
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_device_credentials_current
-    ON device_credentials(dispositivo_id) WHERE revoked_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_device_credentials_device ON device_credentials(dispositivo_id);
+-- ============================================================================
+-- Registro de dispositivos por solicitud + aprobación (reemplaza Ed25519)
+-- ============================================================================
+-- La Raspberry solicita el alta con su hostname; el backend genera un
+-- request_id de un solo uso. Un Supervisor/Admin aprueba (o rechaza), y sólo
+-- entonces se crea la identidad del dispositivo. El secret en texto plano vive
+-- aquí únicamente hasta que el nodo hace su única consulta de estado; el
+-- dispositivo guarda sólo secret_hash. request_id y secret son credenciales de
+-- alta capacidad: expiran y se entregan como máximo una vez.
+CREATE TABLE IF NOT EXISTS registration_requests (
+    request_id   VARCHAR(64)  PRIMARY KEY,
+    hostname     VARCHAR(100) NOT NULL,
+    status       VARCHAR(12)  NOT NULL DEFAULT 'PENDING',
+    device_id    UUID         REFERENCES dispositivos(id) ON DELETE SET NULL,
+    secret       TEXT,
+    resolved_by  UUID         REFERENCES usuarios(id) ON DELETE RESTRICT,
+    resolved_at  TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ  NOT NULL,
 
-CREATE TABLE IF NOT EXISTS device_enrollments (
-    enrollment_id VARCHAR(64) PRIMARY KEY,
-    code_hash BYTEA UNIQUE,
-    target_dispositivo_id UUID REFERENCES dispositivos(id) ON DELETE RESTRICT,
-    nombre VARCHAR(100) NOT NULL,
-    ubicacion VARCHAR(100),
-    whep_url VARCHAR(500),
-    created_by UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL,
-    consumed_at TIMESTAMPTZ,
-    cancelled_at TIMESTAMPTZ,
-    result_dispositivo_id UUID REFERENCES dispositivos(id) ON DELETE RESTRICT,
-    result_key_fingerprint VARCHAR(128),
-    CONSTRAINT chk_enrollment_terminal_pair CHECK ((consumed_at IS NULL) OR (result_dispositivo_id IS NOT NULL AND result_key_fingerprint IS NOT NULL)),
-    CONSTRAINT chk_enrollment_code_state CHECK (NOT (consumed_at IS NOT NULL AND cancelled_at IS NOT NULL))
+    CONSTRAINT chk_registration_requests_status
+        CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED')),
+    CONSTRAINT chk_registration_requests_approved
+        CHECK (status <> 'APPROVED' OR (device_id IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL)),
+    CONSTRAINT chk_registration_requests_rejected
+        CHECK (status <> 'REJECTED' OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL))
 );
-CREATE INDEX IF NOT EXISTS idx_device_enrollments_pending
-    ON device_enrollments(expires_at) WHERE consumed_at IS NULL AND cancelled_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_device_enrollments_pending_replacement
-    ON device_enrollments(target_dispositivo_id)
-    WHERE target_dispositivo_id IS NOT NULL AND consumed_at IS NULL AND cancelled_at IS NULL;
 
-CREATE TABLE IF NOT EXISTS device_request_replays (
-    key_fingerprint VARCHAR(128) NOT NULL,
-    jti VARCHAR(64) NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (key_fingerprint, jti)
-);
-CREATE INDEX IF NOT EXISTS idx_device_request_replays_expiry ON device_request_replays(expires_at);
+-- Un hostname sólo puede tener una solicitud PENDING: evita que un mismo nodo
+-- acumule identidades por reintentos.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_registration_requests_pending_hostname
+    ON registration_requests (hostname) WHERE status = 'PENDING';
 
+CREATE INDEX IF NOT EXISTS idx_registration_requests_status
+    ON registration_requests (status, created_at DESC);
+
+COMMENT ON TABLE  registration_requests IS 'Solicitudes de registro de nodos Raspberry pendientes de aprobación por Supervisor/Admin';
+COMMENT ON COLUMN registration_requests.request_id IS 'Identificador de alta capacidad que el nodo usa para consultar su solicitud';
+COMMENT ON COLUMN registration_requests.secret IS 'Secret en texto plano retenido sólo hasta la primera consulta del nodo; se anula tras la entrega';
+COMMENT ON COLUMN registration_requests.expires_at IS 'Vencimiento de la solicitud; vencida no puede aprobarse ni entregarse';
+
+-- ============================================================================
+-- ALTER: registration_requests — tipo de dispositivo solicitado
+-- Idempotente para bases existentes. Nullable para no invalidar solicitudes
+-- legadas creadas antes de incorporar el tipo.
+-- ============================================================================
+ALTER TABLE registration_requests ADD COLUMN IF NOT EXISTS tipo VARCHAR(16);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_registration_requests_tipo') THEN
+        ALTER TABLE registration_requests ADD CONSTRAINT chk_registration_requests_tipo
+            CHECK (tipo IS NULL OR tipo IN ('ENTRADA_HORNO', 'SALIDA_HORNO'));
+    END IF;
+END $$;
+
+COMMENT ON COLUMN registration_requests.tipo IS 'Tipo/ubicación funcional que el nodo solicita al registrarse: ENTRADA_HORNO o SALIDA_HORNO (nullable para solicitudes legadas)';
+
+-- Auditoría de ciclo de vida de dispositivos. Se conserva la tabla: el alta
+-- (approve) y el rechazo (reject) dejan traza con actor y estado anterior/nuevo.
 CREATE TABLE IF NOT EXISTS device_lifecycle_audit (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     actor_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
     action VARCHAR(20) NOT NULL,
     dispositivo_id UUID REFERENCES dispositivos(id) ON DELETE RESTRICT,
     enrollment_id VARCHAR(64),
+    request_id VARCHAR(64),
     old_status VARCHAR(12) NOT NULL,
     new_status VARCHAR(12) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE device_lifecycle_audit ADD COLUMN IF NOT EXISTS enrollment_id VARCHAR(64);
+ALTER TABLE device_lifecycle_audit ADD COLUMN IF NOT EXISTS request_id VARCHAR(64);
 ALTER TABLE device_lifecycle_audit ALTER COLUMN dispositivo_id DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_device_lifecycle_audit_device ON device_lifecycle_audit(dispositivo_id, created_at DESC);
+
+-- Reemplazo total del enrolamiento Ed25519: se eliminan las tablas de
+-- credenciales por clave pública, invitaciones y replay de pruebas.
+DROP TABLE IF EXISTS device_credentials;
+DROP TABLE IF EXISTS device_enrollments;
+DROP TABLE IF EXISTS device_request_replays;
+
+-- ============================================================================
+-- SECTORES, LOTES ABIERTOS Y EVENTOS (contrato rework-rb)
+-- ============================================================================
+-- Un sector agrupa a lo sumo un dispositivo ENTRADA_HORNO y uno SALIDA_HORNO
+-- de la misma línea. El lote es la unidad de producción de un sector para un
+-- producto: máximo un lote ABIERTO por sector. eventos_lote es el detalle
+-- append-only de las detecciones que alimentan los conteos en vivo.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS sectores (
+    id          VARCHAR(50)  PRIMARY KEY,
+    nombre      VARCHAR(100) NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  sectores           IS 'Sectores de producción: agrupan un dispositivo ENTRADA_HORNO y uno SALIDA_HORNO de la misma línea.';
+COMMENT ON COLUMN sectores.id        IS 'Identificador legible del sector (ej: horno-1)';
+COMMENT ON COLUMN sectores.nombre    IS 'Nombre para mostrar del sector (ej: Horno 1)';
+COMMENT ON COLUMN sectores.created_at IS 'Marca temporal de alta del sector';
+
+-- Baja lógica del catálogo de productos: activo=false no se ofrece para elegir,
+-- pero sigue resolviendo lotes históricos.
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS activo BOOLEAN NOT NULL DEFAULT true;
+
+COMMENT ON COLUMN productos.activo IS 'Vigencia del producto en el catálogo: false = retirado (no se ofrece para elegir, sigue resolviendo lotes históricos)';
+
+-- Pertenencia de un dispositivo a un sector (nullable: dispositivos legados sin sector).
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS sector_id VARCHAR(50);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dispositivos_sector') THEN
+        ALTER TABLE dispositivos ADD CONSTRAINT fk_dispositivos_sector
+            FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+COMMENT ON COLUMN dispositivos.sector_id IS 'Sector al que pertenece el dispositivo (nullable: dispositivo sin sector asignado)';
+
+-- Un sector agrupa a lo sumo un dispositivo de cada tipo funcional
+-- (ENTRADA_HORNO/SALIDA_HORNO). Los dispositivos legados sin sector (NULL) y sin
+-- tipo quedan fuera del índice parcial, así que el upgrade no lo viola.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_dispositivos_sector_tipo
+    ON dispositivos (sector_id, tipo) WHERE sector_id IS NOT NULL AND tipo IS NOT NULL;
+
+-- Ciclo de vida del lote: columnas nuevas de lotes_productivos.
+ALTER TABLE lotes_productivos
+    ADD COLUMN IF NOT EXISTS sector_id VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS estado VARCHAR(10) NOT NULL DEFAULT 'CERRADO',
+    ADD COLUMN IF NOT EXISTS abierto_por UUID,
+    ADD COLUMN IF NOT EXISTS ultimo_evento_en TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS motivo_cierre VARCHAR(20),
+    ADD COLUMN IF NOT EXISTS abrir_idempotency_key VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS cerrar_idempotency_key VARCHAR(64);
+
+-- Un lote ABIERTO nuevo no trae turno/fin/conteos/kg: se relajan los NOT NULL
+-- de las columnas del flujo legado (los CHECK de dominio se conservan).
+ALTER TABLE lotes_productivos
+    ALTER COLUMN turno DROP NOT NULL,
+    ALTER COLUMN fin_at DROP NOT NULL,
+    ALTER COLUMN total_unidades DROP NOT NULL,
+    ALTER COLUMN correctos DROP NOT NULL,
+    ALTER COLUMN quemados DROP NOT NULL,
+    ALTER COLUMN correctos_kg DROP NOT NULL,
+    ALTER COLUMN quemados_kg DROP NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lotes_sector') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT fk_lotes_sector
+            FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE RESTRICT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lotes_abierto_por') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT fk_lotes_abierto_por
+            FOREIGN KEY (abierto_por) REFERENCES dispositivos(id) ON DELETE RESTRICT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_estado') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_estado
+            CHECK (estado IN ('ABIERTO', 'CERRADO'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_motivo_cierre') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_motivo_cierre
+            CHECK (motivo_cierre IS NULL OR motivo_cierre IN ('sin_detecciones', 'manual', 'apagado', 'seguridad'));
+    END IF;
+    -- Un lote ABIERTO siempre tiene sector y nunca tiene fin_at.
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_abierto_sector') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_abierto_sector
+            CHECK (estado <> 'ABIERTO' OR (sector_id IS NOT NULL AND fin_at IS NULL));
+    END IF;
+END $$;
+
+COMMENT ON COLUMN lotes_productivos.sector_id IS 'Sector al que pertenece el lote (nullable para lotes legados; obligatorio si estado=ABIERTO)';
+COMMENT ON COLUMN lotes_productivos.estado IS 'Ciclo de vida del lote: ABIERTO (en curso) o CERRADO (finalizado)';
+COMMENT ON COLUMN lotes_productivos.abierto_por IS 'FK al dispositivo que abrió el lote (ENTRADA_HORNO, o SALIDA_HORNO en lote degradado)';
+COMMENT ON COLUMN lotes_productivos.ultimo_evento_en IS 'Marca temporal del último evento aceptado del lote; insumo del cálculo de inactividad';
+COMMENT ON COLUMN lotes_productivos.motivo_cierre IS 'Motivo del cierre: sin_detecciones, manual, apagado o seguridad (nullable)';
+COMMENT ON COLUMN lotes_productivos.abrir_idempotency_key IS 'Clave de idempotencia de apertura enviada por la entrada; única cuando no es NULL';
+COMMENT ON COLUMN lotes_productivos.cerrar_idempotency_key IS 'Clave de idempotencia de cierre enviada por la salida (nullable)';
+
+-- Un sector tiene a lo sumo un lote ABIERTO.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_lotes_abierto_por_sector
+    ON lotes_productivos (sector_id) WHERE estado = 'ABIERTO';
+
+-- La clave de idempotencia de apertura, cuando existe, es única.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_lotes_abrir_idem
+    ON lotes_productivos (abrir_idempotency_key) WHERE abrir_idempotency_key IS NOT NULL;
+
+-- Soporte del historial por sector ordenado por fecha.
+CREATE INDEX IF NOT EXISTS idx_lotes_sector_inicio
+    ON lotes_productivos (sector_id, inicio_at DESC);
+
+-- ============================================================================
+-- TABLA: eventos_lote (detalle append-only de detecciones por lote)
+-- ============================================================================
+-- evento_id es la clave de deduplicación global generada por la Pi: un reintento
+-- reutiliza el mismo UUID y el INSERT ... ON CONFLICT DO NOTHING lo ignora.
+CREATE TABLE IF NOT EXISTS eventos_lote (
+    id             UUID             PRIMARY KEY DEFAULT gen_random_uuid(),
+    lote_id        UUID             NOT NULL REFERENCES lotes_productivos(id) ON DELETE CASCADE,
+    evento_id      UUID             NOT NULL UNIQUE,
+    producto_id    UUID             NOT NULL REFERENCES productos(id) ON DELETE RESTRICT,
+    estado         VARCHAR(10),
+    confianza      DOUBLE PRECISION,
+    pista          INTEGER,
+    frame          BIGINT,
+    modelo_id      VARCHAR(100),
+    dispositivo_id UUID             REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    momento        TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ      NOT NULL DEFAULT now(),
+
+    -- Un estado que el modelo no produce viaja NULL, nunca 0.
+    CONSTRAINT chk_eventos_lote_estado
+        CHECK (estado IS NULL OR estado IN ('ok', 'crudo', 'quemado')),
+    CONSTRAINT chk_eventos_lote_confianza
+        CHECK (confianza IS NULL OR confianza BETWEEN 0 AND 1)
+);
+
+COMMENT ON TABLE  eventos_lote              IS 'Detalle append-only de detecciones reportadas por la salida; alimenta los conteos en vivo del lote.';
+COMMENT ON COLUMN eventos_lote.id           IS 'Identificador UUID del registro de evento';
+COMMENT ON COLUMN eventos_lote.lote_id      IS 'FK al lote productivo; se borra en cascada con el lote';
+COMMENT ON COLUMN eventos_lote.evento_id    IS 'UUIDv4 generado por la Pi y reutilizado en cada reintento: clave de deduplicación';
+COMMENT ON COLUMN eventos_lote.producto_id  IS 'FK al producto detectado (debe coincidir con el producto del lote)';
+COMMENT ON COLUMN eventos_lote.estado       IS 'Estado de calidad: ok, crudo o quemado (nullable si el modelo no lo determina)';
+COMMENT ON COLUMN eventos_lote.confianza    IS 'Confianza de la detección entre 0 y 1 (nullable)';
+COMMENT ON COLUMN eventos_lote.pista        IS 'Número de pista/banda de la detección (nullable)';
+COMMENT ON COLUMN eventos_lote.frame        IS 'Número de frame del video de origen (nullable)';
+COMMENT ON COLUMN eventos_lote.modelo_id    IS 'Identificador del modelo de inferencia que produjo la detección (nullable)';
+COMMENT ON COLUMN eventos_lote.dispositivo_id IS 'FK al dispositivo que reportó el evento (nullable)';
+COMMENT ON COLUMN eventos_lote.momento      IS 'Marca temporal informativa del momento de la detección según la Pi (nullable)';
+COMMENT ON COLUMN eventos_lote.created_at   IS 'Marca temporal en que el backend recibió el evento';
+
+-- Índice para reconstruir el detalle de un lote en orden cronológico.
+CREATE INDEX IF NOT EXISTS idx_eventos_lote_lote_created
+    ON eventos_lote (lote_id, created_at);
 
 COMMIT;

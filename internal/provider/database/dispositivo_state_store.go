@@ -34,6 +34,9 @@ func (s *MemoryDispositivoStateStore) Register(d dispositivo.Dispositivo) {
 		cur.Nombre = d.Nombre
 		cur.Ubicacion = d.Ubicacion
 		cur.WhepURL = d.WhepURL
+		if d.Tipo != nil {
+			cur.Tipo = d.Tipo
+		}
 		return
 	}
 
@@ -42,13 +45,15 @@ func (s *MemoryDispositivoStateStore) Register(d dispositivo.Dispositivo) {
 		Nombre:        d.Nombre,
 		Ubicacion:     d.Ubicacion,
 		WhepURL:       d.WhepURL,
+		Tipo:          d.Tipo,
 		Estado:        dispositivo.EstadoOffline,
 	}
 }
 
 // UpdateDispositivo actualiza nombre y ubicación de un dispositivo en el caché
-// de estado, preservando su estado de salud, última métrica y last_seen. Si el
-// dispositivo no está registrado, no hace nada.
+// de estado, preservando su estado de salud, última métrica y last_seen. El tipo
+// solo se copia si viene informado (es inmutable). Si el dispositivo no está
+// registrado, no hace nada.
 func (s *MemoryDispositivoStateStore) UpdateDispositivo(d dispositivo.Dispositivo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -57,6 +62,9 @@ func (s *MemoryDispositivoStateStore) UpdateDispositivo(d dispositivo.Dispositiv
 		cur.Nombre = d.Nombre
 		cur.Ubicacion = d.Ubicacion
 		cur.WhepURL = d.WhepURL
+		if d.Tipo != nil {
+			cur.Tipo = d.Tipo
+		}
 	}
 }
 
@@ -82,6 +90,9 @@ func (s *MemoryDispositivoStateStore) Hydrate(items []dispositivo.DispositivoCon
 			cur.Nombre = d.Nombre
 			cur.Ubicacion = d.Ubicacion
 			cur.WhepURL = d.WhepURL
+			if d.Tipo != nil {
+				cur.Tipo = d.Tipo
+			}
 			continue
 		}
 
@@ -95,6 +106,7 @@ func (s *MemoryDispositivoStateStore) Hydrate(items []dispositivo.DispositivoCon
 			Nombre:        d.Nombre,
 			Ubicacion:     d.Ubicacion,
 			WhepURL:       d.WhepURL,
+			Tipo:          d.Tipo,
 			Estado:        estado,
 		}
 		if m := item.UltimaMetrica; m != nil {
@@ -124,6 +136,7 @@ func (s *MemoryDispositivoStateStore) Update(d dispositivo.Dispositivo, m dispos
 		Nombre:        d.Nombre,
 		Ubicacion:     d.Ubicacion,
 		WhepURL:       d.WhepURL,
+		Tipo:          d.Tipo,
 		Estado:        dispositivo.EstadoOnline,
 		UltimaMetrica: &m,
 		LastSeen:      &lastSeen,

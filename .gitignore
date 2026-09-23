@@ -6,6 +6,9 @@
 .agents/
 skills-lock.json
 
+# Deepwork session state (local, no se versiona)
+.slim/deepwork/
+
 # OS files
 Thumbs.db
 .DS_Store

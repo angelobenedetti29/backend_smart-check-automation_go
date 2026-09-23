@@ -38,10 +38,17 @@ func NewDispositivoService(repo dispositivo.Repository, store dispositivo.StateS
 // lo registra en el caché de estado como offline para que aparezca de inmediato
 // en GET /api/v1/dispositivos, y emite el evento SSE dispositivo.state.
 func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	tipo, ok := dispositivo.ParseTipoDispositivo(req.Tipo)
+	if !ok {
+		return nil, &dispositivo.ValidationError{Fields: []string{"type: debe ser ENTRADA_HORNO o SALIDA_HORNO"}}
+	}
+	tipoStr := string(tipo)
+
 	d := dispositivo.Dispositivo{
 		Nombre:    strings.TrimSpace(req.Nombre),
 		Ubicacion: strings.TrimSpace(req.Ubicacion),
 		WhepURL:   req.WhepURL,
+		Tipo:      &tipoStr,
 	}
 
 	if err := s.repo.Create(ctx, &d); err != nil {
@@ -57,6 +64,7 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 			Nombre:        d.Nombre,
 			Ubicacion:     d.Ubicacion,
 			WhepURL:       d.WhepURL,
+			Tipo:          d.Tipo,
 			Estado:        dispositivo.EstadoOffline,
 		}
 	}
@@ -77,6 +85,13 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 		WhepURL:   req.WhepURL,
 	}
 
+	// El tipo es inmutable: se preserva el existente y nunca se pisa con el body.
+	existing, err := s.repo.GetDispositivoByID(ctx, d.ID)
+	if err != nil {
+		return nil, err
+	}
+	d.Tipo = existing.Tipo
+
 	if err := s.repo.Update(ctx, &d); err != nil {
 		return nil, err
 	}
@@ -90,11 +105,40 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 			Nombre:        d.Nombre,
 			Ubicacion:     d.Ubicacion,
 			WhepURL:       d.WhepURL,
+			Tipo:          d.Tipo,
 			Estado:        dispositivo.EstadoOffline,
 		}
 	}
 	s.broadcastState(*estado)
 
+	return estado, nil
+}
+
+// Rename cambia solo el nombre de un dispositivo existente: carga el registro
+// para preservar ubicación y whepUrl, persiste, actualiza el caché de estado y
+// emite el evento SSE dispositivo.state. Propaga ErrDispositivoNotFound.
+func (s *DispositivoService) Rename(ctx context.Context, deviceID, nombre string) (*dispositivo.EstadoDispositivo, error) {
+	d, err := s.repo.GetDispositivoByID(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	d.Nombre = strings.TrimSpace(nombre)
+	if err := s.repo.Update(ctx, d); err != nil {
+		return nil, err
+	}
+	s.store.UpdateDispositivo(*d)
+	estado, ok := s.store.Get(d.ID)
+	if !ok {
+		estado = &dispositivo.EstadoDispositivo{
+			DispositivoID: d.ID,
+			Nombre:        d.Nombre,
+			Ubicacion:     d.Ubicacion,
+			WhepURL:       d.WhepURL,
+			Tipo:          d.Tipo,
+			Estado:        dispositivo.EstadoOffline,
+		}
+	}
+	s.broadcastState(*estado)
 	return estado, nil
 }
 
@@ -114,10 +158,15 @@ func (s *DispositivoService) Delete(ctx context.Context, id string) error {
 // actualiza el estado actual a online y emite los eventos SSE correspondientes.
 func (s *DispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
 	principal, ok := deviceauth.PrincipalFromContext(ctx)
-	if !ok || principal.Enrollment || principal.DeviceID != req.DispositivoID {
-		return nil, deviceauth.ErrInvalidProof
+	if !ok {
+		return nil, deviceauth.ErrInvalidToken
 	}
-	d, err := s.repo.GetDispositivoByID(ctx, req.DispositivoID)
+	// El id del principal es la fuente de verdad; si el ping trae un id distinto,
+	// se rechaza para evitar suplantación.
+	if req.DispositivoID != "" && req.DispositivoID != principal.DeviceID {
+		return nil, deviceauth.ErrInvalidToken
+	}
+	d, err := s.repo.GetDispositivoByID(ctx, principal.DeviceID)
 	if err != nil {
 		return nil, err
 	}

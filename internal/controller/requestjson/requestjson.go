@@ -1,7 +1,7 @@
 // Package requestjson centralizes strict controller-side DTO decoding.
 //
 // It bounds the raw body, requires a single JSON object, rejects duplicate
-// members (recursively via deviceauth.DecodeStrictJSON), rejects null/array/
+// members (recursively via the local decodeStrict helper), rejects null/array/
 // scalar/trailing-document payloads, and enforces the exact JSON field-name set
 // derived from the destination struct's tags so case aliases cannot bypass the
 // boundary. It never validates business rules; callers keep doing that.
@@ -15,7 +15,6 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
 
@@ -40,11 +39,11 @@ func Decode(w http.ResponseWriter, r *http.Request, limit int64, dst interface{}
 		return false
 	}
 
-	// DecodeStrictJSON rejects duplicate members at every nesting level and any
+	// decodeStrict rejects duplicate members at every nesting level and any
 	// trailing document. Decoding into a map also lets us verify the exact
 	// field-name set before the typed decode.
 	var members map[string]json.RawMessage
-	if err := deviceauth.DecodeStrictJSON(trimmed, &members); err != nil {
+	if err := decodeStrict(trimmed, &members); err != nil {
 		response.Error(w, http.StatusBadRequest, "Formato JSON inválido", nil)
 		return false
 	}
@@ -55,7 +54,7 @@ func Decode(w http.ResponseWriter, r *http.Request, limit int64, dst interface{}
 			return false
 		}
 	}
-	if err := deviceauth.DecodeStrictJSON(trimmed, dst); err != nil {
+	if err := decodeStrict(trimmed, dst); err != nil {
 		response.Error(w, http.StatusBadRequest, "Formato JSON inválido", nil)
 		return false
 	}

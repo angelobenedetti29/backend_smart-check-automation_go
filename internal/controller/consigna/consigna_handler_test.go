@@ -19,10 +19,6 @@ type mockConsignaService struct {
 	getHistorialFunc   func(ctx context.Context, loteID string) ([]consigna.Consigna, error)
 }
 
-func (m *mockConsignaService) DispatchAutomatico(ctx context.Context, hornoID, loteID, productoID string) (*consigna.Consigna, error) {
-	return nil, nil
-}
-
 func (m *mockConsignaService) DispatchManual(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
 	return m.dispatchManualFunc(ctx, req)
 }
