@@ -93,6 +93,65 @@ func (r *SectorPostgresRepository) List(ctx context.Context) ([]sector.Sector, e
 	return out, nil
 }
 
+// Create inserta un sector nuevo. Devuelve sector.ErrSectorIDExists si el id ya
+// está ocupado por otro sector (violación de la clave primaria).
+func (r *SectorPostgresRepository) Create(ctx context.Context, s *sector.Sector) error {
+	_, err := r.db.Exec(ctx, `INSERT INTO sectores (id, nombre) VALUES ($1, $2)`, s.ID, s.Nombre)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeUniqueViolation {
+			return sector.ErrSectorIDExists
+		}
+		return fmt.Errorf("failed to insert sector: %w", err)
+	}
+	return nil
+}
+
+// Update modifica el nombre de un sector existente. Devuelve
+// sector.ErrSectorNotFound si el sector no existe.
+func (r *SectorPostgresRepository) Update(ctx context.Context, s *sector.Sector) error {
+	cmd, err := r.db.Exec(ctx, `UPDATE sectores SET nombre = $1 WHERE id = $2`, s.Nombre, s.ID)
+	if err != nil {
+		return fmt.Errorf("failed to update sector: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return sector.ErrSectorNotFound
+	}
+	return nil
+}
+
+// Delete elimina un sector siempre que no tenga lotes productivos asociados.
+// La verificación y el borrado van en una sola sentencia para evitar carreras;
+// si el sector no existe devuelve ErrSectorNotFound y si todavía tiene lotes
+// devuelve ErrSectorConLotes.
+func (r *SectorPostgresRepository) Delete(ctx context.Context, id string) error {
+	cmd, err := r.db.Exec(ctx, `
+		DELETE FROM sectores s
+		WHERE s.id = $1
+		  AND NOT EXISTS (SELECT 1 FROM lotes_productivos lp WHERE lp.sector_id = s.id)`, id)
+	if err != nil {
+		// La FK ON DELETE RESTRICT también protege ante una carrera: si el
+		// sector empezó a tener lotes entre el chequeo y el borrado, se traduce
+		// igual al error de conflicto.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeForeignKeyViolation {
+			return sector.ErrSectorConLotes
+		}
+		return fmt.Errorf("failed to delete sector: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		var exists bool
+		if err := r.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sectores WHERE id = $1)`, id).Scan(&exists); err != nil {
+			return fmt.Errorf("failed to check sector existence: %w", err)
+		}
+		if !exists {
+			return sector.ErrSectorNotFound
+		}
+		return sector.ErrSectorConLotes
+	}
+	return nil
+}
+
 // ListCompaneros devuelve los demás dispositivos del sector, excluyendo al
 // dispositivo indicado. tipo queda "" cuando la columna es NULL.
 func (r *SectorPostgresRepository) ListCompaneros(ctx context.Context, sectorID, excludeDeviceID string) ([]sector.Companero, error) {

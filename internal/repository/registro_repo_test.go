@@ -246,7 +246,7 @@ func TestDispositivoRepository_CreatePersisteTipo(t *testing.T) {
 	repo := NewPostgresDispositivoRepository(pool)
 
 	tipo := "ENTRADA_HORNO"
-	d := dispositivo.Dispositivo{Nombre: "Pi Entrada", Ubicacion: "Línea A", Tipo: &tipo}
+	d := dispositivo.Dispositivo{Nombre: "Pi Entrada", Tipo: &tipo}
 	require.NoError(t, repo.Create(ctx, &d))
 
 	got, err := repo.GetDispositivoByID(ctx, d.ID)

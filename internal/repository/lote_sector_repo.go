@@ -38,7 +38,7 @@ func isInvalidTextRepresentation(err error) bool {
 // JOIN. Las columnas nullable se escanean a punteros para preservar los null.
 const loteSectorSelect = `
 	SELECT
-		lp.id, lp.sector_id, lp.estado, lp.producto_id, pr.nombre,
+		lp.id, lp.sector_id, lp.estado, lp.turno, lp.producto_id, pr.nombre,
 		lp.inicio_at, lp.abierto_por, d.tipo,
 		lp.correctos, lp.crudas, lp.quemados,
 		lp.ultimo_evento_en, lp.fin_at, lp.motivo_cierre
@@ -60,7 +60,7 @@ func scanLoteSector(row pgx.Row) (*lotesector.Lote, error) {
 		quemado    *int
 	)
 	if err := row.Scan(
-		&l.ID, &sectorID, &l.Estado, &l.ProductoID, &l.ProductoNombre,
+		&l.ID, &sectorID, &l.Estado, &l.Turno, &l.ProductoID, &l.ProductoNombre,
 		&l.AbiertoEn, &abiertoPor, &tipo,
 		&ok, &crudo, &quemado,
 		&l.UltimoEventoEn, &l.CerradoEn, &l.MotivoCierre,
@@ -178,14 +178,19 @@ func (r *LoteSectorPostgresRepository) Abrir(ctx context.Context, params lotesec
 	if params.AbiertoPor != "" {
 		abiertoPor = &params.AbiertoPor
 	}
+	// nil si no hay turno, para no violar el CHECK con un string vacío.
+	var turno *string
+	if params.Turno != "" {
+		turno = &params.Turno
+	}
 
 	var newID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO lotes_productivos
-			(producto_id, inicio_at, estado, sector_id, abierto_por, abrir_idempotency_key, updated_at)
-		VALUES ($1, now(), 'ABIERTO', $2, $3, $4, now())
+			(producto_id, inicio_at, estado, sector_id, abierto_por, abrir_idempotency_key, turno, updated_at)
+		VALUES ($1, now(), 'ABIERTO', $2, $3, $4, $5, now())
 		RETURNING id`,
-		params.ProductoID, params.SectorID, abiertoPor, abrirKey).Scan(&newID)
+		params.ProductoID, params.SectorID, abiertoPor, abrirKey, turno).Scan(&newID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeUniqueViolation {

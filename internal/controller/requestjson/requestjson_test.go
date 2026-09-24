@@ -8,9 +8,9 @@ import (
 )
 
 type sampleDTO struct {
-	Nombre    string                 `json:"nombre"`
-	Ubicacion string                 `json:"ubicacion,omitempty"`
-	Extra     map[string]interface{} `json:"extra,omitempty"`
+	Nombre   string                 `json:"nombre"`
+	SectorID *string                `json:"sectorId,omitempty"`
+	Extra    map[string]interface{} `json:"extra,omitempty"`
 }
 
 func decodeSample(t *testing.T, body string, limit int64) (bool, int) {
@@ -28,9 +28,9 @@ func decodeSample(t *testing.T, body string, limit int64) (bool, int) {
 
 func TestDecodeStrictObjectAcceptsCanonicalPayloads(t *testing.T) {
 	for name, body := range map[string]string{
-		"full":      `{"nombre":"Pi 1","ubicacion":"Línea A"}`,
+		"full":      `{"nombre":"Pi 1","sectorId":"horno-1"}`,
 		"optional":  `{"nombre":"Pi 1"}`,
-		"reordered": `{"ubicacion":"Línea A","nombre":"Pi 1"}`,
+		"reordered": `{"sectorId":"horno-1","nombre":"Pi 1"}`,
 		"empty-obj": `{}`,
 	} {
 		t.Run(name, func(t *testing.T) {

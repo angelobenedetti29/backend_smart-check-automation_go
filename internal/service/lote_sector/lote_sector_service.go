@@ -139,6 +139,7 @@ func (s *Service) Abrir(ctx context.Context, deviceID, productoID, idempotencyKe
 		ProductoID:     productoID,
 		AbiertoPor:     deviceID,
 		IdempotencyKey: idempotencyKey,
+		Turno:          lotesector.TurnoDe(s.now()),
 	})
 	if err != nil {
 		return nil, false, err

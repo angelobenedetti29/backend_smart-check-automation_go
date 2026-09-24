@@ -25,8 +25,13 @@ func testDeviceContext() context.Context {
 type fakeDispositivoRepo struct {
 	mu           sync.Mutex
 	dispositivos map[string]dispositivo.Dispositivo
+	revoked      map[string]bool
 	inserted     []dispositivo.MetricaDispositivo
 	createErr    error
+	updateErr    error
+	revokeErr    error
+	revokeActor  string
+	revokeID     string
 }
 
 func (f *fakeDispositivoRepo) Create(ctx context.Context, d *dispositivo.Dispositivo) error {
@@ -50,27 +55,43 @@ func (f *fakeDispositivoRepo) Update(ctx context.Context, d *dispositivo.Disposi
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.updateErr != nil {
+		return f.updateErr
+	}
 	cur, ok := f.dispositivos[d.ID]
 	if !ok {
 		return dispositivo.ErrDispositivoNotFound
 	}
 	cur.Nombre = d.Nombre
-	cur.Ubicacion = d.Ubicacion
+	cur.SectorID = d.SectorID
 	cur.WhepURL = d.WhepURL
 	f.dispositivos[d.ID] = cur
 	return nil
 }
 
-// Delete borra un dispositivo del map, devolviendo ErrDispositivoNotFound si el
-// id no existe.
-func (f *fakeDispositivoRepo) Delete(ctx context.Context, id string) error {
+// Revoke simula la baja lógica: registra el actor, quita el dispositivo del map
+// y recuerda que fue revocado para ser idempotente. Devuelve
+// ErrDispositivoNotFound si nunca existió.
+func (f *fakeDispositivoRepo) Revoke(ctx context.Context, actorEmail, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.revokeErr != nil {
+		return f.revokeErr
+	}
+	f.revokeActor = actorEmail
+	f.revokeID = id
 	if _, ok := f.dispositivos[id]; !ok {
+		if f.revoked[id] {
+			return nil // ya revocado: idempotente
+		}
 		return dispositivo.ErrDispositivoNotFound
 	}
 	delete(f.dispositivos, id)
+	if f.revoked == nil {
+		f.revoked = map[string]bool{}
+	}
+	f.revoked[id] = true
 	return nil
 }
 
@@ -143,7 +164,7 @@ func drainEvents(client *sse.Client, timeout time.Duration) []string {
 
 func TestProcessPing_UpdatesStateAndBroadcasts(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
-		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"},
+		"d1": {ID: "d1", Nombre: "Pi 1"},
 	}}
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
@@ -333,11 +354,12 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	defer broker.Unsubscribe(client)
 
 	svc := NewDispositivoService(repo, store, broker)
+	sectorID := "horno-1"
 
 	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
-		Nombre:    "  Raspberry Pi Horno 2  ",
-		Ubicacion: "  Línea B  ",
-		Tipo:      "ENTRADA_HORNO",
+		Nombre:   "  Raspberry Pi Horno 2  ",
+		SectorID: &sectorID,
+		Tipo:     "ENTRADA_HORNO",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -347,7 +369,7 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	if estado.Estado != dispositivo.EstadoOffline {
 		t.Fatalf("expected offline, got %q", estado.Estado)
 	}
-	if estado.Nombre != "Raspberry Pi Horno 2" || estado.Ubicacion != "Línea B" {
+	if estado.Nombre != "Raspberry Pi Horno 2" || estado.SectorID == nil || *estado.SectorID != sectorID {
 		t.Fatalf("expected trimmed metadata, got %+v", estado)
 	}
 	if estado.Tipo == nil || *estado.Tipo != "ENTRADA_HORNO" {
@@ -362,7 +384,7 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected device persisted, got %v", err)
 	}
-	if persisted.Nombre != "Raspberry Pi Horno 2" || persisted.Ubicacion != "Línea B" {
+	if persisted.Nombre != "Raspberry Pi Horno 2" || persisted.SectorID == nil || *persisted.SectorID != sectorID {
 		t.Fatalf("unexpected persisted device: %+v", persisted)
 	}
 	if persisted.Tipo == nil || *persisted.Tipo != "ENTRADA_HORNO" {
@@ -513,13 +535,17 @@ func containsAll(types []string, wanted ...string) bool {
 	return true
 }
 
-func TestUpdate_ActualizaCacheYEmiteSSE(t *testing.T) {
+// TestUpdate_PreservaNombreYActualizaSector verifica que el update del panel
+// cambie el sector pero PRESERVE el nombre (inmutable desde el panel), conservando
+// salud/métrica del caché y emitiendo el evento SSE dispositivo.state.
+func TestUpdate_PreservaNombreYActualizaSector(t *testing.T) {
+	sectorID := "horno-1"
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
-		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"},
+		"d1": {ID: "d1", Nombre: "Pi 1", SectorID: &sectorID},
 	}}
 	store := database.NewMemoryDispositivoStateStore()
 	// Registra d1 como online con métrica para verificar que se preserva.
-	store.Update(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"}, dispositivo.MetricaDispositivo{
+	store.Update(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID}, dispositivo.MetricaDispositivo{
 		DispositivoID: "d1", CpuPct: 10, MemRamDisponibleMb: 500, TempChip: 50, AiProcessorPct: 10, ReceivedAt: time.Now().UTC(),
 	})
 	broker := sse.NewBroker()
@@ -528,16 +554,19 @@ func TestUpdate_ActualizaCacheYEmiteSSE(t *testing.T) {
 
 	svc := NewDispositivoService(repo, store, broker)
 
+	nuevoSector := "horno-2"
 	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
 		DispositivoID: "d1",
-		Nombre:        "  Pi 1 Renombrado  ",
-		Ubicacion:     "  Línea B  ",
+		SectorID:      &nuevoSector,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if estado.Nombre != "Pi 1 Renombrado" || estado.Ubicacion != "Línea B" {
-		t.Fatalf("expected trimmed updated metadata, got %+v", estado)
+	if estado.Nombre != "Pi 1" {
+		t.Fatalf("expected nombre preserved, got %q", estado.Nombre)
+	}
+	if estado.SectorID == nil || *estado.SectorID != nuevoSector {
+		t.Fatalf("expected updated sector, got %+v", estado.SectorID)
 	}
 	// El update preserva estado de salud y última métrica del caché.
 	if estado.Estado != dispositivo.EstadoOnline {
@@ -547,13 +576,13 @@ func TestUpdate_ActualizaCacheYEmiteSSE(t *testing.T) {
 		t.Fatal("expected preserved ultima metrica after update")
 	}
 
-	// El caché devuelve el nombre/ubicación nuevos.
+	// El caché devuelve el nombre preservado y el sector nuevo.
 	cached, ok := store.Get("d1")
 	if !ok {
 		t.Fatal("expected device in store")
 	}
-	if cached.Nombre != "Pi 1 Renombrado" || cached.Ubicacion != "Línea B" {
-		t.Fatalf("expected updated cache, got %+v", cached)
+	if cached.Nombre != "Pi 1" || cached.SectorID == nil || *cached.SectorID != nuevoSector {
+		t.Fatalf("expected preserved nombre and updated sector in cache, got %+v", cached)
 	}
 
 	// Emite el evento SSE dispositivo.state.
@@ -563,16 +592,17 @@ func TestUpdate_ActualizaCacheYEmiteSSE(t *testing.T) {
 	}
 }
 
-// TestRename_PreservaUbicacionYWhepURL verifica que el rename de la propia
-// Raspberry cambia solo el nombre, preservando ubicación/whepUrl, persiste en el
+// TestRename_PreservaSectorYWhepURL verifica que el rename de la propia
+// Raspberry cambia solo el nombre, preservando sector/whepUrl, persiste en el
 // repositorio, actualiza el caché y emite el evento SSE dispositivo.state.
-func TestRename_PreservaUbicacionYWhepURL(t *testing.T) {
+func TestRename_PreservaSectorYWhepURL(t *testing.T) {
 	const whep = "https://camaras.example.com/whep/horno-1"
+	sectorID := "horno-1"
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
-		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", WhepURL: whep},
+		"d1": {ID: "d1", Nombre: "Pi 1", SectorID: &sectorID, WhepURL: whep},
 	}}
 	store := database.NewMemoryDispositivoStateStore()
-	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", WhepURL: whep})
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID, WhepURL: whep})
 	broker := sse.NewBroker()
 	client := broker.Subscribe()
 	defer broker.Unsubscribe(client)
@@ -586,25 +616,25 @@ func TestRename_PreservaUbicacionYWhepURL(t *testing.T) {
 	if estado.Nombre != "Pi 1 Renombrada" {
 		t.Fatalf("expected trimmed renamed name, got %q", estado.Nombre)
 	}
-	if estado.Ubicacion != "Línea A" || estado.WhepURL != whep {
-		t.Fatalf("expected ubicacion/whepUrl preserved, got %+v", estado)
+	if estado.SectorID == nil || *estado.SectorID != sectorID || estado.WhepURL != whep {
+		t.Fatalf("expected sector/whepUrl preserved, got %+v", estado)
 	}
 
-	// Persistió el nombre nuevo sin tocar ubicación/whepUrl.
+	// Persistió el nombre nuevo sin tocar sector/whepUrl.
 	persisted, err := repo.GetDispositivoByID(context.Background(), "d1")
 	if err != nil {
 		t.Fatalf("expected device persisted, got %v", err)
 	}
-	if persisted.Nombre != "Pi 1 Renombrada" || persisted.Ubicacion != "Línea A" || persisted.WhepURL != whep {
+	if persisted.Nombre != "Pi 1 Renombrada" || persisted.SectorID == nil || *persisted.SectorID != sectorID || persisted.WhepURL != whep {
 		t.Fatalf("unexpected persisted device: %+v", persisted)
 	}
 
-	// El caché devuelve el nombre nuevo preservando ubicación/whepUrl.
+	// El caché devuelve el nombre nuevo preservando sector/whepUrl.
 	cached, ok := store.Get("d1")
 	if !ok {
 		t.Fatal("expected device in store")
 	}
-	if cached.Nombre != "Pi 1 Renombrada" || cached.Ubicacion != "Línea A" || cached.WhepURL != whep {
+	if cached.Nombre != "Pi 1 Renombrada" || cached.SectorID == nil || *cached.SectorID != sectorID || cached.WhepURL != whep {
 		t.Fatalf("expected updated cache, got %+v", cached)
 	}
 
@@ -637,14 +667,13 @@ func TestUpdate_NotFound(t *testing.T) {
 
 	_, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
 		DispositivoID: "missing",
-		Nombre:        "Pi X",
 	})
 	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
 		t.Fatalf("expected ErrDispositivoNotFound, got %v", err)
 	}
 }
 
-func TestDelete_RemueveDelCache(t *testing.T) {
+func TestRevoke_RemueveDelCacheYPasaActor(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
 		"d1": {ID: "d1", Nombre: "Pi 1"},
 	}}
@@ -654,11 +683,16 @@ func TestDelete_RemueveDelCache(t *testing.T) {
 
 	svc := NewDispositivoService(repo, store, broker)
 
-	if err := svc.Delete(context.Background(), "d1"); err != nil {
+	if err := svc.Revoke(context.Background(), "supervisor@fermar.com.ar", "d1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Quedó fuera del caché y del repositorio.
+	// El actor viaja al repositorio para la auditoría.
+	if repo.revokeActor != "supervisor@fermar.com.ar" || repo.revokeID != "d1" {
+		t.Fatalf("expected actor/id propagated to repo, got actor=%q id=%q", repo.revokeActor, repo.revokeID)
+	}
+
+	// Quedó fuera del caché y del repositorio (baja lógica en el fake).
 	if _, ok := store.Get("d1"); ok {
 		t.Fatal("expected device removed from cache")
 	}
@@ -667,14 +701,31 @@ func TestDelete_RemueveDelCache(t *testing.T) {
 	}
 }
 
-func TestDelete_NotFound(t *testing.T) {
+// TestRevoke_Idempotente verifica que repetir la baja no falle.
+func TestRevoke_Idempotente(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1"},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1"})
+	svc := NewDispositivoService(repo, store, sse.NewBroker())
+
+	if err := svc.Revoke(context.Background(), "supervisor@fermar.com.ar", "d1"); err != nil {
+		t.Fatalf("unexpected error on first revoke: %v", err)
+	}
+	if err := svc.Revoke(context.Background(), "supervisor@fermar.com.ar", "d1"); err != nil {
+		t.Fatalf("expected idempotent revoke, got %v", err)
+	}
+}
+
+func TestRevoke_NotFound(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
 	svc := NewDispositivoService(repo, store, broker)
 
-	err := svc.Delete(context.Background(), "missing")
+	err := svc.Revoke(context.Background(), "supervisor@fermar.com.ar", "missing")
 	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
 		t.Fatalf("expected ErrDispositivoNotFound, got %v", err)
 	}
@@ -711,10 +762,10 @@ func TestCreate_PropagaWhepURL(t *testing.T) {
 
 func TestUpdate_PropagaWhepURL(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
-		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", WhepURL: "https://camaras.example.com/whep/viejo"},
+		"d1": {ID: "d1", Nombre: "Pi 1", WhepURL: "https://camaras.example.com/whep/viejo"},
 	}}
 	store := database.NewMemoryDispositivoStateStore()
-	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", WhepURL: "https://camaras.example.com/whep/viejo"})
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", WhepURL: "https://camaras.example.com/whep/viejo"})
 	broker := sse.NewBroker()
 
 	svc := NewDispositivoService(repo, store, broker)
@@ -722,8 +773,6 @@ func TestUpdate_PropagaWhepURL(t *testing.T) {
 
 	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
 		DispositivoID: "d1",
-		Nombre:        "Pi 1",
-		Ubicacion:     "Línea A",
 		WhepURL:       whep,
 	})
 	if err != nil {
@@ -788,15 +837,14 @@ func TestCreate_NormalizaTipo(t *testing.T) {
 func TestUpdate_PreservaTipo(t *testing.T) {
 	tipo := "SALIDA_HORNO"
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
-		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", Tipo: &tipo},
+		"d1": {ID: "d1", Nombre: "Pi 1", Tipo: &tipo},
 	}}
 	store := database.NewMemoryDispositivoStateStore()
-	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", Tipo: &tipo})
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Tipo: &tipo})
 	svc := NewDispositivoService(repo, store, sse.NewBroker())
 
 	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
 		DispositivoID: "d1",
-		Nombre:        "Pi 1 Renombrado",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -818,10 +866,10 @@ func TestUpdate_PreservaTipo(t *testing.T) {
 func TestRename_PreservaTipo(t *testing.T) {
 	tipo := "ENTRADA_HORNO"
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
-		"d1": {ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", Tipo: &tipo},
+		"d1": {ID: "d1", Nombre: "Pi 1", Tipo: &tipo},
 	}}
 	store := database.NewMemoryDispositivoStateStore()
-	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A", Tipo: &tipo})
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Tipo: &tipo})
 	svc := NewDispositivoService(repo, store, sse.NewBroker())
 
 	estado, err := svc.Rename(context.Background(), "d1", "Pi 1 Renombrada")
@@ -838,5 +886,57 @@ func TestRename_PreservaTipo(t *testing.T) {
 	persisted, _ := repo.GetDispositivoByID(context.Background(), "d1")
 	if persisted.Tipo == nil || *persisted.Tipo != tipo {
 		t.Fatalf("expected tipo preserved in repo, got %+v", persisted.Tipo)
+	}
+}
+
+// TestUpdate_DesasignaSectorConNil verifica que un sectorId nulo en el body
+// desasigne el dispositivo del sector tanto en el repo como en el caché.
+func TestUpdate_DesasignaSectorConNil(t *testing.T) {
+	sectorID := "horno-1"
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1", SectorID: &sectorID},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID})
+	svc := NewDispositivoService(repo, store, sse.NewBroker())
+
+	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
+		DispositivoID: "d1",
+		SectorID:      nil,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.SectorID != nil {
+		t.Fatalf("expected sector unassigned in estado, got %+v", estado.SectorID)
+	}
+	cached, _ := store.Get("d1")
+	if cached.SectorID != nil {
+		t.Fatalf("expected sector unassigned in cache, got %+v", cached.SectorID)
+	}
+	persisted, _ := repo.GetDispositivoByID(context.Background(), "d1")
+	if persisted.SectorID != nil {
+		t.Fatalf("expected sector unassigned in repo, got %+v", persisted.SectorID)
+	}
+}
+
+// TestUpdate_PropagaErroresDeSector verifica que los errores tipados de
+// asignación de sector del repositorio se propaguen sin transformarse.
+func TestUpdate_PropagaErroresDeSector(t *testing.T) {
+	for _, repoErr := range []error{dispositivo.ErrSectorNotFound, dispositivo.ErrSectorTipoDuplicado} {
+		repo := &fakeDispositivoRepo{
+			dispositivos: map[string]dispositivo.Dispositivo{"d1": {ID: "d1", Nombre: "Pi 1"}},
+			updateErr:    repoErr,
+		}
+		svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
+
+		sectorID := "horno-1"
+		_, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
+			DispositivoID: "d1",
+			SectorID:      &sectorID,
+		})
+		if !errors.Is(err, repoErr) {
+			t.Fatalf("expected %v propagated, got %v", repoErr, err)
+		}
 	}
 }

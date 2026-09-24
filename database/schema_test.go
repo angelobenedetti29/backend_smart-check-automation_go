@@ -297,6 +297,155 @@ func TestSchema_UnDispositivoPorSectorYTipo(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestApply_MigraUbicacionASectores verifica la migración idempotente de la
+// columna legacy dispositivos.ubicacion: crea un sector por ubicación, asigna a
+// los dispositivos sin sector y elimina la columna. Si dos dispositivos del
+// mismo tipo comparten ubicación, solo el primero queda asignado.
+func TestApply_MigraUbicacionASectores(t *testing.T) {
+	p := isolatedPool(t)
+	ctx := context.Background()
+	require.NoError(t, Apply(ctx, p))
+
+	// Simula una base legada: re-agrega la columna y carga dispositivos.
+	_, err := p.Exec(ctx, `ALTER TABLE dispositivos ADD COLUMN ubicacion VARCHAR(100)`)
+	require.NoError(t, err)
+
+	const (
+		salida1 = "11111111-1111-1111-1111-111111111111"
+		salida2 = "22222222-2222-2222-2222-222222222222"
+		entrada = "33333333-3333-3333-3333-333333333333"
+	)
+	_, err = p.Exec(ctx, `
+		INSERT INTO dispositivos (id, nombre, tipo, ubicacion, created_at) VALUES
+			($1, 'pi-salida-1', 'SALIDA_HORNO', 'Línea A', '2020-01-01T00:00:00Z'),
+			($2, 'pi-salida-2', 'SALIDA_HORNO', 'Línea A', '2021-01-01T00:00:00Z'),
+			($3, 'pi-entrada',  'ENTRADA_HORNO', 'Línea A', '2022-01-01T00:00:00Z')`,
+		salida1, salida2, entrada)
+	require.NoError(t, err)
+
+	require.NoError(t, Apply(ctx, p))
+
+	// (a) se creó el sector con slug sin acentos.
+	var nombre string
+	require.NoError(t, p.QueryRow(ctx, `SELECT nombre FROM sectores WHERE id='linea-a'`).Scan(&nombre))
+	require.Equal(t, "Línea A", nombre)
+
+	// (b) el primero por created_at queda asignado; el segundo del mismo tipo no.
+	var sector1, sector2, sector3 *string
+	require.NoError(t, p.QueryRow(ctx, `SELECT sector_id FROM dispositivos WHERE id=$1`, salida1).Scan(&sector1))
+	require.NoError(t, p.QueryRow(ctx, `SELECT sector_id FROM dispositivos WHERE id=$1`, salida2).Scan(&sector2))
+	require.NoError(t, p.QueryRow(ctx, `SELECT sector_id FROM dispositivos WHERE id=$1`, entrada).Scan(&sector3))
+	require.NotNil(t, sector1)
+	require.Equal(t, "linea-a", *sector1)
+	require.Nil(t, sector2, "el segundo dispositivo del mismo tipo no debe asignarse")
+	require.NotNil(t, sector3)
+	require.Equal(t, "linea-a", *sector3)
+
+	// (c) la columna legacy fue eliminada.
+	var exists bool
+	require.NoError(t, p.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='dispositivos' AND column_name='ubicacion')`).Scan(&exists))
+	require.False(t, exists, "la columna ubicacion debería haber sido eliminada")
+
+	// Idempotencia: una segunda aplicación no debe fallar.
+	require.NoError(t, Apply(ctx, p))
+}
+
+// TestApply_MigraUbicacionSinTipoAsigna verifica que los dispositivos sin tipo
+// (fuera del índice parcial) también se asignen al sector migrado.
+func TestApply_MigraUbicacionSinTipoAsigna(t *testing.T) {
+	p := isolatedPool(t)
+	ctx := context.Background()
+	require.NoError(t, Apply(ctx, p))
+
+	_, err := p.Exec(ctx, `ALTER TABLE dispositivos ADD COLUMN ubicacion VARCHAR(100)`)
+	require.NoError(t, err)
+	const devID = "44444444-4444-4444-4444-444444444444"
+	_, err = p.Exec(ctx, `INSERT INTO dispositivos (id, nombre, ubicacion) VALUES ($1, 'pi-sin-tipo', 'Planta Baja')`, devID)
+	require.NoError(t, err)
+
+	require.NoError(t, Apply(ctx, p))
+
+	var sectorID *string
+	require.NoError(t, p.QueryRow(ctx, `SELECT sector_id FROM dispositivos WHERE id=$1`, devID).Scan(&sectorID))
+	require.NotNil(t, sectorID)
+	require.Equal(t, "planta-baja", *sectorID)
+}
+
+// TestApply_MigraUbicacionNoRompeConOcupante verifica que la migración no viole
+// uq_dispositivos_sector_tipo cuando (sector, tipo) ya está ocupado por un
+// dispositivo pre-asignado cuya ubicación es NULL. El candidato debe quedar en
+// NULL y Apply no debe fallar (regresión C1).
+func TestApply_MigraUbicacionNoRompeConOcupante(t *testing.T) {
+	p := isolatedPool(t)
+	ctx := context.Background()
+	require.NoError(t, Apply(ctx, p))
+
+	_, err := p.Exec(ctx, `ALTER TABLE dispositivos ADD COLUMN ubicacion VARCHAR(100)`)
+	require.NoError(t, err)
+
+	_, err = p.Exec(ctx, `INSERT INTO sectores(id,nombre) VALUES('linea-a','Línea A')`)
+	require.NoError(t, err)
+
+	const (
+		ocupante  = "11111111-1111-1111-1111-111111111111"
+		candidato = "22222222-2222-2222-2222-222222222222"
+	)
+	// Ocupante pre-asignado con ubicación NULL; el candidato compite por el mismo
+	// (sector, tipo) al migrar su ubicación.
+	_, err = p.Exec(ctx, `
+		INSERT INTO dispositivos (id, nombre, tipo, sector_id) VALUES
+			($1, 'pi-entrada-ocupante', 'ENTRADA_HORNO', 'linea-a'),
+			($2, 'pi-entrada-candidato', 'ENTRADA_HORNO', NULL)`, ocupante, candidato)
+	require.NoError(t, err)
+	_, err = p.Exec(ctx, `UPDATE dispositivos SET ubicacion='Línea A' WHERE id=$1`, candidato)
+	require.NoError(t, err)
+
+	require.NoError(t, Apply(ctx, p), "Apply no debe fallar si (sector, tipo) ya está ocupado")
+
+	var ocupanteSector, candidatoSector *string
+	require.NoError(t, p.QueryRow(ctx, `SELECT sector_id FROM dispositivos WHERE id=$1`, ocupante).Scan(&ocupanteSector))
+	require.NoError(t, p.QueryRow(ctx, `SELECT sector_id FROM dispositivos WHERE id=$1`, candidato).Scan(&candidatoSector))
+	require.NotNil(t, ocupanteSector)
+	require.Equal(t, "linea-a", *ocupanteSector)
+	require.Nil(t, candidatoSector, "el candidato no debe asignarse si (sector, tipo) ya está ocupado")
+}
+
+// TestApply_MigraUbicacionOcupanteOtroSector cubre la variante en que el
+// ocupante tiene una ubicación que sluggea a OTRO sector (queda excluido del
+// ranking) y aun así debe bloquear al candidato (regresión C1).
+func TestApply_MigraUbicacionOcupanteOtroSector(t *testing.T) {
+	p := isolatedPool(t)
+	ctx := context.Background()
+	require.NoError(t, Apply(ctx, p))
+
+	_, err := p.Exec(ctx, `ALTER TABLE dispositivos ADD COLUMN ubicacion VARCHAR(100)`)
+	require.NoError(t, err)
+
+	_, err = p.Exec(ctx, `INSERT INTO sectores(id,nombre) VALUES('linea-a','Línea A')`)
+	require.NoError(t, err)
+
+	const (
+		ocupante  = "33333333-3333-3333-3333-333333333333"
+		candidato = "44444444-4444-4444-4444-444444444444"
+	)
+	_, err = p.Exec(ctx, `
+		INSERT INTO dispositivos (id, nombre, tipo, sector_id, ubicacion) VALUES
+			($1, 'pi-salida-ocupante', 'SALIDA_HORNO', 'linea-a', 'Línea B'),
+			($2, 'pi-salida-candidato', 'SALIDA_HORNO', NULL, 'Línea A')`, ocupante, candidato)
+	require.NoError(t, err)
+
+	require.NoError(t, Apply(ctx, p), "Apply no debe fallar con ocupante de otro sector")
+
+	var candidatoSector *string
+	require.NoError(t, p.QueryRow(ctx, `SELECT sector_id FROM dispositivos WHERE id=$1`, candidato).Scan(&candidatoSector))
+	require.Nil(t, candidatoSector, "el ocupante de (linea-a, SALIDA_HORNO) debe bloquear al candidato")
+
+	var ocupanteSector *string
+	require.NoError(t, p.QueryRow(ctx, `SELECT sector_id FROM dispositivos WHERE id=$1`, ocupante).Scan(&ocupanteSector))
+	require.NotNil(t, ocupanteSector)
+	require.Equal(t, "linea-a", *ocupanteSector)
+}
+
 func TestSchemaSQL_LockIsBeforeDDL(t *testing.T) {
 	s := string(SQL)
 	begin := strings.Index(s, "BEGIN;")

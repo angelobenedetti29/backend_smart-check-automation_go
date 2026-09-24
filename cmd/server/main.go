@@ -26,6 +26,7 @@ import (
 	parametrosProductoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/parametros_producto"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
 	registroController "github.com/angelobenedetti29/smart-check-automation/internal/controller/registro"
+	sectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sector"
 	sseController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sse"
 	userController "github.com/angelobenedetti29/smart-check-automation/internal/controller/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
@@ -44,6 +45,7 @@ import (
 	parametrosProductoService "github.com/angelobenedetti29/smart-check-automation/internal/service/parametros_producto"
 	productoService "github.com/angelobenedetti29/smart-check-automation/internal/service/producto"
 	registroService "github.com/angelobenedetti29/smart-check-automation/internal/service/registro"
+	sectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/sector"
 	userService "github.com/angelobenedetti29/smart-check-automation/internal/service/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
@@ -131,6 +133,8 @@ func main() {
 
 	// Catálogo de productos y ciclo de lote por sector (contrato lotes-sector).
 	productoSvc := productoService.NewService(productoRepo)
+	// CRUD de sectores (alta/edición/baja) para el panel.
+	sectorSvc := sectorService.NewService(sectorRepo)
 	// LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS en segundos float; 0 = no enforce.
 	loteCierreMinInactividad := getEnvFloatSeconds("LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS", 0)
 	loteSectorSvc := loteSectorService.NewService(loteSectorRepo, sectorRepo, productoRepo, loteSectorSSEBroker, loteCierreMinInactividad)
@@ -156,6 +160,7 @@ func main() {
 	hornoSSEHandler := sseController.NewSSEHandler(hornoSSEBroker)
 	productoHandler := productoController.NewProductoHandler(productoSvc)
 	loteSectorHandler := loteSectorController.NewLoteSectorHandler(loteSectorSvc)
+	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
 
 	authHandler := authController.NewAuthHandler(authSvc)
 	userHandler := userController.NewUserHandler(userSvc)
@@ -213,7 +218,21 @@ func main() {
 	}))
 	mux.HandleFunc("/api/v1/productos", loggingMiddleware(dualauth.DualAuth(deviceVerifier, jwtSecretBytes, productoHandler.Handle)))
 	mux.HandleFunc("/api/v1/dispositivos/sector", loggingMiddleware(loteSectorHandler.HandleSector))
-	mux.HandleFunc("/api/v1/sectores", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteSectorHandler.HandleSectores)))
+	// Sectores: GET para cualquier rol autenticado; alta/edición/baja para
+	// Supervisor/Administrador, con rate limit por usuario (management) aplicado
+	// después del JWT que valida la cookie.
+	sectorRoleAware := func(next http.HandlerFunc) http.HandlerFunc {
+		write := management(authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, next))
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				authController.JWTMiddleware(jwtSecretBytes, next)(w, r)
+				return
+			}
+			authController.JWTMiddleware(jwtSecretBytes, write)(w, r)
+		}
+	}
+	mux.HandleFunc("/api/v1/sectores", loggingMiddleware(sectorRoleAware(sectorHandler.HandleSectores)))
+	mux.HandleFunc("/api/v1/sectores/", loggingMiddleware(sectorRoleAware(sectorHandler.HandleSectorByID)))
 	parametrosRoleAware := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost || r.Method == http.MethodPut {
 			authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, parametrosProductoHandler.Handle)(w, r)
@@ -226,11 +245,12 @@ func main() {
 		dispositivoHandler.HandlePing(w, r)
 	}))
 	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, management(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+		if r.Method == http.MethodPost {
 			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
 			return
 		}
-		if r.Method == http.MethodPut {
+		// PUT y DELETE modifican el catálogo: sólo Supervisor/Administrador.
+		if r.Method == http.MethodPut || r.Method == http.MethodDelete {
 			authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, dispositivoHandler.Handle)(w, r)
 			return
 		}
@@ -407,7 +427,7 @@ func isManagementWrite(r *http.Request) bool {
 	if strings.HasSuffix(r.URL.Path, "/approve") || strings.HasSuffix(r.URL.Path, "/reject") {
 		return strings.HasPrefix(r.URL.Path, "/api/v1/registration-requests/")
 	}
-	return strings.HasPrefix(r.URL.Path, "/api/v1/admin/") || strings.HasPrefix(r.URL.Path, "/api/v1/dispositivos") || strings.HasPrefix(r.URL.Path, "/api/v1/parametros-producto") || strings.HasPrefix(r.URL.Path, "/api/v1/horno/")
+	return strings.HasPrefix(r.URL.Path, "/api/v1/admin/") || strings.HasPrefix(r.URL.Path, "/api/v1/dispositivos") || strings.HasPrefix(r.URL.Path, "/api/v1/parametros-producto") || strings.HasPrefix(r.URL.Path, "/api/v1/sectores") || strings.HasPrefix(r.URL.Path, "/api/v1/horno/")
 }
 
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {

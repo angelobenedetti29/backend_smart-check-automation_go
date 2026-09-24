@@ -8,6 +8,9 @@ import (
 	"context"
 	"errors"
 	"time"
+	// Embebe la base tzdata para que time.LoadLocation("America/Argentina/
+	// Buenos_Aires") funcione también fuera de la imagen Docker (que ya la trae).
+	_ "time/tzdata"
 )
 
 // Estados del ciclo de vida de un lote, coherentes con el CHECK de la columna
@@ -15,6 +18,13 @@ import (
 const (
 	EstadoAbierto = "ABIERTO"
 	EstadoCerrado = "CERRADO"
+)
+
+// Turnos de producción, coherentes con el CHECK de lotes_productivos.turno.
+const (
+	TurnoManana = "mañana"
+	TurnoTarde  = "tarde"
+	TurnoNoche  = "noche"
 )
 
 // Estados de calidad de una detección, coherentes con el CHECK de
@@ -85,6 +95,7 @@ type Lote struct {
 	ID                  string      `json:"id"`
 	SectorID            string      `json:"sector_id"`
 	Estado              string      `json:"estado"`
+	Turno               *string     `json:"turno"`
 	ProductoID          string      `json:"producto_id"`
 	ProductoNombre      string      `json:"producto_nombre"`
 	AbiertoEn           time.Time   `json:"abierto_en"`
@@ -94,6 +105,25 @@ type Lote struct {
 	InactividadSegundos float64     `json:"inactividad_segundos"`
 	CerradoEn           *time.Time  `json:"cerrado_en,omitempty"`
 	MotivoCierre        *string     `json:"motivo_cierre,omitempty"`
+}
+
+// TurnoDe clasifica el momento de apertura de un lote en el turno de
+// producción (hora de Argentina): mañana [06,14), tarde [14,22), noche el resto.
+func TurnoDe(t time.Time) string {
+	loc, err := time.LoadLocation("America/Argentina/Buenos_Aires")
+	if err != nil {
+		// Argentina no aplica horario de verano: UTC-3 fijo como fallback.
+		loc = time.FixedZone("ART", -3*60*60)
+	}
+	h := t.In(loc).Hour()
+	switch {
+	case h >= 6 && h < 14:
+		return TurnoManana
+	case h >= 14 && h < 22:
+		return TurnoTarde
+	default:
+		return TurnoNoche
+	}
 }
 
 // Evento es una detección reportada por la salida. Estado/Confianza/Pista/
@@ -115,6 +145,7 @@ type AbrirParams struct {
 	ProductoID     string
 	AbiertoPor     string
 	IdempotencyKey string
+	Turno          string
 }
 
 // CerrarParams son los datos del cierre autoritativo de un lote. Conteos trae

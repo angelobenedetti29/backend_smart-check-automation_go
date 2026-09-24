@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
@@ -37,11 +38,12 @@ func NewDispositivoHandler(svc dispositivo.Service, secure ...interface {
 }
 
 // Handle despacha GET /api/v1/dispositivos (listar estados), POST (alta), PUT
-// (modificar) y DELETE (eliminar) sobre la misma ruta según el método HTTP.
+// (modificar) y DELETE (baja lógica) sobre la misma ruta según el método HTTP.
 //
-// La autenticación JWT de POST/PUT/DELETE se aplica en el wiring de rutas, sin
-// restricción de rol. No se reusa X-API-Key: esa clave es exclusiva de las
-// Raspberry Pi y no del panel del operador.
+// La autenticación JWT de POST/PUT/DELETE se aplica en el wiring de rutas. El
+// DELETE exige rol Supervisor/Admin; el resto no restringe rol. No se reusa
+// X-API-Key: esa clave es exclusiva de las Raspberry Pi y no del panel del
+// operador.
 func (h *DispositivoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -67,8 +69,17 @@ func (h *DispositivoHandler) HandleCreate(w http.ResponseWriter, r *http.Request
 
 	estado, err := h.service.Create(r.Context(), req)
 	if err != nil {
-		log.Printf("[ERROR] Error al crear dispositivo: %v", err)
-		response.Error(w, http.StatusInternalServerError, "Error al crear el dispositivo", nil)
+		switch {
+		case dispositivo.IsValidationError(err):
+			response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		case errors.Is(err, dispositivo.ErrSectorNotFound):
+			response.Error(w, http.StatusBadRequest, "El sector indicado no existe", nil)
+		case errors.Is(err, dispositivo.ErrSectorTipoDuplicado):
+			response.Error(w, http.StatusConflict, "El sector ya tiene un dispositivo de ese tipo", nil)
+		default:
+			log.Printf("[ERROR] Error al crear dispositivo: %v", err)
+			response.Error(w, http.StatusInternalServerError, "Error al crear el dispositivo", nil)
+		}
 		return
 	}
 
@@ -88,6 +99,10 @@ func (h *DispositivoHandler) HandleUpdate(w http.ResponseWriter, r *http.Request
 		switch {
 		case errors.Is(err, dispositivo.ErrDispositivoNotFound):
 			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+		case errors.Is(err, dispositivo.ErrSectorNotFound):
+			response.Error(w, http.StatusBadRequest, "El sector indicado no existe", nil)
+		case errors.Is(err, dispositivo.ErrSectorTipoDuplicado):
+			response.Error(w, http.StatusConflict, "El sector ya tiene un dispositivo de ese tipo", nil)
 		case dispositivo.IsValidationError(err):
 			response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
 		default:
@@ -100,8 +115,10 @@ func (h *DispositivoHandler) HandleUpdate(w http.ResponseWriter, r *http.Request
 	response.JSON(w, http.StatusOK, true, "Dispositivo actualizado exitosamente", estado, nil)
 }
 
-// HandleDelete maneja DELETE /api/v1/dispositivos?dispositivoId=... — elimina un
-// dispositivo del catálogo y de la caché de estado.
+// HandleDelete maneja DELETE /api/v1/dispositivos?dispositivoId=... — da de baja
+// lógica un dispositivo: revoca su credencial, lo desasigna del sector y lo
+// quita del caché. No borra la fila ni el historial de telemetría. El nodo queda
+// con su secret viejo autenticando 401. El actor se toma de los claims JWT.
 func (h *DispositivoHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	dispositivoID := r.URL.Query().Get("dispositivoId")
 	if strings.TrimSpace(dispositivoID) == "" {
@@ -109,17 +126,23 @@ func (h *DispositivoHandler) HandleDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.service.Delete(r.Context(), dispositivoID); err != nil {
+	claims := authController.GetClaimsFromContext(r.Context())
+	if claims == nil {
+		response.Error(w, http.StatusUnauthorized, "Sesión requerida", nil)
+		return
+	}
+
+	if err := h.service.Revoke(r.Context(), claims.Email, dispositivoID); err != nil {
 		if errors.Is(err, dispositivo.ErrDispositivoNotFound) {
 			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
 			return
 		}
-		log.Printf("[ERROR] Error al eliminar dispositivo: %v", err)
-		response.Error(w, http.StatusInternalServerError, "Error al eliminar el dispositivo", nil)
+		log.Printf("[ERROR] Error al dar de baja dispositivo: %v", err)
+		response.Error(w, http.StatusInternalServerError, "Error al dar de baja el dispositivo", nil)
 		return
 	}
 
-	response.JSON(w, http.StatusOK, true, "Dispositivo eliminado exitosamente", nil, nil)
+	response.JSON(w, http.StatusOK, true, "Dispositivo dado de baja exitosamente", nil, nil)
 }
 
 // decodeAndValidate valida Content-Type, límite de tamaño, formato JSON y reglas

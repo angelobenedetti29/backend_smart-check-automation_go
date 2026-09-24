@@ -72,6 +72,7 @@ backend_smart-check-automation_go/
 │   │   ├── parametros_producto/                     # Handler GET/POST/PUT /api/v1/parametros-producto
 │   │   ├── producto/                                # GET /api/v1/productos
 │   │   ├── registro/                                # POST|GET /api/v1/registration-requests (+ approve/reject)
+│   │   ├── sector/                                  # POST /api/v1/sectores, PUT|DELETE /api/v1/sectores/{id}
 │   │   ├── sse/                                     # Handler SSE genérico
 │   │   └── user/                                    # GET|POST /api/v1/admin/usuarios, PATCH .../usuarios/{id}
 │   ├── domain/
@@ -109,6 +110,7 @@ backend_smart-check-automation_go/
 │       ├── parametros_producto/                     # Alta/consulta/actualización de parámetros
 │       ├── producto/                                # Catálogo de productos
 │       ├── registro/                                # Enrolamiento de dispositivos
+│       ├── sector/                                  # CRUD de sectores (slug de id, borrado bloqueado con lotes)
 │       └── user/                                    # ListUsers, CreateUser, UpdateUser
 ├── pkg/response/response.go                         # Envelope JSON estándar {success, message, data, errors}
 ├── database/schema.sql                              # DDL: productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo + historial_consignas + usuarios
@@ -121,8 +123,9 @@ backend_smart-check-automation_go/
 ## Schema de base de datos (fuente de verdad: database/schema.sql)
 
 - **productos**: Catálogo maestro.
-- **lotes_productivos**: Registros transaccionales de horneadas.
+- **lotes_productivos**: Registros transaccionales de horneadas (con `sector_id`).
 - **parametros_producto**: Umbrales ideales y setpoints de cocción.
+- **sectores**: Sectores de producción (`id` legible tipo slug, `nombre`). Un dispositivo pertenece a un sector (`dispositivos.sector_id`, nullable); la columna legacy `dispositivos.ubicacion` fue eliminada y sus valores migrados a sectores al arrancar (migración idempotente; si dos dispositivos del mismo tipo comparten ubicación solo el primero queda asignado, y nunca viola `uq_dispositivos_sector_tipo`). El `DROP COLUMN` es irreversible: un rollback al binario anterior requiere restaurar la columna. El deploy de frontend y backend debe ser coordinado (el decoder es estricto: `ubicacion` vs `sectorId`).
 - **dispositivos** & **metricas_dispositivo**: Nodos Raspberry Pi y telemetría (CPU/RAM/Temp).
 - **historial_consignas**: Auditoría de consignas enviadas al horno (automáticas/manuales).
 - **usuarios**: Autenticación corporativa (Email, Rol, Password Hash).
@@ -145,6 +148,9 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | GET | /api/v1/productos | Bearer dispositivo o JWT cookie | — |
 | GET | /api/v1/dispositivos/sector | Bearer dispositivo | — |
 | GET | /api/v1/sectores | JWT cookie | cualquier rol |
+| POST | /api/v1/sectores | JWT cookie | Supervisor, Admin |
+| PUT | /api/v1/sectores/{id} | JWT cookie | Supervisor, Admin |
+| DELETE | /api/v1/sectores/{id} | JWT cookie | Supervisor, Admin |
 | POST | /api/v1/lotes/inicio | Bearer dispositivo | — |
 | GET | /api/v1/lotes/abierto | Bearer dispositivo o JWT cookie | — |
 | POST | /api/v1/lotes/{id}/eventos | Bearer dispositivo | — |

@@ -41,7 +41,7 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 2 | `POST /api/v1/horno/temperatura` | Actualizar temperatura del horno (umbrales/alertas) |
 | 3 | `GET /api/v1/productos` | Catálogo maestro de productos |
 | 4 | `GET /api/v1/dispositivos/sector` | Sector y compañeros del dispositivo autenticado |
-| 5 | `GET /api/v1/sectores` | Listar todos los sectores |
+| 5 | `GET/POST /api/v1/sectores`, `PUT/DELETE /api/v1/sectores/{id}` | CRUD de sectores |
 | 6 | `POST /api/v1/lotes/inicio` | Abrir (o adjuntarse a) el lote abierto del sector |
 | 7 | `GET /api/v1/lotes/abierto` | Consultar el lote abierto del sector |
 | 8 | `POST /api/v1/lotes/{id}/eventos` | Reportar detecciones del lote |
@@ -51,7 +51,7 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 12 | `POST /api/v1/parametros-producto` | Alta de parámetros para un producto |
 | 13 | `PUT /api/v1/parametros-producto` | Modificar parámetros de un producto |
 | 14 | `POST /api/v1/dispositivos/ping` | Recibir telemetría de una Raspberry Pi |
-| 15 | `GET /api/v1/dispositivos` | Estado online/offline de todos los dispositivos |
+| 15 | `GET/PUT/DELETE /api/v1/dispositivos` | Estado online/offline, modificación y baja lógica de dispositivos |
 | 16 | `GET /api/v1/dispositivos/metricas` | Historial de métricas de un dispositivo (paginado) |
 | 17 | `POST /api/v1/horno/consigna` | Envío manual de consigna térmica al horno |
 | 18 | `GET /api/v1/horno/consigna/historial` | Historial de auditoría de consignas por lote |
@@ -176,11 +176,11 @@ curl -H "Authorization: Bearer $DEVICE_SECRET" http://localhost:8080/api/v1/disp
 
 ---
 
-## 5. `GET /api/v1/sectores` — Listar sectores
+## 5. `/api/v1/sectores` — CRUD de sectores
 
-Devuelve todos los sectores ordenados por nombre. Lo usa el panel para poblar filtros de historial.
+`GET /api/v1/sectores` devuelve todos los sectores ordenados por nombre. Lo usa el panel para poblar filtros de historial. `POST` da de alta, `PUT /{id}` modifica y `DELETE /{id}` elimina.
 
-**Auth:** cookie JWT `session_token` (cualquier rol). Sin query params.
+**Auth:** `GET` cualquier rol autenticado. `POST`, `PUT` y `DELETE` requieren cookie JWT con rol **Supervisor** o **Administrador**.
 
 ```bash
 curl -b "session_token=$JWT" http://localhost:8080/api/v1/sectores
@@ -189,16 +189,45 @@ curl -b "session_token=$JWT" http://localhost:8080/api/v1/sectores
 ```json
 {
   "success": true, "message": "Sectores obtenidos exitosamente",
-  "data": [ { "id": "horno-e2e", "nombre": "Horno E2E" } ],
+  "data": [ { "id": "horno-1", "nombre": "Horno 1" } ],
   "errors": null
 }
 ```
 
+**Alta (`POST`):** el body acepta únicamente `nombre` (requerido, con trim, hasta 100 caracteres). El `id` se genera en el servidor como slug del nombre (minúsculas, sin acentos, con guiones); ante colisión agrega un sufijo numérico (`-2`, `-3`, ...) y nunca supera los 50 caracteres.
+
+```bash
+curl -X POST -b "session_token=$JWT" -H "Content-Type: application/json" \
+  -d '{"nombre":"Horno 1"}' http://localhost:8080/api/v1/sectores
+```
+
+```json
+{ "success": true, "message": "Sector creado exitosamente", "data": { "id": "horno-1", "nombre": "Horno 1" } }
+```
+
+**Modificación (`PUT /api/v1/sectores/{id}`):** body `{ "nombre": "..." }`. El `id` es inmutable.
+
+**Baja (`DELETE /api/v1/sectores/{id}`):** elimina el sector y desasigna sus dispositivos (`sector_id` queda `NULL` por la FK `ON DELETE SET NULL`). Se **bloquea con 409** si el sector tiene lotes productivos asociados.
+
 | Código | Motivo |
 |---|---|
-| 405 | Método distinto de GET |
+| 405 | Método distinto de GET/POST en la colección, o de PUT/DELETE en `/{id}` |
 | 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente en POST/PUT/DELETE |
+| 415 | `Content-Type` inválido en POST/PUT |
+| 400 | JSON inválido en POST/PUT |
+| 422 | Validación falló (`nombre` vacío o mayor a 100 caracteres) |
+| 404 | El sector no existe (PUT/DELETE) |
+| 409 | El sector tiene lotes asociados y no se puede eliminar |
 | 500 | Error interno |
+
+### Notas de migración y despliegue (sectores)
+
+- **`ubicacion` eliminada e irreversible:** al arrancar, la columna legacy `dispositivos.ubicacion` se migra a `sectores` (id = slug del nombre; si dos dispositivos del mismo tipo comparten ubicación, solo el primero queda asignado y el resto en `NULL`) y luego se elimina con `DROP COLUMN`. Un rollback al binario anterior requiere restaurar la columna manualmente.
+- **Slugs colisionantes:** dos ubicaciones distintas que sluggean igual ("Línea A" y "linea-a") generan un único sector; `ON CONFLICT DO NOTHING` conserva uno de los nombres de forma no determinista. Revisar el catálogo tras la primera migración si existieran variantes.
+- **Deploy coordinado frontend/backend:** el decoder es estricto. Un frontend viejo que aún envía `ubicacion` recibe 400 del backend nuevo; un frontend nuevo que envía `sectorId` recibe 400 del backend viejo. Desplegar ambos juntos.
+- **Caché en memoria:** tras borrar un sector, el `MemoryDispositivoStateStore` puede conservar el `sectorId` viejo hasta el próximo ping/snapshot (≤30 s); se autocorrige.
+- **Unicidad de nombre:** los nombres de sector **no son únicos por decisión de negocio** (no hay índice único sobre `sectores.nombre`); el frontend solo avisa de duplicados en memoria. Dos sectores pueden llamarse igual.
 
 ---
 
@@ -486,7 +515,7 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
 {
   "success": true, "message": "Ping recibido correctamente",
   "data": {
-    "dispositivoId": "b1c2d3e4-...", "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A",
+    "dispositivoId": "b1c2d3e4-...", "nombre": "Raspberry Pi Horno 1", "sectorId": "horno-1",
     "estado": "online",
     "ultimaMetrica": { "cpuPct": 35.2, "memRamDisponibleMb": 512.0, "memRamTotalMb": 1024.0, "almacenamientoDisponibleMb": 20000.0, "almacenamientoTotalMb": 64000.0, "tempChip": 45.5, "aiProcessorPct": 42.0, "receivedAt": "..." },
     "lastSeen": "2026-08-06T12:00:00Z"
@@ -509,7 +538,7 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
 
 ## 15. `GET /api/v1/dispositivos` — Estado online/offline de todos los dispositivos
 
-Lectura desde el caché en memoria (no toca Postgres) — rápida, para refrescar el panel. La misma ruta para `PUT` administra el catálogo (requiere JWT con rol Supervisor/Admin).
+Lectura desde el caché en memoria (no toca Postgres) — rápida, para refrescar el panel. La misma ruta para `PUT` administra el catálogo y para `DELETE` da de baja lógica un dispositivo (ambos requieren JWT con rol Supervisor/Admin).
 
 **Auth:** cookie JWT `session_token` obligatoria; cualquier rol autenticado.
 
@@ -521,17 +550,17 @@ curl -b "session_token=$JWT" http://localhost:8080/api/v1/dispositivos
 {
   "success": true, "message": "Estados de dispositivos obtenidos exitosamente",
   "data": [
-    { "dispositivoId": "b1c2d3e4-...", "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A", "whepUrl": "https://camaras.example.com/whep/horno-1", "estado": "online", "ultimaMetrica": { "...": "..." }, "lastSeen": "..." }
+    { "dispositivoId": "b1c2d3e4-...", "nombre": "Raspberry Pi Horno 1", "sectorId": "horno-1", "whepUrl": "https://camaras.example.com/whep/horno-1", "estado": "online", "ultimaMetrica": { "...": "..." }, "lastSeen": "..." }
   ]
 }
 ```
 
-El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #14. El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: es opcional y nullable; se omite cuando el dispositivo no tiene cámara configurada.
+El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #14. El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: es opcional y nullable; se omite cuando el dispositivo no tiene cámara configurada. El campo `sectorId` es el sector al que pertenece el dispositivo (nullable); la columna legacy `ubicacion` fue eliminada y sus valores migrados a sectores.
 
-**Modificación (`PUT`):** el body acepta `whepUrl` (string opcional). Si se omite o se envía vacío, el dispositivo queda sin stream (`NULL`). Si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario la validación devuelve 422.
+**Modificación (`PUT`):** el body acepta `nombre` (requerido), `sectorId` (string o `null`) y `whepUrl` (string opcional). `dispositivoId` debe ser un UUID válido (422 en caso contrario). **Semántica de `sectorId`:** al ser un PUT de reemplazo, **omitir la clave equivale a enviar `null`** (desasigna el dispositivo del sector); el frontend siempre la envía explícitamente para no desasignar al editar solo nombre/WHEP. Un `sectorId` inexistente → 400; violar el índice único `uq_dispositivos_sector_tipo` → 409. Si `whepUrl` se omite o se envía vacío, el dispositivo queda sin stream (`NULL`); si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario 422.
 
 ```json
-{ "nombre": "Raspberry Pi Horno 1", "ubicacion": "Línea A", "whepUrl": "https://camaras.example.com/whep/horno-1" }
+{ "nombre": "Raspberry Pi Horno 1", "sectorId": "horno-1", "whepUrl": "https://camaras.example.com/whep/horno-1" }
 ```
 
 | Código | Motivo |
@@ -540,9 +569,31 @@ El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #14. El cam
 | 401 | Falta la cookie JWT o la sesión es inválida/expirada |
 | 403 | Rol insuficiente en PUT |
 | 415 | `Content-Type` inválido en PUT |
-| 400 | JSON inválido en PUT |
+| 400 | JSON inválido en PUT, o `sectorId` no existe |
+| 409 | El sector ya tiene un dispositivo de ese tipo (`ENTRADA_HORNO`/`SALIDA_HORNO`) |
 | 422 | Validación falló (incluye `whepUrl` no absoluta o mayor a 500 caracteres) |
 | 404 | `dispositivoId` no existe en el catálogo (PUT) |
+| 500 | Error interno |
+
+**Baja lógica (`DELETE /api/v1/dispositivos?dispositivoId=...`):** da de baja el dispositivo **sin borrar la fila** (evita violar las FKs `ON DELETE RESTRICT` de auditoría/lotes/historial y conserva el historial de telemetría). La operación es transaccional y ejecuta: `auth_status='revoked'`, `secret_hash=NULL` (el nodo deja de autenticar: recibe **401** con su secret viejo), `sector_id=NULL` (libera el slot `uq_dispositivos_sector_tipo`) y `auth_updated_at=clock_timestamp()`; además inserta una traza en `device_lifecycle_audit` con el actor resuelto desde su email. El dispositivo deja de aparecer en `GET /api/v1/dispositivos` y sus métricas históricas se conservan (`GET /api/v1/dispositivos/metricas`). Es **idempotente**: repetir la baja de un dispositivo ya revocado responde 200 sin duplicar la traza.
+
+**Auth:** cookie JWT `session_token` con rol **Supervisor** o **Administrador**.
+
+```bash
+curl -X DELETE -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos?dispositivoId=b1c2d3e4-5678-90ab-cdef-1234567890ab"
+```
+
+```json
+{ "success": true, "message": "Dispositivo dado de baja exitosamente", "data": null, "errors": null }
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET/PUT/DELETE |
+| 400 | Falta el query param `dispositivoId` |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente (se requiere Supervisor/Admin) |
+| 404 | `dispositivoId` no existe en el catálogo (o ya no es un UUID válido) |
 | 500 | Error interno |
 
 ---
@@ -711,6 +762,7 @@ Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database un
 | `GET /api/v1/productos` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
 | `GET /api/v1/dispositivos/sector` | Bearer de dispositivo | — | — |
 | `GET /api/v1/sectores` | JWT cookie (`session_token`) | — | — |
+| `POST/PUT/DELETE /api/v1/sectores[/{id}]` | JWT cookie, Supervisor/Admin | ✅ (POST/PUT) | ✅ (POST/PUT) |
 | `POST /api/v1/lotes/inicio` | Bearer de dispositivo | ✅ | ✅ |
 | `GET /api/v1/lotes/abierto` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
 | `POST /api/v1/lotes/{id}/eventos` | Bearer de dispositivo | ✅ | ✅ |
@@ -718,6 +770,7 @@ Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database un
 | `GET /api/v1/lotes` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
 | `POST /api/v1/dispositivos/ping` | Bearer de dispositivo | ✅ | ✅ |
 | `PUT /api/v1/dispositivos` | JWT cookie (`session_token`), Supervisor/Admin | ✅ | ✅ |
+| `DELETE /api/v1/dispositivos` | JWT cookie (`session_token`), Supervisor/Admin | — | — |
 | `POST /api/v1/horno/temperatura` | JWT cookie, Supervisor/Admin | ❌ | ❌ |
 | `POST/PUT /api/v1/parametros-producto` | JWT cookie, Supervisor/Admin | ✅ | ✅ |
 | `POST /api/v1/horno/consigna` | JWT cookie, Operario/Supervisor/Admin | ✅ | ✅ |

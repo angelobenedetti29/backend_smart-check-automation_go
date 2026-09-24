@@ -99,6 +99,12 @@ func (f *fakeSectorRepo) List(context.Context) ([]sector.Sector, error) {
 	return f.sectores, f.sectoresErr
 }
 
+func (f *fakeSectorRepo) Create(context.Context, *sector.Sector) error { return nil }
+
+func (f *fakeSectorRepo) Update(context.Context, *sector.Sector) error { return nil }
+
+func (f *fakeSectorRepo) Delete(context.Context, string) error { return nil }
+
 type fakeProductoRepo struct {
 	getByID func(context.Context, string) (*producto.Producto, error)
 	list    []producto.Producto
@@ -179,6 +185,7 @@ func TestAbrirEmiteLoteCreadoCuandoCrea(t *testing.T) {
 		require.Equal(t, "prod-1", p.ProductoID)
 		require.Equal(t, "dev-1", p.AbiertoPor)
 		require.Equal(t, "key-1", p.IdempotencyKey)
+		require.NotEmpty(t, p.Turno)
 		return lote, true, nil
 	}}
 	svc, client := newTestService(repo, sectorConDispositivo(), productoExistente(), 0)

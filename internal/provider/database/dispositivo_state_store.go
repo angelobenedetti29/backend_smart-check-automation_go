@@ -25,14 +25,14 @@ func NewMemoryDispositivoStateStore() *MemoryDispositivoStateStore {
 
 // Register da de alta un dispositivo nuevo en el caché de estado con
 // Estado=offline y sin métrica/last_seen, para que aparezca en GetAllEstados sin
-// esperar el primer ping. Si el dispositivo ya existía, actualiza nombre/ubicación.
+// esperar el primer ping. Si el dispositivo ya existía, actualiza nombre/sector.
 func (s *MemoryDispositivoStateStore) Register(d dispositivo.Dispositivo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if cur, ok := s.data[d.ID]; ok {
 		cur.Nombre = d.Nombre
-		cur.Ubicacion = d.Ubicacion
+		cur.SectorID = d.SectorID
 		cur.WhepURL = d.WhepURL
 		if d.Tipo != nil {
 			cur.Tipo = d.Tipo
@@ -43,14 +43,14 @@ func (s *MemoryDispositivoStateStore) Register(d dispositivo.Dispositivo) {
 	s.data[d.ID] = &dispositivo.EstadoDispositivo{
 		DispositivoID: d.ID,
 		Nombre:        d.Nombre,
-		Ubicacion:     d.Ubicacion,
+		SectorID:      d.SectorID,
 		WhepURL:       d.WhepURL,
 		Tipo:          d.Tipo,
 		Estado:        dispositivo.EstadoOffline,
 	}
 }
 
-// UpdateDispositivo actualiza nombre y ubicación de un dispositivo en el caché
+// UpdateDispositivo actualiza nombre y sector de un dispositivo en el caché
 // de estado, preservando su estado de salud, última métrica y last_seen. El tipo
 // solo se copia si viene informado (es inmutable). Si el dispositivo no está
 // registrado, no hace nada.
@@ -60,7 +60,7 @@ func (s *MemoryDispositivoStateStore) UpdateDispositivo(d dispositivo.Dispositiv
 
 	if cur, ok := s.data[d.ID]; ok {
 		cur.Nombre = d.Nombre
-		cur.Ubicacion = d.Ubicacion
+		cur.SectorID = d.SectorID
 		cur.WhepURL = d.WhepURL
 		if d.Tipo != nil {
 			cur.Tipo = d.Tipo
@@ -88,7 +88,7 @@ func (s *MemoryDispositivoStateStore) Hydrate(items []dispositivo.DispositivoCon
 		d := item.Dispositivo
 		if cur, ok := s.data[d.ID]; ok {
 			cur.Nombre = d.Nombre
-			cur.Ubicacion = d.Ubicacion
+			cur.SectorID = d.SectorID
 			cur.WhepURL = d.WhepURL
 			if d.Tipo != nil {
 				cur.Tipo = d.Tipo
@@ -104,7 +104,7 @@ func (s *MemoryDispositivoStateStore) Hydrate(items []dispositivo.DispositivoCon
 		entry := &dispositivo.EstadoDispositivo{
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
-			Ubicacion:     d.Ubicacion,
+			SectorID:      d.SectorID,
 			WhepURL:       d.WhepURL,
 			Tipo:          d.Tipo,
 			Estado:        estado,
@@ -134,7 +134,7 @@ func (s *MemoryDispositivoStateStore) Update(d dispositivo.Dispositivo, m dispos
 	estado = &dispositivo.EstadoDispositivo{
 		DispositivoID: d.ID,
 		Nombre:        d.Nombre,
-		Ubicacion:     d.Ubicacion,
+		SectorID:      d.SectorID,
 		WhepURL:       d.WhepURL,
 		Tipo:          d.Tipo,
 		Estado:        dispositivo.EstadoOnline,

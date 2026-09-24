@@ -10,8 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
+	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
+	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
 
@@ -36,7 +40,10 @@ type fakeDispositivoService struct {
 	renameID    string
 	renameName  string
 	renameCalls int
-	deleteErr   error
+	revokeErr   error
+	revokeActor string
+	revokeID    string
+	revokeCalls int
 }
 
 func (f *fakeDispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
@@ -72,8 +79,11 @@ func (f *fakeDispositivoService) Rename(ctx context.Context, deviceID, nombre st
 	return f.renameResp, f.renameErr
 }
 
-func (f *fakeDispositivoService) Delete(ctx context.Context, id string) error {
-	return f.deleteErr
+func (f *fakeDispositivoService) Revoke(ctx context.Context, actorEmail, id string) error {
+	f.revokeCalls++
+	f.revokeActor = actorEmail
+	f.revokeID = id
+	return f.revokeErr
 }
 
 func withTestDevicePrincipal(req *http.Request) *http.Request {
@@ -205,7 +215,6 @@ func TestHandlePing_Success(t *testing.T) {
 	estado := &dispositivo.EstadoDispositivo{
 		DispositivoID: "d1",
 		Nombre:        "Pi 1",
-		Ubicacion:     "Línea A",
 		Estado:        dispositivo.EstadoOnline,
 		UltimaMetrica: &dispositivo.MetricaDispositivo{
 			DispositivoID: "d1", CpuPct: 10, MemRamDisponibleMb: 500, TempChip: 50, AiProcessorPct: 42, ReceivedAt: now,
@@ -281,14 +290,15 @@ func TestHandleEstados_WrongMethod(t *testing.T) {
 }
 
 func TestHandleCreate_Success(t *testing.T) {
+	sectorID := "horno-1"
 	estado := &dispositivo.EstadoDispositivo{
 		DispositivoID: "d-nuevo",
 		Nombre:        "Raspberry Pi Horno 2",
-		Ubicacion:     "Línea B",
+		SectorID:      &sectorID,
 		Estado:        dispositivo.EstadoOffline,
 	}
 	h := NewDispositivoHandler(&fakeDispositivoService{createResp: estado})
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","ubicacion":"Línea B","type":"ENTRADA_HORNO"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","sectorId":"horno-1","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -318,11 +328,14 @@ func TestHandleCreate_Success(t *testing.T) {
 	if data["nombre"] != "Raspberry Pi Horno 2" {
 		t.Fatalf("expected nombre in response, got %v", data["nombre"])
 	}
+	if data["sectorId"] != sectorID {
+		t.Fatalf("expected sectorId in response, got %v", data["sectorId"])
+	}
 }
 
 func TestHandleCreate_EmptyNombre(t *testing.T) {
 	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"nombre":"   ","ubicacion":"Línea B","type":"ENTRADA_HORNO"}`)
+	body := bytes.NewBufferString(`{"nombre":"   ","sectorId":"horno-1","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -387,7 +400,7 @@ func TestHandleCreate_TypeInvalido(t *testing.T) {
 func TestHandleUpdate_TypeInmutable(t *testing.T) {
 	svc := &fakeDispositivoService{}
 	h := NewDispositivoHandler(svc)
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"Pi 1","type":"SALIDA_HORNO"}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"11111111-1111-1111-1111-111111111111","type":"SALIDA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -449,14 +462,15 @@ func TestHandleCreate_InternalError(t *testing.T) {
 }
 
 func TestHandleUpdate_Success(t *testing.T) {
+	sectorID := "horno-1"
 	estado := &dispositivo.EstadoDispositivo{
 		DispositivoID: "d1",
 		Nombre:        "Pi 1",
-		Ubicacion:     "Línea A",
+		SectorID:      &sectorID,
 		Estado:        dispositivo.EstadoOffline,
 	}
 	h := NewDispositivoHandler(&fakeDispositivoService{updateResp: estado})
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"Pi 1","ubicacion":"Línea A"}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1"}`)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -485,9 +499,12 @@ func TestHandleUpdate_Success(t *testing.T) {
 	}
 }
 
-func TestHandleUpdate_EmptyNombre(t *testing.T) {
-	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"   ","ubicacion":"Línea A"}`)
+// TestHandleUpdate_RechazaNombre verifica que el nombre ya no sea aceptado por el
+// decode estricto del panel: solo el rename autenticado del nodo puede cambiarlo.
+func TestHandleUpdate_RechazaNombre(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"dispositivoId":"11111111-1111-1111-1111-111111111111","nombre":"Pi 1","sectorId":"horno-1"}`)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -495,8 +512,11 @@ func TestHandleUpdate_EmptyNombre(t *testing.T) {
 
 	h.Handle(rec, req)
 
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for immutable nombre field, got %d", rec.Code)
+	}
+	if svc.updateCalls != 0 {
+		t.Fatalf("invalid request must not reach service, got %d calls", svc.updateCalls)
 	}
 }
 
@@ -517,7 +537,7 @@ func TestHandleUpdate_InvalidJSON(t *testing.T) {
 
 func TestHandleUpdate_InvalidContentType(t *testing.T) {
 	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"Pi 1"}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"11111111-1111-1111-1111-111111111111"}`)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "text/plain")
@@ -532,7 +552,7 @@ func TestHandleUpdate_InvalidContentType(t *testing.T) {
 
 func TestHandleUpdate_NotFound(t *testing.T) {
 	h := NewDispositivoHandler(&fakeDispositivoService{updateErr: dispositivo.ErrDispositivoNotFound})
-	body := bytes.NewBufferString(`{"dispositivoId":"missing","nombre":"Pi 1"}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"99999999-9999-9999-9999-999999999999"}`)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -545,16 +565,106 @@ func TestHandleUpdate_NotFound(t *testing.T) {
 	}
 }
 
-func TestHandleDelete_Success(t *testing.T) {
-	h := NewDispositivoHandler(&fakeDispositivoService{})
+// TestHandleUpdate_SectorNoExiste verifica que un sectorId inexistente se
+// traduzca a 400.
+func TestHandleUpdate_SectorNoExiste(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{updateErr: dispositivo.ErrSectorNotFound})
+	body := bytes.NewBufferString(`{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"no-existe"}`)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/dispositivos?dispositivoId=d1", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
 	h.Handle(rec, req)
 
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+// TestHandleUpdate_SectorTipoDuplicado verifica que la violación del índice
+// único se traduzca a 409.
+func TestHandleUpdate_SectorTipoDuplicado(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{updateErr: dispositivo.ErrSectorTipoDuplicado})
+	body := bytes.NewBufferString(`{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rec.Code)
+	}
+}
+
+// TestHandleUpdate_RechazaUbicacionLegacy verifica que el campo ubicacion ya no
+// sea aceptado por el decode estricto.
+func TestHandleUpdate_RechazaUbicacionLegacy(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"dispositivoId":"11111111-1111-1111-1111-111111111111","ubicacion":"Línea A"}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for removed ubicacion field, got %d", rec.Code)
+	}
+	if svc.updateCalls != 0 {
+		t.Fatalf("invalid request must not reach service, got %d calls", svc.updateCalls)
+	}
+}
+
+// testJWTSecret firma las cookies de prueba para ejercitar el handler DELETE,
+// que toma el actor de los claims inyectados por JWTMiddleware.
+var testJWTSecret = []byte("test-secret-32-chars-exactly!!!")
+
+// buildSupervisorCookie genera una cookie session_token válida con rol Supervisor.
+func buildSupervisorCookie(t *testing.T) *http.Cookie {
+	t.Helper()
+	claims := &authService.Claims{
+		Email: "supervisor@fermar.com.ar",
+		Name:  "Supervisor Test",
+		Role:  "Supervisor",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(testJWTSecret)
+	if err != nil {
+		t.Fatalf("error generando token de prueba: %v", err)
+	}
+	return &http.Cookie{Name: "session_token", Value: signed}
+}
+
+func TestHandleDelete_Success(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/dispositivos?dispositivoId=d1", nil)
+	req.AddCookie(buildSupervisorCookie(t))
+	rec := httptest.NewRecorder()
+
+	authController.JWTMiddleware(testJWTSecret, h.Handle)(rec, req)
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if svc.revokeCalls != 1 {
+		t.Fatalf("expected revoke to reach service, got %d calls", svc.revokeCalls)
+	}
+	if svc.revokeActor != "supervisor@fermar.com.ar" {
+		t.Fatalf("expected actor from claims, got %q", svc.revokeActor)
+	}
+	if svc.revokeID != "d1" {
+		t.Fatalf("expected dispositivoId passed to service, got %q", svc.revokeID)
 	}
 
 	var resp response.Response
@@ -563,6 +673,25 @@ func TestHandleDelete_Success(t *testing.T) {
 	}
 	if !resp.Success {
 		t.Fatal("expected success=true")
+	}
+}
+
+// TestHandleDelete_UnauthorizedWithoutClaims verifica que sin claims JWT el
+// handler responda 401 sin invocar al service.
+func TestHandleDelete_UnauthorizedWithoutClaims(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/dispositivos?dispositivoId=d1", nil)
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if svc.revokeCalls != 0 {
+		t.Fatalf("revoke must not reach service without claims, got %d calls", svc.revokeCalls)
 	}
 }
 
@@ -580,12 +709,13 @@ func TestHandleDelete_MissingID(t *testing.T) {
 }
 
 func TestHandleDelete_NotFound(t *testing.T) {
-	h := NewDispositivoHandler(&fakeDispositivoService{deleteErr: dispositivo.ErrDispositivoNotFound})
+	h := NewDispositivoHandler(&fakeDispositivoService{revokeErr: dispositivo.ErrDispositivoNotFound})
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/dispositivos?dispositivoId=missing", nil)
+	req.AddCookie(buildSupervisorCookie(t))
 	rec := httptest.NewRecorder()
 
-	h.Handle(rec, req)
+	authController.JWTMiddleware(testJWTSecret, h.Handle)(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
@@ -728,7 +858,7 @@ func TestHandleUpdate_RoundTripWhepURL(t *testing.T) {
 	}
 	svc := &fakeDispositivoService{updateResp: estado}
 	h := NewDispositivoHandler(svc)
-	body := bytes.NewBufferString(`{"dispositivoId":"d1","nombre":"Pi 1","whepUrl":"` + whep + `"}`)
+	body := bytes.NewBufferString(`{"dispositivoId":"11111111-1111-1111-1111-111111111111","whepUrl":"` + whep + `"}`)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -840,9 +970,9 @@ func TestHandleEstados_ExponeWhepURL(t *testing.T) {
 // and case-alias members fail at the decode boundary, before the service.
 func TestHandleUpdate_RejectsStrictJSONViolationsBeforeService(t *testing.T) {
 	for name, body := range map[string]string{
-		"duplicate-nombre":  `{"dispositivoId":"d1","nombre":"Pi 1","nombre":"Pi 2"}`,
-		"case-alias-nombre": `{"dispositivoId":"d1","Nombre":"Pi 1"}`,
-		"trailing-doc":      `{"dispositivoId":"d1","nombre":"Pi 1"}{"x":1}`,
+		"duplicate-sectorId": `{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1","sectorId":"horno-2"}`,
+		"case-alias-sectorId": `{"dispositivoId":"11111111-1111-1111-1111-111111111111","SectorId":"horno-1"}`,
+		"trailing-doc":        `{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1"}{"x":1}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			svc := &fakeDispositivoService{}
@@ -998,7 +1128,6 @@ func TestHandleRename_Success(t *testing.T) {
 	estado := &dispositivo.EstadoDispositivo{
 		DispositivoID: "b1c2d3e4-5678-90ab-cdef-1234567890ab",
 		Nombre:        "Pi Renombrada",
-		Ubicacion:     "Línea A",
 		Estado:        dispositivo.EstadoOffline,
 	}
 	svc := &fakeDispositivoService{renameResp: estado}

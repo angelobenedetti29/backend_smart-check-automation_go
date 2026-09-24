@@ -204,10 +204,11 @@ func TestPingRequestValidate_BoundariesAiProcessor(t *testing.T) {
 }
 
 func TestCreateDispositivoRequestValidate_Valid(t *testing.T) {
+	sectorID := "horno-1"
 	req := CreateDispositivoRequest{
-		Nombre:    "Raspberry Pi Horno 2",
-		Ubicacion: "Línea B",
-		Tipo:      "ENTRADA_HORNO",
+		Nombre:   "Raspberry Pi Horno 2",
+		SectorID: &sectorID,
+		Tipo:     "ENTRADA_HORNO",
 	}
 
 	if err := req.Validate(); err != nil {
@@ -215,11 +216,11 @@ func TestCreateDispositivoRequestValidate_Valid(t *testing.T) {
 	}
 }
 
-func TestCreateDispositivoRequestValidate_ValidWithEmptyUbicacion(t *testing.T) {
+func TestCreateDispositivoRequestValidate_ValidWithoutSector(t *testing.T) {
 	req := CreateDispositivoRequest{Nombre: "Raspberry Pi Horno 2", Tipo: "SALIDA_HORNO"}
 
 	if err := req.Validate(); err != nil {
-		t.Fatalf("expected no validation error for optional ubicacion, got: %v", err)
+		t.Fatalf("expected no validation error for omitted sectorId, got: %v", err)
 	}
 }
 
@@ -276,7 +277,7 @@ func TestParseTipoDispositivo(t *testing.T) {
 }
 
 func TestCreateDispositivoRequestValidate_NombreRequired(t *testing.T) {
-	req := CreateDispositivoRequest{Nombre: "   ", Ubicacion: "Línea B", Tipo: "ENTRADA_HORNO"}
+	req := CreateDispositivoRequest{Nombre: "   ", Tipo: "ENTRADA_HORNO"}
 
 	err := req.Validate()
 	if err == nil {
@@ -309,29 +310,12 @@ func TestCreateDispositivoRequestValidate_NombreTooLong(t *testing.T) {
 	}
 }
 
-func TestCreateDispositivoRequestValidate_UbicacionTooLong(t *testing.T) {
-	long := ""
-	for i := 0; i < 101; i++ {
-		long += "b"
-	}
-	req := CreateDispositivoRequest{Nombre: "Pi 1", Ubicacion: long, Tipo: "ENTRADA_HORNO"}
-
-	err := req.Validate()
-	if err == nil {
-		t.Fatal("expected validation error for ubicacion over 100 chars")
-	}
-	var ve *ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("expected *ValidationError, got %T", err)
-	}
-}
-
 func TestCreateDispositivoRequestValidate_NombreAtMaxLengthIsValid(t *testing.T) {
 	long := ""
 	for i := 0; i < 100; i++ {
 		long += "a"
 	}
-	req := CreateDispositivoRequest{Nombre: long, Ubicacion: long, Tipo: "ENTRADA_HORNO"}
+	req := CreateDispositivoRequest{Nombre: long, Tipo: "ENTRADA_HORNO"}
 
 	if err := req.Validate(); err != nil {
 		t.Fatalf("expected valid at exactly 100 chars, got: %v", err)
@@ -396,13 +380,26 @@ func TestCreateDispositivoRequestValidate_WhepURLAtMaxLengthIsValid(t *testing.T
 }
 
 func TestUpdateDispositivoRequestValidate_WhepURL(t *testing.T) {
-	valid := UpdateDispositivoRequest{DispositivoID: testDispositivoUUID, Nombre: "Pi 1", WhepURL: "http://camaras.example.com/whep/horno-1"}
+	valid := UpdateDispositivoRequest{DispositivoID: testDispositivoUUID, WhepURL: "http://camaras.example.com/whep/horno-1"}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("expected valid whepUrl in update, got: %v", err)
 	}
 
-	invalid := UpdateDispositivoRequest{DispositivoID: testDispositivoUUID, Nombre: "Pi 1", WhepURL: "no-es-url"}
+	invalid := UpdateDispositivoRequest{DispositivoID: testDispositivoUUID, WhepURL: "no-es-url"}
 	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "whepUrl: debe ser una URL absoluta http o https") {
 		t.Fatalf("expected invalid whepUrl error in update, got: %v", err)
+	}
+}
+
+func TestUpdateDispositivoRequestValidate_SectorIDAceptaValorYNil(t *testing.T) {
+	sectorID := "horno-1"
+	conSector := UpdateDispositivoRequest{DispositivoID: testDispositivoUUID, SectorID: &sectorID}
+	if err := conSector.Validate(); err != nil {
+		t.Fatalf("expected sectorId set to be valid, got: %v", err)
+	}
+
+	sinSector := UpdateDispositivoRequest{DispositivoID: testDispositivoUUID, SectorID: nil}
+	if err := sinSector.Validate(); err != nil {
+		t.Fatalf("expected nil sectorId to be valid, got: %v", err)
 	}
 }

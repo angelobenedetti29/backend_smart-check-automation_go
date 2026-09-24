@@ -34,6 +34,18 @@ func NewDispositivoService(repo dispositivo.Repository, store dispositivo.StateS
 	return &DispositivoService{repo: repo, store: store, broker: broker}
 }
 
+// normalizeSectorID trata un sectorId vacío o en blanco como "sin sector" (nil).
+func normalizeSectorID(sectorID *string) *string {
+	if sectorID == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*sectorID)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
 // Create da de alta un dispositivo nuevo: persiste en el catálogo (PostgreSQL),
 // lo registra en el caché de estado como offline para que aparezca de inmediato
 // en GET /api/v1/dispositivos, y emite el evento SSE dispositivo.state.
@@ -45,10 +57,10 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 	tipoStr := string(tipo)
 
 	d := dispositivo.Dispositivo{
-		Nombre:    strings.TrimSpace(req.Nombre),
-		Ubicacion: strings.TrimSpace(req.Ubicacion),
-		WhepURL:   req.WhepURL,
-		Tipo:      &tipoStr,
+		Nombre:   strings.TrimSpace(req.Nombre),
+		SectorID: normalizeSectorID(req.SectorID),
+		WhepURL:  req.WhepURL,
+		Tipo:     &tipoStr,
 	}
 
 	if err := s.repo.Create(ctx, &d); err != nil {
@@ -62,7 +74,7 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 		estado = &dispositivo.EstadoDispositivo{
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
-			Ubicacion:     d.Ubicacion,
+			SectorID:      d.SectorID,
 			WhepURL:       d.WhepURL,
 			Tipo:          d.Tipo,
 			Estado:        dispositivo.EstadoOffline,
@@ -73,16 +85,18 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 	return estado, nil
 }
 
-// Update modifica nombre y ubicación de un dispositivo existente: persiste en el
-// catálogo (PostgreSQL), actualiza el caché de estado preservando salud/métrica/
-// last_seen, y emite el evento SSE dispositivo.state para que el frontend en vivo
-// vea el nombre/ubicación nuevos. Propaga ErrDispositivoNotFound si no existe.
+// Update modifica el sector y el whepUrl de un dispositivo existente, preservando
+// su nombre y tipo (el nombre solo puede cambiarlo el rename autenticado del nodo).
+// Persiste en el catálogo (PostgreSQL), actualiza el caché de estado preservando
+// salud/métrica/last_seen, y emite el evento SSE dispositivo.state para que el
+// frontend en vivo vea el sector/whepUrl nuevos. Propaga ErrDispositivoNotFound si
+// no existe, ErrSectorNotFound si el sector no existe y ErrSectorTipoDuplicado si
+// el sector ya tiene un dispositivo de ese tipo.
 func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
 	d := dispositivo.Dispositivo{
-		ID:        strings.TrimSpace(req.DispositivoID),
-		Nombre:    strings.TrimSpace(req.Nombre),
-		Ubicacion: strings.TrimSpace(req.Ubicacion),
-		WhepURL:   req.WhepURL,
+		ID:       strings.TrimSpace(req.DispositivoID),
+		SectorID: normalizeSectorID(req.SectorID),
+		WhepURL:  req.WhepURL,
 	}
 
 	// El tipo es inmutable: se preserva el existente y nunca se pisa con el body.
@@ -91,6 +105,9 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 		return nil, err
 	}
 	d.Tipo = existing.Tipo
+	// El nombre es inmutable desde el panel: se preserva el existente. Solo el
+	// rename autenticado del nodo (Rename) puede cambiarlo.
+	d.Nombre = existing.Nombre
 
 	if err := s.repo.Update(ctx, &d); err != nil {
 		return nil, err
@@ -103,7 +120,7 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 		estado = &dispositivo.EstadoDispositivo{
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
-			Ubicacion:     d.Ubicacion,
+			SectorID:      d.SectorID,
 			WhepURL:       d.WhepURL,
 			Tipo:          d.Tipo,
 			Estado:        dispositivo.EstadoOffline,
@@ -115,7 +132,7 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 }
 
 // Rename cambia solo el nombre de un dispositivo existente: carga el registro
-// para preservar ubicación y whepUrl, persiste, actualiza el caché de estado y
+// para preservar sector y whepUrl, persiste, actualiza el caché de estado y
 // emite el evento SSE dispositivo.state. Propaga ErrDispositivoNotFound.
 func (s *DispositivoService) Rename(ctx context.Context, deviceID, nombre string) (*dispositivo.EstadoDispositivo, error) {
 	d, err := s.repo.GetDispositivoByID(ctx, deviceID)
@@ -132,7 +149,7 @@ func (s *DispositivoService) Rename(ctx context.Context, deviceID, nombre string
 		estado = &dispositivo.EstadoDispositivo{
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
-			Ubicacion:     d.Ubicacion,
+			SectorID:      d.SectorID,
 			WhepURL:       d.WhepURL,
 			Tipo:          d.Tipo,
 			Estado:        dispositivo.EstadoOffline,
@@ -142,10 +159,12 @@ func (s *DispositivoService) Rename(ctx context.Context, deviceID, nombre string
 	return estado, nil
 }
 
-// Delete elimina un dispositivo del catálogo y de la caché de estado. Sin evento
-// SSE. Propaga ErrDispositivoNotFound si el dispositivo no existe.
-func (s *DispositivoService) Delete(ctx context.Context, id string) error {
-	if err := s.repo.Delete(ctx, id); err != nil {
+// Revoke da de baja lógica un dispositivo: revoca su credencial, lo desasigna
+// del sector y lo quita del caché. Conserva la fila y el historial de
+// telemetría para no romper las FKs de auditoría/provenance. El nodo queda
+// autenticando 401 con su secret viejo.
+func (s *DispositivoService) Revoke(ctx context.Context, actorEmail, id string) error {
+	if err := s.repo.Revoke(ctx, actorEmail, id); err != nil {
 		return err
 	}
 

@@ -15,11 +15,11 @@ const (
 )
 
 // DeviceRead es el modelo de lectura del catálogo que expone, además del estado
-// de salud, si el dispositivo tiene un secret registrado.
+// de salud, si el dispositivo tiene un secret registrado. El sector del
+// dispositivo viaja en el campo embebido SectorID de EstadoDispositivo.
 type DeviceRead struct {
 	EstadoDispositivo
 	Tipo          *string    `json:"type,omitempty"`
-	SectorID      *string    `json:"sectorId,omitempty"`
 	AuthStatus    AuthStatus `json:"authStatus"`
 	HasSecret     bool       `json:"hasSecret"`
 	AuthUpdatedAt *time.Time `json:"authUpdatedAt,omitempty"`

@@ -9,8 +9,9 @@ import (
 
 func TestMemoryDispositivoStateStore_Hydrate_SetsOffline(t *testing.T) {
 	store := NewMemoryDispositivoStateStore()
+	sectorID := "horno-1"
 	store.Hydrate([]dispositivo.DispositivoConUltimaMetrica{
-		{Dispositivo: dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"}},
+		{Dispositivo: dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID}},
 	}, 25*time.Second, time.Now().UTC())
 
 	estado, ok := store.Get("d1")
@@ -23,7 +24,7 @@ func TestMemoryDispositivoStateStore_Hydrate_SetsOffline(t *testing.T) {
 	if estado.LastSeen != nil {
 		t.Fatalf("expected nil lastSeen after hydrate, got %v", estado.LastSeen)
 	}
-	if estado.Nombre != "Pi 1" || estado.Ubicacion != "Línea A" {
+	if estado.Nombre != "Pi 1" || estado.SectorID == nil || *estado.SectorID != sectorID {
 		t.Fatalf("expected hydrated metadata, got %+v", estado)
 	}
 }
@@ -79,8 +80,9 @@ func TestMemoryDispositivoStateStore_Hydrate_KeepsMetricWhenStaleOffline(t *test
 
 func TestMemoryDispositivoStateStore_Register_AppearsOffline(t *testing.T) {
 	store := NewMemoryDispositivoStateStore()
+	sectorID := "horno-1"
 
-	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"})
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID})
 
 	estado, ok := store.Get("d1")
 	if !ok {
@@ -92,7 +94,7 @@ func TestMemoryDispositivoStateStore_Register_AppearsOffline(t *testing.T) {
 	if estado.UltimaMetrica != nil || estado.LastSeen != nil {
 		t.Fatalf("expected no metric/lastSeen after register, got %+v", estado)
 	}
-	if estado.Nombre != "Pi 1" || estado.Ubicacion != "Línea A" {
+	if estado.Nombre != "Pi 1" || estado.SectorID == nil || *estado.SectorID != sectorID {
 		t.Fatalf("expected registered metadata, got %+v", estado)
 	}
 
@@ -105,15 +107,17 @@ func TestMemoryDispositivoStateStore_Register_AppearsOffline(t *testing.T) {
 
 func TestMemoryDispositivoStateStore_Register_UpdatesWithoutDuplicating(t *testing.T) {
 	store := NewMemoryDispositivoStateStore()
+	sectorA := "horno-1"
+	sectorB := "horno-2"
 
-	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Ubicacion: "Línea A"})
-	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1 Renombrada", Ubicacion: "Línea B"})
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorA})
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1 Renombrada", SectorID: &sectorB})
 
 	estado, ok := store.Get("d1")
 	if !ok {
 		t.Fatal("expected estado for registered device")
 	}
-	if estado.Nombre != "Pi 1 Renombrada" || estado.Ubicacion != "Línea B" {
+	if estado.Nombre != "Pi 1 Renombrada" || estado.SectorID == nil || *estado.SectorID != sectorB {
 		t.Fatalf("expected updated metadata, got %+v", estado)
 	}
 	if estado.Estado != dispositivo.EstadoOffline {
@@ -308,5 +312,32 @@ func TestMemoryDispositivoStateStore_Hydrate_PropagaTipo(t *testing.T) {
 	estado, ok := store.Get("d1")
 	if !ok || estado.Tipo == nil || *estado.Tipo != tipo {
 		t.Fatalf("expected tipo propagated on hydrate, got %+v", estado)
+	}
+}
+
+func TestMemoryDispositivoStateStore_PropagaSectorID(t *testing.T) {
+	store := NewMemoryDispositivoStateStore()
+	sectorID := "horno-1"
+
+	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID})
+	estado, ok := store.Get("d1")
+	if !ok || estado.SectorID == nil || *estado.SectorID != sectorID {
+		t.Fatalf("expected sectorId propagated on register, got %+v", estado)
+	}
+
+	// UpdateDispositivo desasigna el sector con nil.
+	store.UpdateDispositivo(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1b"})
+	estado, _ = store.Get("d1")
+	if estado.SectorID != nil {
+		t.Fatalf("expected sectorId cleared on UpdateDispositivo, got %+v", estado.SectorID)
+	}
+
+	// Update con métrica reconstruye el estado conservando el sector.
+	_, _, estado = store.Update(
+		dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID},
+		dispositivo.MetricaDispositivo{DispositivoID: "d1", ReceivedAt: time.Now().UTC()},
+	)
+	if estado.SectorID == nil || *estado.SectorID != sectorID {
+		t.Fatalf("expected sectorId propagated on Update, got %+v", estado.SectorID)
 	}
 }
