@@ -34,10 +34,6 @@ var (
 
 	// ErrRequestExpired se retorna al aprobar/rechazar una solicitud vencida.
 	ErrRequestExpired = errors.New("la solicitud de registro expiró")
-
-	// ErrHostnameDuplicate se retorna cuando ya existe una solicitud PENDING para
-	// el mismo hostname (índice único parcial).
-	ErrHostnameDuplicate = errors.New("ya existe una solicitud pendiente para este hostname")
 )
 
 // CreateRequest es el body del alta pública de un nodo (POST /api/v1/registration-requests).

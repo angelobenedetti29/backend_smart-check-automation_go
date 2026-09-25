@@ -12,8 +12,7 @@ import (
 var ErrHornoNoExiste = errors.New("consigna: el horno referenciado no existe")
 
 // ErrParametrosNoExiste indica que el producto no tiene parámetros de control
-// cargados, o que le faltan los setpoints puntuales (temp_setpoint/velocidad_cinta_setpoint)
-// necesarios para un despacho automático.
+// cargados, necesarios para validar una consigna manual contra su rango seguro.
 var ErrParametrosNoExiste = errors.New("consigna: no hay parámetros de control (o setpoints) cargados para el producto")
 
 // ErrFueraDeRango indica que los valores solicitados en un despacho manual
@@ -24,14 +23,12 @@ var ErrFueraDeRango = errors.New("consigna: valores fuera de rango seguro")
 // pudo aplicar la consigna.
 var ErrDispatchFallido = errors.New("consigna: el controlador físico rechazó la consigna")
 
-// Origen indica si la consigna fue disparada automáticamente por el sistema
-// (tras la detección de IA al iniciar un lote) o manualmente por un operario
-// desde el panel de control.
+// Origen identifica el mecanismo que disparó la consigna. Hoy el único origen
+// vigente es el envío manual realizado por un operario desde el panel de control.
 type Origen string
 
 const (
-	OrigenAutomatico Origen = "AUTOMATICO"
-	OrigenManual     Origen = "MANUAL"
+	OrigenManual Origen = "MANUAL"
 )
 
 // ValidationError agrupa todos los errores de validación de un ConsignaManualRequest.
@@ -41,12 +38,6 @@ type ValidationError struct {
 
 func (e *ValidationError) Error() string {
 	return fmt.Sprintf("errores de validación: %s", strings.Join(e.Fields, "; "))
-}
-
-// IsValidationError informa si un error es de tipo ValidationError.
-func IsValidationError(err error) bool {
-	var ve *ValidationError
-	return errors.As(err, &ve)
 }
 
 // Consigna representa un registro histórico de auditoría: una consigna
@@ -61,7 +52,7 @@ type Consigna struct {
 	TemperaturaObjetivo    float64   `json:"temperaturaObjetivo"       db:"temperatura_objetivo"`
 	VelocidadCintaObjetivo float64   `json:"velocidadCintaObjetivo"    db:"velocidad_cinta_objetivo"`
 	Origen                 Origen    `json:"origen"                    db:"origen"`
-	Usuario                *string   `json:"usuario,omitempty"         db:"usuario"` // TODO(OAuth): reemplazar por identidad real cuando exista login de usuarios
+	Usuario                *string   `json:"usuario,omitempty"         db:"usuario"` // operario que envió la consigna manual (opcional)
 	Exitosa                bool      `json:"exitosa"                   db:"exitosa"`
 	MotivoError            *string   `json:"motivoError,omitempty"     db:"motivo_error"`
 	TemperaturaPrevia      *float64  `json:"temperaturaPrevia,omitempty" db:"temperatura_previa"`
@@ -78,7 +69,7 @@ type ConsignaManualRequest struct {
 	ProductoID             string  `json:"productoId"`
 	TemperaturaObjetivo    float64 `json:"temperaturaObjetivo"`
 	VelocidadCintaObjetivo float64 `json:"velocidadCintaObjetivo"`
-	Usuario                string  `json:"usuario,omitempty"` // TODO(OAuth): tomar de la sesión/JWT una vez exista auth de usuarios
+	Usuario                string  `json:"usuario,omitempty"` // nombre del operario que envía la consigna manual (opcional)
 	// LoteID es opcional: permite correlacionar un ajuste manual con el lote
 	// en curso (por ejemplo, el loteId de correlación devuelto por
 	// POST /api/v1/lotes/inicio) para que aparezca en su historial de
@@ -117,7 +108,6 @@ func (r ConsignaManualRequest) Validate() error {
 type Repository interface {
 	Save(ctx context.Context, c *Consigna) error
 	GetByLoteID(ctx context.Context, loteID string) ([]Consigna, error)
-	GetByHornoID(ctx context.Context, hornoID string, limit int) ([]Consigna, error)
 }
 
 // Service orquesta la resolución de la consigna, el despacho al controlador

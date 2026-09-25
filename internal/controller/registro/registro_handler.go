@@ -65,10 +65,6 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.svc.Issue(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, registro.ErrHostnameDuplicate) {
-			writeFlat(w, http.StatusConflict, map[string]string{"error": "Ya existe una solicitud pendiente para este hostname"})
-			return
-		}
 		log.Printf("[ERROR] Error al emitir solicitud de registro: %v", err)
 		writeFlat(w, http.StatusInternalServerError, map[string]string{"error": "Error interno del servidor"})
 		return

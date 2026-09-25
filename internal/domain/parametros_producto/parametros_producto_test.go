@@ -33,7 +33,6 @@ func TestValidate_EmptyProductoID(t *testing.T) {
 
 	err := req.Validate()
 	require.Error(t, err)
-	assert.True(t, IsValidationError(err))
 	assert.Contains(t, err.Error(), "productoId")
 }
 
@@ -140,14 +139,6 @@ func TestValidate_MultipleErrors(t *testing.T) {
 	ve, ok := err.(*ValidationError)
 	require.True(t, ok, "debe ser un *ValidationError")
 	assert.GreaterOrEqual(t, len(ve.Fields), 3)
-}
-
-func TestIsValidationError(t *testing.T) {
-	req := baseValidRequest()
-	req.ProductoID = ""
-
-	err := req.Validate()
-	assert.True(t, IsValidationError(err))
 }
 
 func TestMapRequestToParametroProducto(t *testing.T) {

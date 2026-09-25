@@ -28,7 +28,6 @@ func TestValidate_EmptyHornoID(t *testing.T) {
 
 	err := req.Validate()
 	require.Error(t, err)
-	assert.True(t, IsValidationError(err))
 	assert.Contains(t, err.Error(), "hornoId")
 }
 
@@ -95,9 +94,4 @@ func TestValidate_MultipleErrorsAggregated(t *testing.T) {
 	assert.Contains(t, err.Error(), "productoId")
 	assert.Contains(t, err.Error(), "temperaturaObjetivo")
 	assert.Contains(t, err.Error(), "velocidadCintaObjetivo")
-}
-
-func TestIsValidationError_FalseForOtherErrors(t *testing.T) {
-	assert.False(t, IsValidationError(ErrHornoNoExiste))
-	assert.False(t, IsValidationError(ErrFueraDeRango))
 }

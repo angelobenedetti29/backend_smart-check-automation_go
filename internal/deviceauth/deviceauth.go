@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 	"unicode"
 )
 
@@ -57,7 +56,6 @@ type Store interface {
 // Verifier autentica peticiones de dispositivo contra un Store de secrets.
 type Verifier struct {
 	Store Store
-	Now   func() time.Time
 }
 
 // Authenticate valida el header Authorization: Bearer <secret> y devuelve el

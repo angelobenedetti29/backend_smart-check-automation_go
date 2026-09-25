@@ -105,18 +105,6 @@ func (f *fakeConsignaRepo) GetByLoteID(ctx context.Context, loteID string) ([]co
 	return out, nil
 }
 
-func (f *fakeConsignaRepo) GetByHornoID(ctx context.Context, hornoID string, limit int) ([]consigna.Consigna, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []consigna.Consigna
-	for _, c := range f.saved {
-		if c.HornoID == hornoID {
-			out = append(out, c)
-		}
-	}
-	return out, nil
-}
-
 func (f *fakeConsignaRepo) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -31,9 +31,6 @@ type fakeService struct {
 	sectorInfo *loteSectorService.SectorInfo
 	sectorErr  error
 
-	sectores    []sector.Sector
-	sectoresErr error
-
 	abrirLote   *lotesector.Lote
 	abrirCreado bool
 	abrirErr    error
@@ -62,10 +59,6 @@ type fakeService struct {
 
 func (f *fakeService) SectorDelDispositivo(context.Context, string) (*loteSectorService.SectorInfo, error) {
 	return f.sectorInfo, f.sectorErr
-}
-
-func (f *fakeService) Sectores(context.Context) ([]sector.Sector, error) {
-	return f.sectores, f.sectoresErr
 }
 
 func (f *fakeService) Abrir(context.Context, string, string, string) (*lotesector.Lote, bool, error) {
@@ -495,35 +488,4 @@ func TestHandleSectorSinSector404(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Equal(t, "sin_sector", errorCode(t, rec))
-}
-
-// --- Sectores --------------------------------------------------------------
-
-func TestHandleSectoresOAuth(t *testing.T) {
-	secret := []byte("test-secret")
-	svc := &fakeService{sectores: []sector.Sector{
-		{ID: "sector-1", Nombre: "Horno 1"},
-		{ID: "sector-2", Nombre: "Horno 2"},
-	}}
-	h := NewLoteSectorHandler(svc)
-	wrapped := authController.JWTMiddleware(secret, h.HandleSectores)
-
-	rec := httptest.NewRecorder()
-	wrapped(rec, oauthRequest(t, http.MethodGet, "/api/v1/sectores", "", secret))
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	var env struct {
-		Data []sector.Sector `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
-	require.Len(t, env.Data, 2)
-	assert.Equal(t, "sector-1", env.Data[0].ID)
-	assert.Equal(t, "Horno 1", env.Data[0].Nombre)
-}
-
-func TestHandleSectoresMetodoNoPermitido405(t *testing.T) {
-	h := NewLoteSectorHandler(&fakeService{})
-	rec := httptest.NewRecorder()
-	h.HandleSectores(rec, httptest.NewRequest(http.MethodPost, "/api/v1/sectores", nil))
-	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }

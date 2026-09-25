@@ -85,27 +85,6 @@ func (r *ConsignaPostgresRepository) GetByLoteID(ctx context.Context, loteID str
 	return scanHistorialConsignas(rows)
 }
 
-// GetByHornoID devuelve el historial de consignas de un horno, ordenado del más reciente al más antiguo, hasta limit filas.
-func (r *ConsignaPostgresRepository) GetByHornoID(ctx context.Context, hornoID string, limit int) ([]consigna.Consigna, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-
-	rows, err := r.db.Query(ctx, `
-		SELECT `+selectHistorialConsignasColumns+`
-		FROM historial_consignas
-		WHERE horno_id = $1
-		ORDER BY creada_en DESC
-		LIMIT $2
-	`, hornoID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query historial_consignas by horno_id: %w", err)
-	}
-	defer rows.Close()
-
-	return scanHistorialConsignas(rows)
-}
-
 // scanHistorialConsignas escanea las filas resultantes de una consulta sobre historial_consignas.
 func scanHistorialConsignas(rows pgx.Rows) ([]consigna.Consigna, error) {
 	items := []consigna.Consigna{}

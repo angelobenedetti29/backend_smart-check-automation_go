@@ -26,12 +26,6 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("errores de validación: %s", strings.Join(e.Fields, "; "))
 }
 
-// IsValidationError informa si un error es de tipo ValidationError.
-func IsValidationError(err error) bool {
-	var ve *ValidationError
-	return errors.As(err, &ve)
-}
-
 // ParametroProducto representa los umbrales de control ideales de horneado
 // para una variedad de producto, tal como se persisten en PostgreSQL.
 type ParametroProducto struct {
