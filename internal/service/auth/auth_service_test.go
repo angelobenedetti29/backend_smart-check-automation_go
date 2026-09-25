@@ -13,7 +13,6 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
 )
 
-
 // --- Mocks ---
 
 type mockGoogleVerifier struct {
@@ -98,31 +97,6 @@ func TestLoginWithGoogle_UsuarioNoCorporativo(t *testing.T) {
 	assert.ErrorIs(t, err, user.ErrUserNotFound)
 }
 
-func TestLoginWithGoogle_Exitoso_RetornaJWTFirmado(t *testing.T) {
-	// DADO: token válido y usuario corporativo existente
-	verifier := &mockGoogleVerifier{
-		verifyFunc: func(ctx context.Context, idToken string) (*user.GoogleClaims, error) {
-			return &user.GoogleClaims{Email: "admin@fermar.com.ar", Name: "Admin Google"}, nil
-		},
-	}
-	repo := &mockUserRepo{
-		findByEmailFunc: func(ctx context.Context, email string) (*user.User, error) {
-			return &user.User{
-				ID:     "uuid-1",
-				Email:  "admin@fermar.com.ar",
-				Nombre: "Administrador Fermar", // nombre de la DB, no de Google
-				Rol:    user.RoleAdmin,
-			}, nil
-		},
-	}
-
-	svc := newTestService(verifier, repo)
-	tokenStr, err := svc.LoginWithGoogle(context.Background(), "valid-google-token")
-
-	require.NoError(t, err)
-	assert.NotEmpty(t, tokenStr, "el JWT no debe estar vacío")
-}
-
 func TestLoginWithGoogle_ClaimsContienenDatosCorporativos(t *testing.T) {
 	// Verificar que los claims del JWT provienen de la DB, no de Google.
 	// El nombre/rol del usuario corporativo tiene precedencia sobre el token de Google.
@@ -155,11 +129,10 @@ func TestLoginWithGoogle_ClaimsContienenDatosCorporativos(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, token.Valid)
 	assert.Equal(t, "op@fermar.com.ar", claims.Email)
-	assert.Equal(t, "Operario Fermar", claims.Name)   // nombre de la DB, no de Google
+	assert.Equal(t, "Operario Fermar", claims.Name) // nombre de la DB, no de Google
 	assert.Equal(t, user.RoleOperario, claims.Role)
 	assert.Equal(t, "smart-check-automation", claims.Issuer)
 }
-
 
 func TestLoginWithGoogle_ErrorDeInfraestructura(t *testing.T) {
 	// Error de BD que no es ErrUserNotFound — debe propagarse como error interno

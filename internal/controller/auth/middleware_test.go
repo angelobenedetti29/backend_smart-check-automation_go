@@ -112,16 +112,6 @@ func TestJWTMiddleware_AlgoritmoNone_Rechazado(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rr.Code, "alg=none debe ser rechazado")
 }
 
-func TestJWTMiddleware_TokenValido_PasaAlHandler(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/lotes-productivos", nil)
-	req.AddCookie(buildValidCookie(t, "Administrador"))
-	rr := httptest.NewRecorder()
-
-	JWTMiddleware(testSecret, dummyHandler)(rr, req)
-
-	assert.Equal(t, http.StatusOK, rr.Code)
-}
-
 func TestJWTMiddleware_CualquierRolAutenticado_PasaAlHandler(t *testing.T) {
 	for _, role := range []string{"Operario", "Supervisor", "Administrador"} {
 		t.Run(role, func(t *testing.T) {
