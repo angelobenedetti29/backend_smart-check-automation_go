@@ -37,13 +37,13 @@ func NewDispositivoHandler(svc dispositivo.Service, secure ...interface {
 	return h
 }
 
-// Handle despacha GET /api/v1/dispositivos (listar estados), POST (alta), PUT
-// (modificar) y DELETE (baja lógica) sobre la misma ruta según el método HTTP.
+// Handle despacha GET /api/v1/dispositivos (listar estados), PUT (modificar) y
+// DELETE (baja lógica) sobre la misma ruta según el método HTTP.
 //
-// La autenticación JWT de POST/PUT/DELETE se aplica en el wiring de rutas. El
-// DELETE exige rol Supervisor/Admin; el resto no restringe rol. No se reusa
-// X-API-Key: esa clave es exclusiva de las Raspberry Pi y no del panel del
-// operador.
+// POST no está expuesto: el wiring de rutas responde 405 antes de llegar aquí.
+// La autenticación JWT se aplica en el wiring: PUT y DELETE exigen rol
+// Supervisor/Admin; GET admite cualquier rol autenticado. No se reusa X-API-Key:
+// esa clave es exclusiva de las Raspberry Pi y no del panel del operador.
 func (h *DispositivoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -60,7 +60,8 @@ func (h *DispositivoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleCreate maneja POST /api/v1/dispositivos — alta de un dispositivo del
-// catálogo por nombre/ubicación desde el panel del operador.
+// catálogo. No está expuesto actualmente: el wiring de rutas responde 405 y se
+// conserva como implementación interna del handler.
 func (h *DispositivoHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	req, ok := h.decodeAndValidate(w, r)
 	if !ok {
@@ -86,8 +87,10 @@ func (h *DispositivoHandler) HandleCreate(w http.ResponseWriter, r *http.Request
 	response.JSON(w, http.StatusCreated, true, "Dispositivo creado exitosamente", estado, nil)
 }
 
-// HandleUpdate maneja PUT /api/v1/dispositivos — modifica nombre/ubicación de un
-// dispositivo existente, identificado por dispositivoId en el body.
+// HandleUpdate maneja PUT /api/v1/dispositivos — modifica la asignación de
+// sector (sectorId) y la URL WHEP de un dispositivo existente, identificado por
+// dispositivoId en el body. El nombre es inmutable desde el panel: solo el
+// rename autenticado del nodo puede cambiarlo.
 func (h *DispositivoHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	req, ok := h.decodeAndValidateUpdate(w, r)
 	if !ok {

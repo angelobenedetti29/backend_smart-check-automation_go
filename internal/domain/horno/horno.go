@@ -18,7 +18,7 @@ type Horno struct {
 	VelocidadCinta float64   `json:"velocidad_cinta"`       // Velocidad activa de la cinta transportadora (m/s)
 	ProductoID     *string   `json:"producto_id,omitempty"` // Producto activo actualmente en el horno (última consigna aplicada)
 	LoteID         *string   `json:"lote_id,omitempty"`     // Lote de correlación de la última consigna aplicada
-	Estado         string    `json:"estado"`                // "ACTIVO", "INACTIVO", "MANTENIMIENTO"
+	Estado         string    `json:"estado"`                // "ACTIVO", "ATENCION", "MANTENIMIENTO", "CONTROL_MANUAL"
 	UltimoCheck    time.Time `json:"ultimo_check"`          // Timestamp of the last check
 }
 

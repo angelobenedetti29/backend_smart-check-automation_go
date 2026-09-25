@@ -16,9 +16,9 @@ const maxRequestBodyBytes = 1 << 20 // 1 MB
 // ConsignaHandler maneja los endpoints HTTP del envío manual de consigna
 // térmica al horno (SCA-320) y la consulta de su historial de auditoría.
 //
-// NOTA: este endpoint todavía no requiere autenticación de usuario porque el
-// login con Google OAuth 2.0 está pendiente (ver CLAUDE.md), igual que
-// parametros_producto. Cuando se implemente, debería restringirse a Operario/Supervisor.
+// NOTA: los endpoints exigen JWT (cookie session_token) y rol Operario,
+// Supervisor o Administrador; el control de rol se aplica en el wiring de rutas
+// (ver cmd/server/main.go).
 type ConsignaHandler struct {
 	service consigna.Service
 }
@@ -74,8 +74,8 @@ func (h *ConsignaHandler) DispatchManual(w http.ResponseWriter, r *http.Request)
 }
 
 // GetHistorial maneja GET /api/v1/horno/consigna/historial?loteId=... — devuelve
-// el historial de auditoría de consignas (automáticas y manuales) de un lote,
-// para que el panel de control pueda mostrarlo.
+// el historial de auditoría de consignas de un lote, para que el panel de
+// control pueda mostrarlo.
 func (h *ConsignaHandler) GetHistorial(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)

@@ -2,7 +2,8 @@ package alerta
 
 import "time"
 
-// Alerta represents an industrial alert generated during operation check anomalies.
+// Alerta representa una alerta industrial generada durante la operación ante
+// anomalías detectadas.
 type Alerta struct {
 	ID        string    `json:"id"`
 	HornoID   string    `json:"horno_id"`
@@ -11,7 +12,7 @@ type Alerta struct {
 	CreadaEn  time.Time `json:"creada_en"`
 }
 
-// Repository defines the storage interface for alert events.
+// Repository define el contrato de persistencia de los eventos de alerta.
 type Repository interface {
 	Save(alerta *Alerta) error
 	GetByHornoID(hornoID string) ([]Alerta, error)
