@@ -11,7 +11,7 @@ Los datos son enviados por nodos Raspberry Pi via HTTP.
 - Infraestructura: Docker + Docker Compose
 - Frontend: Next.js (React) — consumidor de esta API
 - Autenticación (usuarios): Google OAuth 2.0 + credenciales locales (bcrypt) → JWT HttpOnly cookie
-- Autenticación (Raspberry Pi → API): secret por nodo vía header `Authorization: Bearer <secret>` (enrolamiento con identidad Ed25519)
+- Autenticación (Raspberry Pi → API): secret por nodo vía header `Authorization: Bearer <secret>`; el nodo pide el alta, un Supervisor/Admin la aprueba y el backend guarda solo `SHA-256(secret)` (`secret_hash`). Ver `docs/device-registration-contract.md`
 
 ## Convenciones del equipo
 - Nombres de structs: PascalCase
@@ -68,7 +68,7 @@ backend_smart-check-automation_go/
 │   │   ├── devicetoken/                             # Middleware BeforeMux: auth Bearer de nodos Raspberry Pi
 │   │   ├── dualauth/                                # Auth dual (Bearer de dispositivo o cookie JWT)
 │   │   ├── horno/                                   # GET /api/v1/horno, POST /api/v1/horno/temperatura
-│   │   ├── lote_sector/                             # GET /api/v1/sectores|/dispositivos/sector, POST /api/v1/lotes/inicio|{id}/eventos|{id}/cierre, GET /api/v1/lotes|/lotes/abierto
+│   │   ├── lote_sector/                             # GET /api/v1/dispositivos/sector, POST /api/v1/lotes/inicio|{id}/eventos|{id}/cierre, GET /api/v1/lotes|/lotes/abierto
 │   │   ├── parametros_producto/                     # Handler GET/POST/PUT /api/v1/parametros-producto
 │   │   ├── producto/                                # GET /api/v1/productos
 │   │   ├── registro/                                # POST|GET /api/v1/registration-requests (+ approve/reject)
@@ -103,7 +103,7 @@ backend_smart-check-automation_go/
 │   │   └── user_postgres_repository.go              # PostgreSQL — CRUD usuarios
 │   └── service/
 │       ├── auth/                                    # LoginWithGoogle, LoginWithCredentials, generateJWT
-│       ├── consigna/                                # Despacho automático/manual de consigna
+│       ├── consigna/                                # Despacho manual de consigna (SCA-320)
 │       ├── dispositivo/                             # Lógica de ping, reaper y SSE
 │       ├── horno/                                   # Lógica de umbrales térmicos y alertas
 │       ├── lote_sector/                             # Ciclo de lote por sector (apertura, eventos, cierre, historial)
@@ -113,7 +113,7 @@ backend_smart-check-automation_go/
 │       ├── sector/                                  # CRUD de sectores (slug de id, borrado bloqueado con lotes)
 │       └── user/                                    # ListUsers, CreateUser, UpdateUser
 ├── pkg/response/response.go                         # Envelope JSON estándar {success, message, data, errors}
-├── database/schema.sql                              # DDL: productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo + historial_consignas + usuarios
+├── database/schema.sql                              # DDL: productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo + historial_consignas + usuarios + sectores + eventos_lote + registration_requests + device_lifecycle_audit
 ├── Dockerfile                                       # Multi-stage build: golang:1.25-alpine → alpine
 ├── docker-compose.yml
 ├── .env.example                                     # Plantilla de variables
@@ -127,7 +127,10 @@ backend_smart-check-automation_go/
 - **parametros_producto**: Umbrales ideales y setpoints de cocción.
 - **sectores**: Sectores de producción (`id` legible tipo slug, `nombre`). Un dispositivo pertenece a un sector (`dispositivos.sector_id`, nullable); la columna legacy `dispositivos.ubicacion` fue eliminada y sus valores migrados a sectores al arrancar (migración idempotente; si dos dispositivos del mismo tipo comparten ubicación solo el primero queda asignado, y nunca viola `uq_dispositivos_sector_tipo`). El `DROP COLUMN` es irreversible: un rollback al binario anterior requiere restaurar la columna. El deploy de frontend y backend debe ser coordinado (el decoder es estricto: `ubicacion` vs `sectorId`).
 - **dispositivos** & **metricas_dispositivo**: Nodos Raspberry Pi y telemetría (CPU/RAM/Temp).
-- **historial_consignas**: Auditoría de consignas enviadas al horno (automáticas/manuales).
+- **historial_consignas**: Auditoría de las consignas manuales enviadas al horno. `origen='AUTOMATICO'` solo aparece en registros históricos: el despacho automático (SCA-142) fue retirado y hoy solo se despacha consigna manual (SCA-320).
+- **registration_requests**: Solicitudes de enrolamiento de nodos (`PENDING`/`APPROVED`/`REJECTED`/`EXPIRED`) con `request_id` y secret de un solo uso.
+- **eventos_lote**: Detecciones individuales reportadas por los nodos, deduplicadas por `evento_id`, que alimentan los conteos del lote.
+- **device_lifecycle_audit**: Traza de auditoría del ciclo de vida de dispositivos (approve/reject del alta, baja lógica) con actor y estados anterior/nuevo.
 - **usuarios**: Autenticación corporativa (Email, Rol, Password Hash).
 
 Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario@fermar.com.ar`. Contraseña seed: `password123`.
@@ -137,6 +140,7 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | Método | Ruta | Auth | Rol mínimo |
 |---|---|---|---|
 | GET | /health | — | — |
+| GET | /healthz | — | — |
 | POST | /api/v1/auth/login | — | — |
 | POST | /api/v1/auth/google | — | — |
 | POST | /api/v1/auth/logout | — | — |
@@ -161,6 +165,8 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | POST | /api/v1/dispositivos/ping | Bearer dispositivo | — |
 | GET | /api/v1/dispositivos | JWT cookie | cualquier rol |
 | PUT | /api/v1/dispositivos | JWT cookie | Supervisor, Admin |
+| DELETE | /api/v1/dispositivos | JWT cookie | Supervisor, Admin |
+| PUT | /api/v1/dispositivos/nombre | Bearer dispositivo | — |
 | GET | /api/v1/dispositivos/metricas | JWT cookie | cualquier rol |
 | GET | /api/v1/dispositivos/events | JWT cookie | cualquier rol |
 | POST | /api/v1/horno/consigna | JWT cookie | Operario, Supervisor, Admin |
@@ -173,21 +179,22 @@ Nota: `POST /api/v1/lotes/inicio` ya **no dispara consigna automática**; solo a
 ## Decisiones de arquitectura tomadas
 
 - **JWT en cookie HttpOnly**: `session_token` — HttpOnly+Secure+SameSite=Strict.
-- **RBAC en middleware**: `RequireRole([]string{...})` se encadena después de `JWTMiddleware`. Roles: `Administrador > Supervisor > Operario`.
+- **RBAC en middleware**: `RequireRoleFromDB(...)` se encadena después de `JWTMiddleware` y re-lee rol/activo desde la DB en cada request. Roles: `Administrador > Supervisor > Operario`.
 - **Bcrypt para contraseñas locales**: `DefaultCost`. Usuarios Google-only tienen `password_hash = NULL`.
 - **Estado de dispositivos en caché en memoria + historial en PostgreSQL**: `MemoryDispositivoStateStore` para lecturas rápidas; historial append-only en `metricas_dispositivo`.
 - **Detección de offline con reaper en background**: `StartReaper` corre cada `DISPOSITIVO_REAPER_INTERVAL`.
-- **Mecanismo de consigna compartido**: `ConsignaService` gestiona tanto consignas automáticas (SCA-142) como manuales (SCA-320).
+- **Consigna solo manual**: `ConsignaService` despacha únicamente consignas manuales (SCA-320); el despacho automático (SCA-142) fue retirado.
 
 ## Variables de entorno
 
 | Variable | Descripción |
 |---|---|
-| `DATABASE_URL` | Conexión a PostgreSQL (Aiven o Docker local) |
+| `DATABASE_URL` | Conexión a PostgreSQL (Aiven PostgreSQL 16 o Docker local) |
+| `FRONTEND_ORIGINS` | Orígenes permitidos por CORS para el panel, separados por coma (default `http://localhost:3000,http://127.0.0.1:3000`) |
 | `JWT_SECRET` | Clave de firma del JWT. Mínimo 32 chars. |
 | `GOOGLE_CLIENT_ID` | Client ID de Google Cloud Console |
 | `LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS` | Inactividad mínima (segundos) para aceptar un cierre de lote (default 0 = no enforce) |
 | `PORT` | Puerto HTTP (default 8080) |
 | `DISPOSITIVO_REAPER_INTERVAL` | Intervalo del reaper (default 5s) |
-| `DISPOSITIVO_OFFLINE_THRESHOLD` | Umbral de inactividad (default 25s) |
+| `DISPOSITIVO_OFFLINE_THRESHOLD` | Umbral de inactividad (default 90s) |
 | `TEST_DATABASE_URL` | Opcional — activa tests de integración con DB real |

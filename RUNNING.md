@@ -9,7 +9,14 @@
 
 ## 1. Configurar variables de entorno
 
-Crear el archivo `.env` en la raíz del proyecto (ya existe si clonaste el repo con él):
+`.env` está en `.gitignore`, así que **no viene con el clone**. Copiar la plantilla y
+completar los valores:
+
+```bash
+cp .env.example .env
+```
+
+Variables requeridas:
 
 ```env
 POSTGRES_USER=smartcheck
@@ -17,11 +24,17 @@ POSTGRES_PASSWORD=smartcheck123
 POSTGRES_DB=smart_check
 
 DATABASE_URL=postgres://smartcheck:smartcheck123@localhost:5432/smart_check?sslmode=disable
-API_KEY_SECRET=dev-secret-key
+JWT_SECRET=una-clave-de-firma-de-al-menos-32-caracteres
+GOOGLE_CLIENT_ID=tu-client-id.apps.googleusercontent.com
+FRONTEND_ORIGINS=http://localhost:3000
 PORT=8080
 ```
 
-> El `.env` está en `.gitignore` — nunca se commitea con credenciales reales.
+> `JWT_SECRET` y `GOOGLE_CLIENT_ID` son obligatorios: el servidor no arranca sin ellos
+> (`cmd/server/main.go`). `FRONTEND_ORIGINS` define los orígenes permitidos por CORS
+> (si se omite, el default es `http://localhost:3000,http://127.0.0.1:3000`).
+> En producción la base es **Aiven PostgreSQL 16**; el `DATABASE_URL` de arriba es solo
+> para el Docker local.
 
 ---
 
@@ -52,61 +65,57 @@ app-1  | Server running on http://localhost:8080
 # Chequeo de salud (DB conectada)
 curl http://localhost:8080/health
 
-# Listar lotes productivos (vacío al principio)
-curl http://localhost:8080/api/v1/lotes-productivos
+# Historial de lotes por sector (vacío al principio; requiere Bearer de dispositivo o cookie JWT)
+curl http://localhost:8080/api/v1/lotes
 
-# Listar parámetros por producto (ya viene con el seed de Tostada Integral)
+# Listar parámetros por producto (requiere cookie JWT; ya viene con el seed de Tostada Integral)
 curl http://localhost:8080/api/v1/parametros-producto
 ```
 
 ---
 
-## 4. Probar el POST desde Postman
+## 4. Probar el ciclo de lote
+
+El alta legada `POST /api/v1/lotes` (un lote ya finalizado) **fue retirada y responde `405`**.
+El ciclo actual se inicia con `POST /api/v1/lotes/inicio`, que abre y persiste el lote
+abierto del sector y **no dispara consigna**. Requiere `Authorization: Bearer <secret>`
+del dispositivo (el secret del `device.json` aprobado), no un header de API key.
 
 1. Método: `POST`
-2. URL: `http://localhost:8080/api/v1/lotes`
+2. URL: `http://localhost:8080/api/v1/lotes/inicio`
 3. Headers:
    - `Content-Type: application/json`
-   - `X-API-Key: dev-secret-key`
+   - `Authorization: Bearer <secret del dispositivo>`
 4. Body (raw JSON):
 
 ```json
 {
-  "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-  "productoNombre": "Tostada Integral",
-  "turno": "tarde",
-  "inicioAt": "2026-06-12T14:00:00Z",
-  "finAt": "2026-06-12T18:00:00Z",
-  "totalUnidades": 500,
-  "correctos": 480,
-  "quemados": 20,
-  "crudas": null,
-  "correctosKg": 96.0,
-  "quemadosKg": 4.0,
-  "crudosKg": null,
-  "tempHorno1": 188.0,
-  "tempHorno2": 192.0,
-  "velocidadCinta": 1.1,
-  "createdAt": "2026-06-12T14:00:00Z",
-  "updatedAt": "2026-06-12T18:00:00Z"
+  "idempotency_key": "0f8fad5b-d9cb-469f-a165-70867728950e",
+  "producto_id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "momento": "2026-08-06T12:00:00Z"
 }
 ```
 
-Después hacer GET a `http://localhost:8080/api/v1/lotes-productivos` para ver el lote creado.
+Después hacer GET a `http://localhost:8080/api/v1/lotes` (con la misma credencial) para
+ver el lote abierto/creado.
 
-> El `productoId` del ejemplo es el único producto sembrado por el schema (`Tostada Integral`).
-> Usar un UUID diferente devuelve error de FK.
+> El `producto_id` del ejemplo es uno de los 6 productos sembrados por el schema.
+> Usar un UUID inexistente devuelve `422 producto_desconocido`.
+
+> Detalle completo de request/response en [`docs/api-endpoints.md`](docs/api-endpoints.md) §6.
 
 ---
 
 ## 4bis. Probar el ABM de parámetros por producto
 
-No requiere `X-API-Key` (endpoints del panel de configuración del Supervisor, sin auth de usuario todavía).
+Requiere cookie JWT `session_token` (endpoints del panel de configuración; las escrituras
+`POST`/`PUT` exigen rol Supervisor o Admin).
 
 **Modificar el rango de temperatura de un producto existente (PUT):**
 
 ```bash
 curl -X PUT http://localhost:8080/api/v1/parametros-producto \
+  -b "session_token=<JWT>" \
   -H "Content-Type: application/json" \
   -d '{
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",

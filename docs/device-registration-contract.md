@@ -16,8 +16,9 @@ ni clave pública.
 2. **El backend guarda la solicitud** con estado `PENDING`. Un hostname no puede
    tener más de una solicitud `PENDING` (índice único parcial): repetir el alta
    devuelve la misma.
-3. **El supervisor la ve** — `GET /api/v1/registration-requests?status=PENDING`, con
-   cookie JWT. Devuelve el envelope estándar con las solicitudes pendientes.
+3. **El supervisor la ve** — `GET /api/v1/registration-requests`, con
+   cookie JWT. Devuelve el envelope estándar con las solicitudes pendientes
+   (siempre `PENDING`; el backend ignora cualquier filtro `status`).
 4. **El supervisor aprueba o rechaza** — `POST /api/v1/registration-requests/{id}/approve`
    o `/reject`, cookie JWT y rol Supervisor/Admin. Aprobar crea el dispositivo
    (`nombre = hostname`, `auth_status='active'`), genera `device_id` (UUID de
@@ -36,7 +37,7 @@ ni clave pública.
 | Método | Ruta | Auth | Formato |
 |---|---|---|---|
 | POST | `/api/v1/registration-requests` | público | plano |
-| GET | `/api/v1/registration-requests?status=PENDING` | JWT Supervisor/Admin | envelope |
+| GET | `/api/v1/registration-requests` | JWT Supervisor/Admin | envelope |
 | POST | `/api/v1/registration-requests/{id}/approve` | JWT Supervisor/Admin | envelope |
 | POST | `/api/v1/registration-requests/{id}/reject` | JWT Supervisor/Admin | envelope |
 | GET | `/api/v1/registration-requests/{id}` | público | plano |
@@ -53,8 +54,10 @@ Errores de aprobación: `404` solicitud inexistente, `409` no está `PENDING`,
 
 ## Autenticación de nodos
 
-POST protegidos: `/api/v1/dispositivos/ping`, `/api/v1/lotes`,
-`/api/v1/lotes/inicio`. El middleware `internal/controller/devicetoken` corre
+Endpoints device-only: `POST /api/v1/dispositivos/ping`,
+`POST /api/v1/lotes/inicio`, `POST /api/v1/lotes/{id}/eventos`,
+`POST /api/v1/lotes/{id}/cierre`, `GET /api/v1/dispositivos/sector` y
+`PUT /api/v1/dispositivos/nombre`. El middleware `internal/controller/devicetoken` corre
 antes del `ServeMux`, exige exactamente un header `Authorization: Bearer <token>`,
 hashea el token y resuelve el dispositivo activo por `secret_hash`. El principal
 (`deviceauth.Principal{DeviceID}`) se inyecta en el contexto: los handlers y

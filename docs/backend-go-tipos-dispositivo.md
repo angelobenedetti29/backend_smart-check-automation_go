@@ -73,9 +73,11 @@ de otras propiedades.
 }
 ```
 
-Aplica al listado `GET /api/v1/dispositivos` (`DeviceRead`), a las respuestas de alta
-/ modificación del panel (`EstadoDispositivo`) y al `Pickup` de la solicitud. El alta
-manual por panel (`POST /api/v1/dispositivos`) también requiere `type`.
+Aplica al listado `GET /api/v1/dispositivos` (`DeviceRead`), a las respuestas de
+modificación del panel (`EstadoDispositivo`) y al `Pickup` de la solicitud. El alta
+manual por panel vía `POST /api/v1/dispositivos` **no está expuesta** (responde
+405): el panel usa `GET`, `PUT` y `DELETE`, y el alta se realiza por el flujo de
+registro (`POST /api/v1/registration-requests`).
 
 ## 5. Fuera de alcance
 

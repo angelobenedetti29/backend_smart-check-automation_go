@@ -111,7 +111,7 @@ Reglas clave:
 - **Catálogo**: usar `GET /productos` para el selector (filtrar `activo: true`) o
   seguir con `/parametros-producto` para la configuración de umbrales.
 - **Consigna**: si se necesita consigna manual desde el panel, agregar UI sobre
-  `POST /api/v1/horno/consigna` (no existe hoy).
+  `POST /api/v1/horno/consigna` (UI aún no existe; el endpoint ya está disponible, SCA-320).
 
 ## 8. Checklist de archivos a tocar
 

@@ -1,6 +1,6 @@
 # Referencia de la API — Smart-Check Automation Backend
 
-Documentación de **todos** los endpoints HTTP expuestos por el backend, con su propósito, contrato exacto y un ejemplo real. Los ejemplos usan `curl` contra `http://localhost:8080` (o el `PORT` configurado).
+Documentación detallada de los endpoints de dominio del backend, con su propósito, contrato exacto y un ejemplo real. No cubre auth de usuarios ni administración: para el inventario completo (auth, admin de usuarios, registration-requests y `dispositivos/nombre`) ver `CLAUDE.md`, y para el contrato de enrolamiento `docs/device-registration-contract.md`. Los ejemplos usan `curl` contra `http://localhost:8080` (o el `PORT` configurado).
 
 ## Convenciones generales
 
@@ -532,7 +532,9 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
 | 422 | Validación de negocio falló, o `dispositivoId` no existe en el catálogo |
 | 500 | Error interno |
 
-**Reglas de validación:** `dispositivoId` requerido y UUID válido · `cpuPct` ∈ [0,100] · `memRamDisponibleMb >= 0` · `memRamTotalMb` opcional y >= 0; si se informa, `memRamDisponibleMb <= memRamTotalMb` · `almacenamientoDisponibleMb` y `almacenamientoTotalMb` forman un par opcional: deben omitirse ambos o informarse ambos, ser >= 0 y cumplir `almacenamientoDisponibleMb <= almacenamientoTotalMb` · `tempChip` ∈ [-40,120] · `aiProcessorPct` ∈ [0,100].
+**`dispositivoId` es opcional e ignorado:** la identidad la toma el servidor del principal Bearer verificado (`devicetoken`); el valor que llegue en el body se descarta antes de validar, por lo que un id distinto o no-UUID en el body no cambia el dispositivo destino.
+
+**Reglas de validación:** `dispositivoId` opcional e ignorado (el servidor usa el del Bearer) · `cpuPct` ∈ [0,100] · `memRamDisponibleMb >= 0` · `memRamTotalMb` opcional y >= 0; si se informa, `memRamDisponibleMb <= memRamTotalMb` · `almacenamientoDisponibleMb` y `almacenamientoTotalMb` forman un par opcional: deben omitirse ambos o informarse ambos, ser >= 0 y cumplir `almacenamientoDisponibleMb <= almacenamientoTotalMb` · `tempChip` ∈ [-40,120] · `aiProcessorPct` ∈ [0,100].
 
 ---
 
@@ -557,17 +559,17 @@ curl -b "session_token=$JWT" http://localhost:8080/api/v1/dispositivos
 
 El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #14. El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: es opcional y nullable; se omite cuando el dispositivo no tiene cámara configurada. El campo `sectorId` es el sector al que pertenece el dispositivo (nullable); la columna legacy `ubicacion` fue eliminada y sus valores migrados a sectores.
 
-**Modificación (`PUT`):** el body acepta `nombre` (requerido), `sectorId` (string o `null`) y `whepUrl` (string opcional). `dispositivoId` debe ser un UUID válido (422 en caso contrario). **Semántica de `sectorId`:** al ser un PUT de reemplazo, **omitir la clave equivale a enviar `null`** (desasigna el dispositivo del sector); el frontend siempre la envía explícitamente para no desasignar al editar solo nombre/WHEP. Un `sectorId` inexistente → 400; violar el índice único `uq_dispositivos_sector_tipo` → 409. Si `whepUrl` se omite o se envía vacío, el dispositivo queda sin stream (`NULL`); si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario 422.
+**Modificación (`PUT`):** el body acepta únicamente `dispositivoId` (requerido; debe ser un UUID válido, 422 en caso contrario), `sectorId` (string o `null`) y `whepUrl` (string opcional). El `nombre` es **inmutable desde el panel**: el decoder estricto rechaza campos desconocidos (incluido `nombre`), y solo el rename autenticado del nodo (`PUT /api/v1/dispositivos/nombre`) puede cambiarlo. **Semántica de `sectorId`:** al ser un PUT de reemplazo, **omitir la clave equivale a enviar `null`** (desasigna el dispositivo del sector); el frontend siempre la envía explícitamente para no desasignar al editar solo WHEP. Un `sectorId` inexistente → 400; violar el índice único `uq_dispositivos_sector_tipo` → 409. Si `whepUrl` se omite o se envía vacío, el dispositivo queda sin stream (`NULL`); si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario 422.
 
 ```json
-{ "nombre": "Raspberry Pi Horno 1", "sectorId": "horno-1", "whepUrl": "https://camaras.example.com/whep/horno-1" }
+{ "dispositivoId": "b1c2d3e4-5678-90ab-cdef-1234567890ab", "sectorId": "horno-1", "whepUrl": "https://camaras.example.com/whep/horno-1" }
 ```
 
 | Código | Motivo |
 |---|---|
-| 405 | Método distinto de GET/PUT |
+| 405 | Método distinto de GET/PUT/DELETE |
 | 401 | Falta la cookie JWT o la sesión es inválida/expirada |
-| 403 | Rol insuficiente en PUT |
+| 403 | Rol insuficiente en PUT (se requiere Supervisor o Administrador) |
 | 415 | `Content-Type` inválido en PUT |
 | 400 | JSON inválido en PUT, o `sectorId` no existe |
 | 409 | El sector ya tiene un dispositivo de ese tipo (`ENTRADA_HORNO`/`SALIDA_HORNO`) |
@@ -628,7 +630,7 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos/metricas
 
 ## 17. `POST /api/v1/horno/consigna` — Envío manual de consigna térmica — SCA-320
 
-Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual, que es el que usa el flujo automático).
+Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual).
 
 **Auth:** cookie JWT `session_token` con rol Operario, Supervisor o Administrador. `Content-Type: application/json` obligatorio.
 
@@ -676,7 +678,7 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
 
 ## 18. `GET /api/v1/horno/consigna/historial` — Historial de auditoría por lote
 
-Devuelve todas las consignas (automáticas y manuales) asociadas a un `loteId`, ordenadas de más reciente a más antigua.
+Devuelve todas las consignas asociadas a un `loteId`, ordenadas de más reciente a más antigua. `origen='AUTOMATICO'` solo aparece en registros históricos: el despacho automático (SCA-142) fue retirado.
 
 **Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `loteId` (requerido).
 
@@ -711,7 +713,7 @@ Los tres comparten el mismo handler genérico, cada uno con su propio broker (si
 |---|---|
 | `GET /api/v1/lotes/events` | `lote.creado`, `lote.actualizado` y `lote.cerrado` — el payload es el objeto lote crudo |
 | `GET /api/v1/dispositivos/events` | `dispositivo.metric` (cada ping) y `dispositivo.state` (transición online↔offline) |
-| `GET /api/v1/horno/events` | `horno.consigna` — cada vez que se despacha una consigna (automática o manual, exitosa o fallida) |
+| `GET /api/v1/horno/events` | `horno.consigna` — cada vez que se despacha una consigna manual (exitosa o fallida) |
 
 El evento `dispositivo.metric` contiene el mismo envelope y estado que el ping REST.
 

@@ -2,7 +2,7 @@
 -- Smart-Check Automation — Fermar S.A.
 -- Esquema de Base de Datos PostgreSQL (MVP)
 -- Versión: 1.1
--- Motor:  PostgreSQL 15+ (Aiven Cloud, AWS sa-east-1)
+-- Motor:  PostgreSQL 16 (Aiven Cloud, AWS sa-east-1)
 -- ============================================================================
 -- Este script crea la estructura completa del modelo de datos para:
 --   1. Tabla maestra: productos

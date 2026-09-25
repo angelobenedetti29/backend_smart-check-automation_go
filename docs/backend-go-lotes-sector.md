@@ -1,14 +1,13 @@
-# Backend Go — sector, lotes y estados (pendiente)
+# Backend Go — sector, lotes y estados
 
-El backend Go que aprueba los registros y recibe la telemetría es **externo a este
-repositorio**. Este documento define el contrato que debe implementar para soportar
-**lotes coordinados entre dos Raspberrys de un mismo sector**, con **reporte de estados
-en vivo** y **conteo final al cierre**. La app Python de la Raspberry (`backend/lote/`,
-a implementar) es la que consume este contrato.
+Este documento define el contrato que soporta **lotes coordinados entre dos Raspberrys
+de un mismo sector**, con **reporte de estados en vivo** y **conteo final al cierre**.
+La app Python de la Raspberry (`backend/lote/`) es la que consume este contrato.
 
-El backend **todavía no tiene estos cambios**: hoy expone un flujo de lote más simple
-(`POST /api/v1/lotes` con conteos finales y `POST /api/v1/lotes/inicio`). Este documento
-es la spec de lo nuevo; §15 detalla qué reemplaza.
+El backend Go de este repositorio **ya implementa este contrato**: el ciclo se inicia con
+`POST /api/v1/lotes/inicio`, reporta con `POST /api/v1/lotes/{id}/eventos` y cierra con
+`POST /api/v1/lotes/{id}/cierre`. §15 quedó como **referencia histórica** del flujo legado,
+ya retirado.
 
 Convenciones generales tomadas del backend actual (`docs/api-endpoints.md`): envelope
 `{ "success", "message", "data", "errors" }`, rutas bajo `/api/v1/`, y SSE para lo vivo.
@@ -34,7 +33,8 @@ Convenciones generales tomadas del backend actual (`docs/api-endpoints.md`): env
 - **Base**: `api.base_url` de la config de la Pi. Los endpoints se declaran como
   endpoints nombrados en `api.*` (§14).
 - **Auth**: depende del consumidor (§1.1). La Raspberry usa el `secret` del `device.json`
-  aprobado (`Authorization: Bearer <secret>`), que reemplaza al `X-API-Key` compartido
+  aprobado (`Authorization: Bearer <secret>`), que reemplazó al header de API key
+  compartido
   para estos endpoints. El frontend web usa su OAuth existente (cookie JWT
   `session_token`). Los endpoints que consumen ambos aceptan cualquiera de las dos
   credenciales.
@@ -413,28 +413,30 @@ base: no duplicar rutas en el JSON.
 }
 ```
 
-## 15. Relación con los endpoints actuales
+## 15. Relación con los endpoints actuales (histórico)
 
-El backend hoy tiene (según `docs/api-endpoints.md`):
+> ⚠️ **Histórico.** Esta sección describe el flujo legado tal como estaba cuando se redactó
+> el contrato. Ese flujo ya fue retirado; se conserva solo como registro.
 
-- `POST /api/v1/lotes` — persiste un lote **ya finalizado** con `productoId`, `turno`,
+El backend contaba con:
+
+- `POST /api/v1/lotes` — persistía un lote **ya finalizado** con `productoId`, `turno`,
   `inicioAt`, `finAt`, `totalUnidades`, `correctos`, `quemados`, `crudas`, kg, etc.
-- `POST /api/v1/lotes/inicio` — dispara consigna automática al identificar el producto;
-  no persiste lote.
-- `GET /api/v1/lotes-productivos` — historial paginado.
+  **Hoy responde `405 Method Not Allowed`.**
+- `POST /api/v1/lotes/inicio` — disparaba consigna automática al identificar el producto.
+  **Hoy abre/persiste el lote abierto del sector y ya no dispara consigna** (SCA-142
+  retirado; la consigna es manual-only vía `POST /api/v1/horno/consigna`).
+- El listado global de lotes paginado — **eliminado**; el historial ahora es
+  `GET /api/v1/lotes` por sector (§8).
 
-Este contrato los reemplaza/extiende:
+Este contrato los reemplazó/extendió:
 
-- `POST /api/v1/lotes/inicio` pasa a **abrir y persistir** un lote abierto por sector
+- `POST /api/v1/lotes/inicio` ahora **abre y persiste** un lote abierto por sector
   (§5), en vez de solo generar un id de correlación.
 - `POST /api/v1/lotes/{id}/eventos` y `POST /api/v1/lotes/{id}/cierre` son nuevos (§6, §7).
-- `GET /api/v1/lotes` reemplaza a `GET /api/v1/lotes-productivos` para el historial del
-  sector (§8). El vocabulario `correctos/quemados/crudas` se reemplaza por
-  `ok/crudo/quemado` en `conteos`.
-- Se agregan `GET /api/v1/productos` (§2) y `GET /api/v1/dispositivos/sector` (§3).
-
-Queda a decisión del backend mantener los endpoints viejos por compatibilidad o
-reemplazarlos; la Pi nueva usa solo los de este documento.
+- `GET /api/v1/lotes` cubre el historial del sector (§8). El vocabulario
+  `correctos/quemados/crudas` se reemplaza por `ok/crudo/quemado` en `conteos`.
+- Se agregaron `GET /api/v1/productos` (§2) y `GET /api/v1/dispositivos/sector` (§3).
 
 ## 16. Fuera de alcance
 

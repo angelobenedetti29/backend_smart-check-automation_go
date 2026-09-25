@@ -1,5 +1,22 @@
 # Consigna térmica al horno — SCA-142 (automática) y SCA-320 (manual)
 
+> ⚠️ **HISTÓRICO / OBSOLETO.** Este documento describe la consigna automática de la era
+> **SCA-142**. El código y el flujo actuales difieren:
+>
+> - `POST /api/v1/lotes/inicio` **ya no despacha consigna**: solo abre/persiste el lote
+>   abierto del sector (ver [`api-endpoints.md`](api-endpoints.md) §6 y
+>   [`../CLAUDE.md`](../CLAUDE.md)).
+> - Ya **no existe** autenticación por header de API key compartido para nodos; cada
+>   dispositivo usa `Authorization: Bearer <secret>`.
+> - La consigna es **manual-only** (SCA-320) vía `POST /api/v1/horno/consigna`, con auth
+>   JWT (roles Operario/Supervisor/Admin).
+> - El archivo `internal/controller/lote/lote_handler.go` **ya no existe**; el ciclo de
+>   lote vive en `internal/controller/lote_sector/` y la consigna en
+>   `internal/controller/consigna/`.
+>
+> Las secciones marcadas como históricas se conservan solo como registro de la
+> implementación original de SCA-142.
+
 ## 1. Qué resuelven estas dos historias
 
 | | SCA-142 | SCA-320 |
@@ -8,7 +25,7 @@
 | Endpoint | `POST /api/v1/lotes/inicio` | `POST /api/v1/horno/consigna` |
 | Valor a despachar | `temp_setpoint` / `velocidad_cinta_setpoint` precargados para el producto | Lo que el operario ingresa en el formulario |
 | Validación | El producto debe tener setpoints cargados | El valor ingresado debe caer dentro de `[temp_min, temp_max]` / `[velocidad_cinta_min, velocidad_cinta_max]` del producto |
-| Auth | `X-API-Key` (mismo esquema que `POST /api/v1/lotes`, origen Raspberry Pi) | Sin auth por ahora (mismo criterio que `parametros_producto`, pendiente Google OAuth) |
+| Auth | Bearer secret del nodo (el header de API key compartido está retirado) | JWT `session_token` (Operario/Supervisor/Admin) |
 | `origen` en la auditoría | `AUTOMATICO` | `MANUAL` (+ `usuario`, best-effort) |
 
 Ambas terminan en el mismo mecanismo compartido — no hay dos implementaciones paralelas, solo dos puertas de entrada distintas al mismo `ConsignaService`.
@@ -17,12 +34,12 @@ Ambas terminan en el mismo mecanismo compartido — no hay dos implementaciones 
 
 ```
                     ┌─────────────────────────────┐
-Raspberry Pi ──────►│ POST /api/v1/lotes/inicio    │  (SCA-142, X-API-Key)
+Raspberry Pi ──────►│ POST /api/v1/lotes/inicio    │  (SCA-142, Bearer secret — retirado)
 (IA detecta          └──────────────┬──────────────┘
  producto)                          │
                                      ▼
 Operario (panel) ──►┌─────────────────────────────┐
- POST /api/v1/       │ ConsignaService.dispatch()   │  (SCA-320, sin auth)
+ POST /api/v1/       │ ConsignaService.dispatch()   │  (SCA-320, JWT)
  horno/consigna      └──────────────┬──────────────┘
                                      │
         ┌────────────────────────────┼────────────────────────────┐
@@ -48,7 +65,7 @@ parametros_producto           oven_controller              horno.Repository
 | Provider | `internal/provider/oven_controller/client.go` | Cliente simulado del controlador físico (análogo a `yolo_client`): ~40ms de latencia, ~5% de fallo aleatorio |
 | Service | `internal/service/consigna/consigna_service.go` | `dispatch()` centraliza: buscar horno → despachar → actualizar estado → auditar → broadcast SSE. `DispatchAutomatico` y `DispatchManual` son las dos entradas |
 | Repository | `internal/repository/consigna_repo.go` | Persiste el historial en PostgreSQL real (`historial_consignas`) |
-| Controller (SCA-142) | `internal/controller/lote/lote_handler.go` → `HandleIniciarLote` | `POST /api/v1/lotes/inicio` |
+| Controller (SCA-142) | `internal/controller/lote/lote_handler.go` (archivo eliminado — ver banner) | `POST /api/v1/lotes/inicio` (ya no dispara consigna) |
 | Controller (SCA-320) | `internal/controller/consigna/consigna_handler.go` | `POST /api/v1/horno/consigna`, `GET /api/v1/horno/consigna/historial` |
 
 ### Piezas existentes que se extendieron (no se reescribieron)
@@ -72,7 +89,7 @@ parametros_producto           oven_controller              horno.Repository
 
 El mecanismo (`ConsignaService.DispatchAutomatico`/`DispatchManual` + `parametros_producto.GetByProductoID`) ya era genérico desde SCA-142 — esto fue únicamente carga de datos, sin cambios de código en el servicio. Valores de referencia, ajustables por el equipo de Producción vía `PUT /api/v1/parametros-producto` (que hoy solo actualiza rangos min/max, no los setpoints puntuales — ver nota en `CLAUDE.md`).
 
-## 2.2 Manejo de fallo de enlace: alerta crítica + CONTROL_MANUAL
+## 2.2 Manejo de fallo de enlace: alerta crítica + CONTROL_MANUAL (histórico)
 
 Cuando `OvenController.SendSetpoint` devuelve `Aplicada: false` (hoy simulado con ~5% de probabilidad), además de auditar el intento fallido (como ya hacía SCA-142/320), `ConsignaService.handleFalloDeEnlace` hace dos cosas más:
 
@@ -117,7 +134,6 @@ Fallo de enlace (Aplicada: false)
 ```bash
 go test ./internal/domain/consigna/... \
          ./internal/service/consigna/... \
-         ./internal/controller/lote/... \
          ./internal/controller/consigna/... -v
 ```
 
@@ -131,12 +147,16 @@ docker compose up --build
 
 `database/schema.sql` ya crea `historial_consignas` y siembra setpoints para "Tostada Integral" (`temp_setpoint=170`, `velocidad_cinta_setpoint=0.20`). Verificá con `GET http://localhost:8080/health`.
 
-### 4.3 SCA-142 — flujo automático
+### 4.3 SCA-142 — flujo automático (histórico)
+
+> ⚠️ Histórico: hoy `POST /api/v1/lotes/inicio` abre/persiste el lote del sector y **no
+> despacha consigna**. El ejemplo siguiente refleja la auth actual del endpoint (Bearer
+> del nodo), no el despacho automático original.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/lotes/inicio \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: <API_KEY_SECRET del .env>" \
+  -H "Authorization: Bearer <secret del nodo>" \
   -d '{
     "hornoId": "horno-01",
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab"
@@ -148,6 +168,7 @@ Esperado: `200`, `consigna.temperaturaObjetivo: 170`, `consigna.velocidadCintaOb
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/horno/consigna \
+  -b "session_token=<JWT>" \
   -H "Content-Type: application/json" \
   -d '{
     "hornoId": "horno-01",
@@ -163,6 +184,7 @@ Esperado: `200`, `origen: "MANUAL"`. El campo `loteId` es opcional — si se man
 Probá también el rechazo por rango:
 ```bash
 curl -X POST http://localhost:8080/api/v1/horno/consigna \
+  -b "session_token=<JWT>" \
   -H "Content-Type: application/json" \
   -d '{
     "hornoId": "horno-01",
@@ -198,7 +220,7 @@ curl "http://localhost:8080/api/v1/horno/consigna/historial?loteId=<loteId devue
 
 El `loteId` es generado por `POST /api/v1/lotes/inicio` (despacho automático). Si además se manda ese mismo `loteId` en un `POST /api/v1/horno/consigna` manual posterior (campo opcional `loteId` del request), ambos quedan en el mismo historial — así el panel puede mostrar "todo lo que le pasó a este lote": la consigna automática inicial más cualquier corrección manual posterior.
 
-### 4.8 Fallo de enlace: alerta crítica + CONTROL_MANUAL
+### 4.8 Fallo de enlace: alerta crítica + CONTROL_MANUAL (histórico)
 
 Como el fallo es simulado con ~5% de probabilidad, hay que insistir hasta capturarlo:
 
@@ -218,7 +240,7 @@ Esperado: `estado: "CONTROL_MANUAL"` y una `Alerta` nueva en `alertas_recientes`
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/lotes/inicio \
-  -H "Content-Type: application/json" -H "X-API-Key: <API_KEY_SECRET>" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer <secret del nodo>" \
   -d '{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}'
 ```
 Esperado: `409` "El horno está en modo CONTROL_MANUAL...". El envío manual, en cambio, sigue aceptando requests con normalidad — reintentando `POST /api/v1/horno/consigna` hasta que salga exitoso, `estado` vuelve a `"ACTIVO"` y el automático vuelve a responder `200`.
@@ -229,7 +251,7 @@ Esperado: `409` "El horno está en modo CONTROL_MANUAL...". El envío manual, en
 
 | Escenario | Endpoint | Esperado |
 |---|---|---|
-| Sin `X-API-Key` | `/api/v1/lotes/inicio` | `401` |
+| Sin Bearer secret | `/api/v1/lotes/inicio` | `401` |
 | `hornoId` inexistente | ambos | `404` |
 | `productoId` sin setpoints (automático) / sin parámetros (manual) | ambos | `422` |
 | Valor fuera de rango | `/api/v1/horno/consigna` | `422` |
