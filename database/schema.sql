@@ -517,20 +517,31 @@ CREATE INDEX IF NOT EXISTS idx_usuarios_email ON usuarios (email);
 -- ============================================================================
 -- SEED: Usuarios de prueba (modificar con emails corporativos reales)
 -- Contraseña por defecto para usuarios seed: password123
+--
+-- El hash se genera en el propio PostgreSQL con pgcrypto (bcrypt, prefijo $2a$)
+-- en lugar de incrustar un literal bcrypt. Así el seed siempre es consistente
+-- consigo mismo y no depende de copiar/pegar un hash a mano (origen del bug
+-- histórico: un literal que en realidad no correspondía a password123).
+-- pgcrypto ya se habilita arriba con CREATE EXTENSION IF NOT EXISTS.
 -- ============================================================================
 INSERT INTO usuarios (email, nombre, rol, password_hash) VALUES
-    ('admin@fermar.com.ar',      'Administrador Fermar',  'Administrador', '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy'),
-    ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy'),
-    ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy')
+    ('admin@fermar.com.ar',      'Administrador Fermar',  'Administrador', crypt('password123', gen_salt('bf', 10))),
+    ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    crypt('password123', gen_salt('bf', 10))),
+    ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      crypt('password123', gen_salt('bf', 10)))
 ON CONFLICT (email) DO NOTHING;
 
--- Reparación idempotente de bases ya sembradas con el hash roto (el literal
--- anterior NO correspondía a password123). Sólo reemplaza filas que todavía
--- llevan ese hash exacto, así que nunca pisa una contraseña ya cambiada.
+-- Reparación idempotente de bases ya sembradas con hashes rotos históricos
+-- (literales que NO correspondían a password123). Sólo reemplaza filas que
+-- todavía llevan exactamente esos hashes, así que nunca pisa una contraseña
+-- ya cambiada por un operario. `crypt(...)` se evalúa sólo en las filas que
+-- hacen match con el IN, por lo que no agrega costo al arranque normal.
 UPDATE usuarios
-SET password_hash = '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy'
+SET password_hash = crypt('password123', gen_salt('bf', 10))
 WHERE email IN ('admin@fermar.com.ar', 'supervisor@fermar.com.ar', 'operario@fermar.com.ar')
-  AND password_hash = '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
+  AND password_hash IN (
+    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
+    '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy'
+  );
 
 -- Provenance for writes made by an authenticated device. Existing rows remain
 -- nullable so this upgrade never invents an owner for historical data.
