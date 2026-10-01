@@ -193,6 +193,17 @@ CREATE TABLE usuarios (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email VARC
 	require.NoError(t, p.QueryRow(ctx, `SELECT count(*) FROM historial_consignas WHERE id=$1`, historyID).Scan(&gotHistory))
 	require.Equal(t, 1, gotMetric)
 	require.Equal(t, 1, gotHistory)
+
+	// La migración unifica parametros_producto dentro de productos: los valores
+	// se backfillean y la tabla legada desaparece.
+	var tempMin, tempMax float64
+	require.NoError(t, p.QueryRow(ctx, `SELECT temp_min, temp_max FROM productos WHERE id='a1b2c3d4-5678-90ab-cdef-1234567890ab'`).Scan(&tempMin, &tempMax))
+	require.InDelta(t, 160.0, tempMin, 0.001)
+	require.InDelta(t, 180.0, tempMax, 0.001)
+	var legacyExists bool
+	require.NoError(t, p.QueryRow(ctx, `SELECT to_regclass('parametros_producto') IS NOT NULL`).Scan(&legacyExists))
+	require.False(t, legacyExists, "parametros_producto debería haber sido eliminada")
+
 	var status string
 	require.NoError(t, p.QueryRow(ctx, `SELECT auth_status FROM dispositivos WHERE id=$1`, deviceID).Scan(&status))
 	require.Equal(t, "unenrolled", status)
@@ -206,6 +217,15 @@ func TestApply_CreaEsquemaSectorLotes(t *testing.T) {
 	require.NoError(t, Apply(context.Background(), p))
 	for _, tc := range []struct{ table, column string }{
 		{"productos", "activo"},
+		{"productos", "peso_referencia_kg"},
+		{"productos", "tolerancia_peso_pct"},
+		{"productos", "dimension_base_cm"},
+		{"productos", "tolerancia_dimension_cm"},
+		{"productos", "temp_min"},
+		{"productos", "temp_max"},
+		{"productos", "velocidad_cinta_min"},
+		{"productos", "velocidad_cinta_max"},
+		{"productos", "updated_at"},
 		{"sectores", "id"},
 		{"sectores", "nombre"},
 		{"dispositivos", "sector_id"},

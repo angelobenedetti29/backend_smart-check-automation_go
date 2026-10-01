@@ -5,13 +5,12 @@
 -- Motor:  PostgreSQL 16 (Aiven Cloud, AWS sa-east-1)
 -- ============================================================================
 -- Este script crea la estructura completa del modelo de datos para:
---   1. Tabla maestra: productos
+--   1. Tabla maestra: productos (incluye los parámetros de control embebidos)
 --   2. Tabla transaccional: lotes_productivos (depende de productos vía FK)
---   3. Tabla de configuración: parametros_producto (depende de productos vía FK)
---   4. Seed de datos de catálogo
---   5. Tablas de telemetría: dispositivos + metricas_dispositivo
---   6. Setpoints puntuales en parametros_producto + historial_consignas (SCA-142/SCA-320)
---   7. Tabla de acceso: usuarios (autenticación y RBAC)
+--   3. Seed de datos de catálogo
+--   4. Tablas de telemetría: dispositivos + metricas_dispositivo
+--   5. Tabla de auditoría: historial_consignas (SCA-320)
+--   6. Tabla de acceso: usuarios (autenticación y RBAC)
 -- ============================================================================
 
 BEGIN;
@@ -33,6 +32,84 @@ CREATE TABLE IF NOT EXISTS productos (
 COMMENT ON TABLE  productos      IS 'Catálogo maestro de productos panificados de Fermar S.A.';
 COMMENT ON COLUMN productos.id   IS 'Identificador único universal del producto';
 COMMENT ON COLUMN productos.nombre IS 'Nombre descriptivo del producto (ej: Tostada Integral, Pan Francés)';
+
+-- ============================================================================
+-- Unificación con parametros_producto (idempotente, ejecuta una sola vez)
+-- Los parámetros de control de horneado pasan a ser columnas del producto.
+-- ============================================================================
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS peso_referencia_kg      NUMERIC(10,3);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS tolerancia_peso_pct     NUMERIC(5,2);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS dimension_base_cm       NUMERIC(6,2);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS tolerancia_dimension_cm NUMERIC(6,2);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS temp_min                NUMERIC(6,2);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS temp_max                NUMERIC(6,2);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_min     NUMERIC(6,2);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_max     NUMERIC(6,2);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS updated_at              TIMESTAMPTZ     NOT NULL DEFAULT now();
+
+COMMENT ON COLUMN productos.peso_referencia_kg      IS 'Peso patrón/ideal de una unidad del producto (kg)';
+COMMENT ON COLUMN productos.tolerancia_peso_pct     IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
+COMMENT ON COLUMN productos.dimension_base_cm       IS 'Dimensión base/tamaño ideal del producto (cm)';
+COMMENT ON COLUMN productos.tolerancia_dimension_cm IS 'Tolerancia de tamaño admitida sobre la dimensión base (cm)';
+COMMENT ON COLUMN productos.temp_min                IS 'Temperatura mínima aceptable de horneado (°C)';
+COMMENT ON COLUMN productos.temp_max                IS 'Temperatura máxima aceptable de horneado (°C)';
+COMMENT ON COLUMN productos.velocidad_cinta_min     IS 'Velocidad mínima aceptable de la cinta transportadora (m/s)';
+COMMENT ON COLUMN productos.velocidad_cinta_max     IS 'Velocidad máxima aceptable de la cinta transportadora (m/s)';
+COMMENT ON COLUMN productos.updated_at              IS 'Marca temporal de la última modificación del registro';
+
+-- Backfill desde la tabla legada parametros_producto (si existe) antes de dropearla.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'parametros_producto') THEN
+    UPDATE productos p SET
+      peso_referencia_kg      = pp.peso_referencia_kg,
+      tolerancia_peso_pct     = pp.tolerancia_peso_pct,
+      dimension_base_cm       = pp.dimension_base_cm,
+      tolerancia_dimension_cm = pp.tolerancia_dimension_cm,
+      temp_min                = pp.temp_min,
+      temp_max                = pp.temp_max,
+      velocidad_cinta_min     = pp.velocidad_cinta_min,
+      velocidad_cinta_max     = pp.velocidad_cinta_max,
+      updated_at              = pp.updated_at
+    FROM parametros_producto pp
+    WHERE p.id = pp.producto_id;
+  END IF;
+END $$;
+
+-- Traslada los CHECK constraints de chk_parametros_* a chk_productos_*.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'parametros_producto') THEN
+    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_peso_positivo;
+    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_tolerancia_peso;
+    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_dimension_positiva;
+    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_tolerancia_dimension;
+    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_temp_rango;
+    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_velocidad_rango;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_peso_positivo') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_peso_positivo CHECK (peso_referencia_kg > 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_tolerancia_peso') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_tolerancia_peso CHECK (tolerancia_peso_pct >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_dimension_positiva') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_dimension_positiva CHECK (dimension_base_cm > 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_tolerancia_dimension') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_tolerancia_dimension CHECK (tolerancia_dimension_cm >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_temp_rango') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_temp_rango CHECK (temp_max > temp_min);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_velocidad_rango') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_velocidad_rango CHECK (velocidad_cinta_max > velocidad_cinta_min);
+  END IF;
+END $$;
+
+-- La tabla legada queda sin uso una vez migrados los datos.
+DROP TABLE IF EXISTS parametros_producto;
 
 -- ============================================================================
 -- TABLA 2: lotes_productivos (Registro transaccional de lotes horneados)
@@ -137,102 +214,21 @@ CREATE INDEX IF NOT EXISTS idx_lotes_created_at
     ON lotes_productivos (created_at);
 
 -- ============================================================================
--- TABLA 3: parametros_producto (Parámetros y umbrales de control por producto)
--- ============================================================================
-CREATE TABLE IF NOT EXISTS parametros_producto (
-    id                      UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    producto_id             UUID            NOT NULL UNIQUE,
-    peso_referencia_kg      NUMERIC(10,3)   NOT NULL,
-    tolerancia_peso_pct     NUMERIC(5,2)    NOT NULL,
-    dimension_base_cm       NUMERIC(6,2)    NOT NULL,
-    tolerancia_dimension_cm NUMERIC(6,2)    NOT NULL,
-    temp_min                NUMERIC(6,2)    NOT NULL,
-    temp_max                NUMERIC(6,2)    NOT NULL,
-    velocidad_cinta_min     NUMERIC(6,2)    NOT NULL,
-    velocidad_cinta_max     NUMERIC(6,2)    NOT NULL,
-    activo                  BOOLEAN         NOT NULL DEFAULT true,
-    created_at              TIMESTAMPTZ     NOT NULL DEFAULT now(),
-    updated_at              TIMESTAMPTZ     NOT NULL DEFAULT now(),
-
-    -- FOREIGN KEY: garantiza integridad referencial con la tabla maestra
-    CONSTRAINT fk_parametros_producto_producto
-        FOREIGN KEY (producto_id)
-        REFERENCES productos (id)
-        ON DELETE RESTRICT
-        ON UPDATE CASCADE,
-
-    -- RESTRICCIONES DE DOMINIO (Check Constraints)
-
-    -- El peso de referencia debe ser positivo
-    CONSTRAINT chk_parametros_peso_positivo
-        CHECK (peso_referencia_kg > 0),
-
-    -- La tolerancia de peso no puede ser negativa
-    CONSTRAINT chk_parametros_tolerancia_peso
-        CHECK (tolerancia_peso_pct >= 0),
-
-    -- La dimensión base debe ser positiva
-    CONSTRAINT chk_parametros_dimension_positiva
-        CHECK (dimension_base_cm > 0),
-
-    -- La tolerancia de dimensión no puede ser negativa
-    CONSTRAINT chk_parametros_tolerancia_dimension
-        CHECK (tolerancia_dimension_cm >= 0),
-
-    -- Consistencia del rango de temperatura: el máximo debe superar al mínimo
-    CONSTRAINT chk_parametros_temp_rango
-        CHECK (temp_max > temp_min),
-
-    -- Consistencia del rango de velocidad de cinta: el máximo debe superar al mínimo
-    CONSTRAINT chk_parametros_velocidad_rango
-        CHECK (velocidad_cinta_max > velocidad_cinta_min)
-);
-
-COMMENT ON TABLE  parametros_producto IS 'Parámetros y umbrales de control ideales de horneado por variedad de producto, usados por las reglas de detección y el recomendador inteligente.';
-COMMENT ON COLUMN parametros_producto.id IS 'Identificador UUID del registro de parámetros';
-COMMENT ON COLUMN parametros_producto.producto_id IS 'FK al catálogo de productos (relación 1:1, un set de parámetros activo por producto)';
-COMMENT ON COLUMN parametros_producto.peso_referencia_kg IS 'Peso patrón/ideal de una unidad del producto (kg)';
-COMMENT ON COLUMN parametros_producto.tolerancia_peso_pct IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
-COMMENT ON COLUMN parametros_producto.dimension_base_cm IS 'Dimensión base/tamaño ideal del producto (cm)';
-COMMENT ON COLUMN parametros_producto.tolerancia_dimension_cm IS 'Tolerancia de tamaño admitida sobre la dimensión base (cm)';
-COMMENT ON COLUMN parametros_producto.temp_min IS 'Temperatura mínima aceptable de horneado (°C)';
-COMMENT ON COLUMN parametros_producto.temp_max IS 'Temperatura máxima aceptable de horneado (°C)';
-COMMENT ON COLUMN parametros_producto.velocidad_cinta_min IS 'Velocidad mínima aceptable de la cinta transportadora (m/s)';
-COMMENT ON COLUMN parametros_producto.velocidad_cinta_max IS 'Velocidad máxima aceptable de la cinta transportadora (m/s)';
-COMMENT ON COLUMN parametros_producto.activo IS 'Indica si el set de parámetros está vigente (baja lógica para el ABM)';
-COMMENT ON COLUMN parametros_producto.created_at IS 'Marca temporal de alta del registro';
-COMMENT ON COLUMN parametros_producto.updated_at IS 'Marca temporal de la última modificación del registro';
-
--- ============================================================================
--- ÍNDICES (Indexes) — parametros_producto
--- ============================================================================
-
--- Índice para búsquedas por producto (FK lookup), explícito por consistencia
--- aunque producto_id ya tiene una restricción UNIQUE
-CREATE INDEX IF NOT EXISTS idx_parametros_producto_producto_id
-    ON parametros_producto (producto_id);
-
--- ============================================================================
 -- SEED: Datos de catálogo de productos
--- Incluye el producto de referencia del JSON contrato
+-- El producto de referencia incluye sus parámetros de control embebidos.
 -- ============================================================================
-INSERT INTO productos (id, nombre) VALUES
-    ('a1b2c3d4-5678-90ab-cdef-1234567890ab', 'Tostada Integral')
-ON CONFLICT (id) DO NOTHING;
-
--- ============================================================================
--- SEED: Parámetros de control por defecto para el producto de referencia
--- ============================================================================
-INSERT INTO parametros_producto (
-    producto_id, peso_referencia_kg, tolerancia_peso_pct,
+INSERT INTO productos (
+    id, nombre,
+    peso_referencia_kg, tolerancia_peso_pct,
     dimension_base_cm, tolerancia_dimension_cm,
     temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
 ) VALUES (
-    'a1b2c3d4-5678-90ab-cdef-1234567890ab', 0.030, 10.00,
-    8.00, 0.50,
-    160.00, 180.00, 0.10, 0.30
+    'a1b2c3d4-5678-90ab-cdef-1234567890ab', 'Tostada Integral',
+    0.250, 5.00,
+    12.00, 0.50,
+    180.00, 220.00, 0.10, 0.30
 )
-ON CONFLICT (producto_id) DO NOTHING;
+ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
 -- TABLA 4: dispositivos (Catálogo de nodos Raspberry Pi / SBC de monitoreo)
@@ -283,36 +279,6 @@ COMMENT ON COLUMN metricas_dispositivo.received_at           IS 'Marca temporal 
 -- Índice para la consulta más frecuente: historial por dispositivo ordenado por tiempo
 CREATE INDEX IF NOT EXISTS idx_metricas_dispositivo_disp_received
     ON metricas_dispositivo (dispositivo_id, received_at DESC);
-
--- ============================================================================
--- ALTER: parametros_producto — setpoints puntuales de cocción (SCA-142/SCA-320)
--- ============================================================================
-ALTER TABLE parametros_producto
-    ADD COLUMN IF NOT EXISTS temp_setpoint             NUMERIC(6,2),
-    ADD COLUMN IF NOT EXISTS velocidad_cinta_setpoint   NUMERIC(6,2);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_parametros_temp_setpoint_rango') THEN
-        ALTER TABLE parametros_producto
-            ADD CONSTRAINT chk_parametros_temp_setpoint_rango
-                CHECK (temp_setpoint IS NULL OR temp_setpoint BETWEEN temp_min AND temp_max);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_parametros_velocidad_setpoint_rango') THEN
-        ALTER TABLE parametros_producto
-            ADD CONSTRAINT chk_parametros_velocidad_setpoint_rango
-                CHECK (velocidad_cinta_setpoint IS NULL OR velocidad_cinta_setpoint BETWEEN velocidad_cinta_min AND velocidad_cinta_max);
-    END IF;
-END $$;
-
-COMMENT ON COLUMN parametros_producto.temp_setpoint IS 'Temperatura objetivo puntual a despachar al horno (°C), dentro de [temp_min, temp_max]. Nullable: si no está cargada, no se puede despachar consigna automática para el producto.';
-COMMENT ON COLUMN parametros_producto.velocidad_cinta_setpoint IS 'Velocidad de cinta objetivo puntual a despachar al horno (m/s), dentro de [velocidad_cinta_min, velocidad_cinta_max]. Nullable, misma razón que temp_setpoint.';
-
--- Seed: setpoints puntuales por defecto para "Tostada Integral"
-UPDATE parametros_producto
-SET temp_setpoint = 170.00, velocidad_cinta_setpoint = 0.20
-WHERE producto_id = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
-  AND temp_setpoint IS NULL;
 
 -- ============================================================================
 -- ALTER: metricas_dispositivo — uso del procesador de IA (NPU) (SCA-172)
@@ -441,27 +407,20 @@ COMMENT ON COLUMN dispositivos.rename_token IS 'Credencial Bearer entregada al n
 
 -- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
+-- Incluye los parámetros de control embebidos de cada producto.
 -- ============================================================================
-INSERT INTO productos (id, nombre) VALUES
-    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 'Pan Lactal'),
-    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 'Pan Francés'),
-    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 'Pan de Salvado'),
-    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 'Medialunas'),
-    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 'Pan Dulce')
-ON CONFLICT (id) DO NOTHING;
-
-INSERT INTO parametros_producto (
-    producto_id, peso_referencia_kg, tolerancia_peso_pct,
+INSERT INTO productos (
+    id, nombre,
+    peso_referencia_kg, tolerancia_peso_pct,
     dimension_base_cm, tolerancia_dimension_cm,
-    temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
-    temp_setpoint, velocidad_cinta_setpoint
+    temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
 ) VALUES
-    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 0.500, 8.00,  25.00, 1.00, 180.00, 200.00, 0.15, 0.35, 190.00, 0.25),
-    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 0.250, 6.00,  30.00, 1.50, 200.00, 220.00, 0.20, 0.40, 210.00, 0.30),
-    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 0.450, 8.00,  22.00, 1.00, 170.00, 190.00, 0.15, 0.35, 180.00, 0.25),
-    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 0.060, 12.00, 10.00, 0.50, 190.00, 210.00, 0.25, 0.45, 200.00, 0.35),
-    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 0.800, 10.00, 15.00, 1.00, 150.00, 170.00, 0.08, 0.20, 160.00, 0.14)
-ON CONFLICT (producto_id) DO NOTHING;
+    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 'Pan Lactal',     0.500,  8.00, 25.00, 1.00, 180.00, 200.00, 0.15, 0.35),
+    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 'Pan Francés',    0.250,  6.00, 30.00, 1.50, 200.00, 220.00, 0.20, 0.40),
+    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 'Pan de Salvado', 0.450,  8.00, 22.00, 1.00, 170.00, 190.00, 0.15, 0.35),
+    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 'Medialunas',     0.060, 12.00, 10.00, 0.50, 190.00, 210.00, 0.25, 0.45),
+    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 'Pan Dulce',      0.800, 10.00, 15.00, 1.00, 150.00, 170.00, 0.08, 0.20)
+ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
 -- TABLA 6: historial_consignas (Auditoría de consignas térmicas/velocidad)
