@@ -28,6 +28,7 @@ const selectProductoColumns = `
 	dimension_base_cm, tolerancia_dimension_cm,
 	temp_min, temp_max,
 	velocidad_cinta_min, velocidad_cinta_max,
+	temp_setpoint, velocidad_cinta_setpoint,
 	activo, created_at, updated_at`
 
 // scanProducto escanea las columnas de selectProductoColumns en un Producto.
@@ -38,6 +39,7 @@ func scanProducto(row pgx.Row, p *producto.Producto) error {
 		&p.DimensionBaseCm, &p.ToleranciaDimensionCm,
 		&p.TempMin, &p.TempMax,
 		&p.VelocidadCintaMin, &p.VelocidadCintaMax,
+		&p.TempSetpoint, &p.VelocidadCintaSetpoint,
 		&p.Activo, &p.CreatedAt, &p.UpdatedAt,
 	)
 }
@@ -109,9 +111,10 @@ func (r *ProductoPostgresRepository) Create(ctx context.Context, p *producto.Pro
 		INSERT INTO productos (
 			nombre, peso_referencia_kg, tolerancia_peso_pct,
 			dimension_base_cm, tolerancia_dimension_cm,
-			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		RETURNING id, created_at, updated_at, activo`
+			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
+			temp_setpoint, velocidad_cinta_setpoint
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id, temp_setpoint, velocidad_cinta_setpoint, created_at, updated_at, activo`
 
 	err := r.db.QueryRow(ctx, query,
 		p.Nombre,
@@ -123,7 +126,9 @@ func (r *ProductoPostgresRepository) Create(ctx context.Context, p *producto.Pro
 		p.TempMax,
 		p.VelocidadCintaMin,
 		p.VelocidadCintaMax,
-	).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Activo)
+		p.TempSetpoint,
+		p.VelocidadCintaSetpoint,
+	).Scan(&p.ID, &p.TempSetpoint, &p.VelocidadCintaSetpoint, &p.CreatedAt, &p.UpdatedAt, &p.Activo)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, producto.ErrDuplicado
@@ -147,6 +152,8 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 			temp_max = $8,
 			velocidad_cinta_min = $9,
 			velocidad_cinta_max = $10,
+			temp_setpoint = $11,
+			velocidad_cinta_setpoint = $12,
 			updated_at = now()
 		WHERE id = $1
 		RETURNING id, nombre,
@@ -154,6 +161,7 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 			dimension_base_cm, tolerancia_dimension_cm,
 			temp_min, temp_max,
 			velocidad_cinta_min, velocidad_cinta_max,
+			temp_setpoint, velocidad_cinta_setpoint,
 			activo, created_at, updated_at`
 
 	err := scanProducto(r.db.QueryRow(ctx, query,
@@ -167,6 +175,8 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 		p.TempMax,
 		p.VelocidadCintaMin,
 		p.VelocidadCintaMax,
+		p.TempSetpoint,
+		p.VelocidadCintaSetpoint,
 	), p)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, producto.ErrDesconocido

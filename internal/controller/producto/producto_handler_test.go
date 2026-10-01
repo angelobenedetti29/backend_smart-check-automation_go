@@ -130,12 +130,36 @@ func TestProductoHandleCreateValidacionFallida422(t *testing.T) {
 
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	var env struct {
-		Success bool   `json:"success"`
-		Errors  string `json:"errors"`
+		Success bool              `json:"success"`
+		Errors  map[string]string `json:"errors"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
 	assert.False(t, env.Success)
-	assert.Contains(t, env.Errors, "nombre")
+	require.NotEmpty(t, env.Errors["nombre"])
+	require.NotEmpty(t, env.Errors["pesoReferenciaKg"])
+}
+
+func TestProductoHandleCreateSetpointFueraDeRango422(t *testing.T) {
+	h := NewProductoHandler(&fakeProductoService{})
+
+	body := `{
+		"nombre": "Tostada Integral",
+		"pesoReferenciaKg": 0.25, "toleranciaPesoPct": 5.0,
+		"dimensionBaseCm": 12.0, "toleranciaDimensionCm": 0.5,
+		"tempMin": 180.0, "tempMax": 220.0,
+		"velocidadCintaMin": 0.1, "velocidadCintaMax": 0.3,
+		"tempSetpoint": 300.0, "velocidadCintaSetpoint": 0.2
+	}`
+	rec := httptest.NewRecorder()
+	h.Handle(rec, jsonRequest(http.MethodPost, "/api/v1/productos", body))
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	var env struct {
+		Errors map[string]string `json:"errors"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+	require.NotEmpty(t, env.Errors["tempSetpoint"])
+	require.Empty(t, env.Errors["velocidadCintaSetpoint"])
 }
 
 func TestProductoHandleCreateDuplicado409(t *testing.T) {

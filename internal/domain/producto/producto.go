@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -21,33 +22,50 @@ var ErrDesconocido = errors.New("producto: el producto referenciado no existe")
 // (colisión de la restricción UNIQUE, comparación case-insensitive).
 var ErrDuplicado = errors.New("producto: ya existe un producto con ese nombre")
 
-// ValidationError agrupa todos los errores de validación de un ProductoRequest.
+// ValidationError agrupa los errores de validación de un ProductoRequest,
+// indexados por nombre de campo para que el frontend pueda mapearlos directo.
 type ValidationError struct {
-	Fields []string
+	Fields map[string]string
 }
 
-// Error devuelve el listado de errores de validación concatenado.
+// Error devuelve los errores de validación en formato legible y determinista
+// (campos ordenados alfabéticamente), apto para logging.
 func (e *ValidationError) Error() string {
-	return fmt.Sprintf("errores de validación: %s", strings.Join(e.Fields, "; "))
+	keys := make([]string, 0, len(e.Fields))
+	for k := range e.Fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %s", k, e.Fields[k]))
+	}
+	return fmt.Sprintf("errores de validación: %s", strings.Join(parts, "; "))
 }
 
 // Producto es una entrada del catálogo maestro. Activo=false indica un producto
 // retirado: no se ofrece para elegir, pero sigue resolviendo lotes históricos.
 // Los campos numéricos son los parámetros de control ideales de horneado.
 type Producto struct {
-	ID                    string    `json:"id"`
-	Nombre                string    `json:"nombre"`
-	PesoReferenciaKg      float64   `json:"pesoReferenciaKg"`
-	ToleranciaPesoPct     float64   `json:"toleranciaPesoPct"`
-	DimensionBaseCm       float64   `json:"dimensionBaseCm"`
-	ToleranciaDimensionCm float64   `json:"toleranciaDimensionCm"`
-	TempMin               float64   `json:"tempMin"`
-	TempMax               float64   `json:"tempMax"`
-	VelocidadCintaMin     float64   `json:"velocidadCintaMin"`
-	VelocidadCintaMax     float64   `json:"velocidadCintaMax"`
-	Activo                bool      `json:"activo"`
-	CreatedAt             time.Time `json:"createdAt"`
-	UpdatedAt             time.Time `json:"updatedAt"`
+	ID                    string  `json:"id"`
+	Nombre                string  `json:"nombre"`
+	PesoReferenciaKg      float64 `json:"pesoReferenciaKg"`
+	ToleranciaPesoPct     float64 `json:"toleranciaPesoPct"`
+	DimensionBaseCm       float64 `json:"dimensionBaseCm"`
+	ToleranciaDimensionCm float64 `json:"toleranciaDimensionCm"`
+	TempMin               float64 `json:"tempMin"`
+	TempMax               float64 `json:"tempMax"`
+	VelocidadCintaMin     float64 `json:"velocidadCintaMin"`
+	VelocidadCintaMax     float64 `json:"velocidadCintaMax"`
+	// TempSetpoint y VelocidadCintaSetpoint son opcionales (nullable): valor
+	// puntual dentro del rango min/max, sólo usado si se reactiva el despacho
+	// automático de consigna (SCA-142).
+	TempSetpoint           *float64  `json:"tempSetpoint,omitempty"`
+	VelocidadCintaSetpoint *float64  `json:"velocidadCintaSetpoint,omitempty"`
+	Activo                 bool      `json:"activo"`
+	CreatedAt              time.Time `json:"createdAt"`
+	UpdatedAt              time.Time `json:"updatedAt"`
 }
 
 // ProductoRequest representa el payload JSON entrante para el alta (POST) y la
@@ -63,42 +81,52 @@ type ProductoRequest struct {
 	TempMax               float64 `json:"tempMax"`
 	VelocidadCintaMin     float64 `json:"velocidadCintaMin"`
 	VelocidadCintaMax     float64 `json:"velocidadCintaMax"`
+	// Setpoints opcionales: si se envían, deben caer dentro del rango min/max.
+	TempSetpoint           *float64 `json:"tempSetpoint,omitempty"`
+	VelocidadCintaSetpoint *float64 `json:"velocidadCintaSetpoint,omitempty"`
 }
 
 // Validate verifica todas las reglas de negocio del ProductoRequest, replicando
 // en el servidor los CHECK constraints de la tabla productos. Retorna un
-// *ValidationError con el listado completo de campos inválidos, o nil si es válido.
+// *ValidationError con el mapa campo→mensaje de todos los campos inválidos, o
+// nil si es válido.
 func (req ProductoRequest) Validate() error {
-	var errs []string
+	fields := map[string]string{}
 
 	nombre := strings.TrimSpace(req.Nombre)
 	if nombre == "" {
-		errs = append(errs, "nombre: es requerido")
+		fields["nombre"] = "es requerido"
 	} else if len([]rune(nombre)) > 100 {
-		errs = append(errs, "nombre: no puede superar los 100 caracteres")
+		fields["nombre"] = "no puede superar los 100 caracteres"
 	}
 
 	if req.PesoReferenciaKg <= 0 {
-		errs = append(errs, "pesoReferenciaKg: debe ser un valor numérico mayor a 0")
+		fields["pesoReferenciaKg"] = "debe ser un valor numérico mayor a 0"
 	}
 	if req.ToleranciaPesoPct < 0 {
-		errs = append(errs, "toleranciaPesoPct: no puede ser negativo")
+		fields["toleranciaPesoPct"] = "no puede ser negativo"
 	}
 	if req.DimensionBaseCm <= 0 {
-		errs = append(errs, "dimensionBaseCm: debe ser un valor numérico mayor a 0")
+		fields["dimensionBaseCm"] = "debe ser un valor numérico mayor a 0"
 	}
 	if req.ToleranciaDimensionCm < 0 {
-		errs = append(errs, "toleranciaDimensionCm: no puede ser negativo")
+		fields["toleranciaDimensionCm"] = "no puede ser negativo"
 	}
 	if req.TempMax <= req.TempMin {
-		errs = append(errs, fmt.Sprintf("tempMax(%.2f): debe ser mayor a tempMin(%.2f)", req.TempMax, req.TempMin))
+		fields["tempMax"] = fmt.Sprintf("debe ser mayor a tempMin (%.2f)", req.TempMin)
 	}
 	if req.VelocidadCintaMax <= req.VelocidadCintaMin {
-		errs = append(errs, fmt.Sprintf("velocidadCintaMax(%.2f): debe ser mayor a velocidadCintaMin(%.2f)", req.VelocidadCintaMax, req.VelocidadCintaMin))
+		fields["velocidadCintaMax"] = fmt.Sprintf("debe ser mayor a velocidadCintaMin (%.2f)", req.VelocidadCintaMin)
+	}
+	if req.TempSetpoint != nil && (*req.TempSetpoint < req.TempMin || *req.TempSetpoint > req.TempMax) {
+		fields["tempSetpoint"] = "debe estar entre tempMin y tempMax"
+	}
+	if req.VelocidadCintaSetpoint != nil && (*req.VelocidadCintaSetpoint < req.VelocidadCintaMin || *req.VelocidadCintaSetpoint > req.VelocidadCintaMax) {
+		fields["velocidadCintaSetpoint"] = "debe estar entre velocidadCintaMin y velocidadCintaMax"
 	}
 
-	if len(errs) > 0 {
-		return &ValidationError{Fields: errs}
+	if len(fields) > 0 {
+		return &ValidationError{Fields: fields}
 	}
 	return nil
 }

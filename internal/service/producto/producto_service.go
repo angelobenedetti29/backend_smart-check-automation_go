@@ -42,15 +42,17 @@ func (s *Service) Create(ctx context.Context, req producto.ProductoRequest) (*pr
 	}
 
 	p := &producto.Producto{
-		Nombre:                nombre,
-		PesoReferenciaKg:      req.PesoReferenciaKg,
-		ToleranciaPesoPct:     req.ToleranciaPesoPct,
-		DimensionBaseCm:       req.DimensionBaseCm,
-		ToleranciaDimensionCm: req.ToleranciaDimensionCm,
-		TempMin:               req.TempMin,
-		TempMax:               req.TempMax,
-		VelocidadCintaMin:     req.VelocidadCintaMin,
-		VelocidadCintaMax:     req.VelocidadCintaMax,
+		Nombre:                 nombre,
+		PesoReferenciaKg:       req.PesoReferenciaKg,
+		ToleranciaPesoPct:      req.ToleranciaPesoPct,
+		DimensionBaseCm:        req.DimensionBaseCm,
+		ToleranciaDimensionCm:  req.ToleranciaDimensionCm,
+		TempMin:                req.TempMin,
+		TempMax:                req.TempMax,
+		VelocidadCintaMin:      req.VelocidadCintaMin,
+		VelocidadCintaMax:      req.VelocidadCintaMax,
+		TempSetpoint:           req.TempSetpoint,
+		VelocidadCintaSetpoint: req.VelocidadCintaSetpoint,
 	}
 	return s.repo.Create(ctx, p)
 }
@@ -73,16 +75,18 @@ func (s *Service) Update(ctx context.Context, id string, req producto.ProductoRe
 	}
 
 	p := &producto.Producto{
-		ID:                    id,
-		Nombre:                nombre,
-		PesoReferenciaKg:      req.PesoReferenciaKg,
-		ToleranciaPesoPct:     req.ToleranciaPesoPct,
-		DimensionBaseCm:       req.DimensionBaseCm,
-		ToleranciaDimensionCm: req.ToleranciaDimensionCm,
-		TempMin:               req.TempMin,
-		TempMax:               req.TempMax,
-		VelocidadCintaMin:     req.VelocidadCintaMin,
-		VelocidadCintaMax:     req.VelocidadCintaMax,
+		ID:                     id,
+		Nombre:                 nombre,
+		PesoReferenciaKg:       req.PesoReferenciaKg,
+		ToleranciaPesoPct:      req.ToleranciaPesoPct,
+		DimensionBaseCm:        req.DimensionBaseCm,
+		ToleranciaDimensionCm:  req.ToleranciaDimensionCm,
+		TempMin:                req.TempMin,
+		TempMax:                req.TempMax,
+		VelocidadCintaMin:      req.VelocidadCintaMin,
+		VelocidadCintaMax:      req.VelocidadCintaMax,
+		TempSetpoint:           req.TempSetpoint,
+		VelocidadCintaSetpoint: req.VelocidadCintaSetpoint,
 	}
 	return s.repo.Update(ctx, p)
 }

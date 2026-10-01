@@ -140,6 +140,11 @@ func (h *ProductoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Reque
 
 	if err := req.Validate(); err != nil {
 		log.Printf("[AUDIT] Validación de producto fallida: %v", err)
+		var validationErr *producto.ValidationError
+		if errors.As(err, &validationErr) {
+			response.Error(w, http.StatusUnprocessableEntity, "Datos de producto inválidos", validationErr.Fields)
+			return req, false
+		}
 		response.Error(w, http.StatusUnprocessableEntity, "Datos de producto inválidos", err.Error())
 		return req, false
 	}
