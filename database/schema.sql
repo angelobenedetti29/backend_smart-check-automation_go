@@ -46,6 +46,10 @@ ALTER TABLE productos ADD COLUMN IF NOT EXISTS temp_max                NUMERIC(6
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_min     NUMERIC(6,2);
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_max     NUMERIC(6,2);
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS updated_at              TIMESTAMPTZ     NOT NULL DEFAULT now();
+-- Setpoints puntuales opcionales: sólo se usan si se reactiva el despacho
+-- automático de consigna (SCA-142). Nullable.
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS temp_setpoint             NUMERIC(6,2);
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_setpoint  NUMERIC(6,2);
 
 COMMENT ON COLUMN productos.peso_referencia_kg      IS 'Peso patrón/ideal de una unidad del producto (kg)';
 COMMENT ON COLUMN productos.tolerancia_peso_pct     IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
@@ -56,6 +60,8 @@ COMMENT ON COLUMN productos.temp_max                IS 'Temperatura máxima acep
 COMMENT ON COLUMN productos.velocidad_cinta_min     IS 'Velocidad mínima aceptable de la cinta transportadora (m/s)';
 COMMENT ON COLUMN productos.velocidad_cinta_max     IS 'Velocidad máxima aceptable de la cinta transportadora (m/s)';
 COMMENT ON COLUMN productos.updated_at              IS 'Marca temporal de la última modificación del registro';
+COMMENT ON COLUMN productos.temp_setpoint             IS 'Temperatura objetivo dentro de [temp_min, temp_max]; nullable, opcional, sólo usado si se reactiva el despacho automático (SCA-142)';
+COMMENT ON COLUMN productos.velocidad_cinta_setpoint IS 'Velocidad objetivo dentro de [velocidad_cinta_min, velocidad_cinta_max]; nullable, opcional';
 
 -- Backfill desde la tabla legada parametros_producto (si existe) antes de dropearla.
 DO $$
@@ -75,6 +81,17 @@ BEGIN
     WHERE p.id = pp.producto_id;
   END IF;
 END $$;
+
+-- Backfill defensivo: cualquier fila NULL se rellena con valores seguros
+-- antes de promover a NOT NULL. Los seeds ya cargan valores válidos.
+UPDATE productos SET peso_referencia_kg = 0.001 WHERE peso_referencia_kg IS NULL;
+UPDATE productos SET tolerancia_peso_pct = 0 WHERE tolerancia_peso_pct IS NULL;
+UPDATE productos SET dimension_base_cm = 0.001 WHERE dimension_base_cm IS NULL;
+UPDATE productos SET tolerancia_dimension_cm = 0 WHERE tolerancia_dimension_cm IS NULL;
+UPDATE productos SET temp_min = 0 WHERE temp_min IS NULL;
+UPDATE productos SET temp_max = 0.001 WHERE temp_max IS NULL;
+UPDATE productos SET velocidad_cinta_min = 0 WHERE velocidad_cinta_min IS NULL;
+UPDATE productos SET velocidad_cinta_max = 0.001 WHERE velocidad_cinta_max IS NULL;
 
 -- Traslada los CHECK constraints de chk_parametros_* a chk_productos_*.
 DO $$
@@ -108,8 +125,68 @@ BEGIN
   END IF;
 END $$;
 
+-- Rangos de los setpoints opcionales (NULL siempre permitido).
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_temp_setpoint_rango') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_temp_setpoint_rango
+      CHECK (temp_setpoint IS NULL OR (temp_setpoint >= temp_min AND temp_setpoint <= temp_max));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_velocidad_setpoint_rango') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_velocidad_setpoint_rango
+      CHECK (velocidad_cinta_setpoint IS NULL OR (velocidad_cinta_setpoint >= velocidad_cinta_min AND velocidad_cinta_setpoint <= velocidad_cinta_max));
+  END IF;
+END $$;
+
 -- La tabla legada queda sin uso una vez migrados los datos.
 DROP TABLE IF EXISTS parametros_producto;
+
+-- Promueve los parámetros de control a NOT NULL. El backfill defensivo de
+-- arriba garantiza que no queden NULL; ALTER COLUMN SET NOT NULL es idempotente.
+DO $$
+DECLARE
+  null_count INTEGER;
+BEGIN
+  SELECT COUNT(*) INTO null_count FROM productos WHERE peso_referencia_kg IS NULL;
+  IF null_count = 0 THEN
+    ALTER TABLE productos ALTER COLUMN peso_referencia_kg SET NOT NULL;
+  END IF;
+
+  SELECT COUNT(*) INTO null_count FROM productos WHERE tolerancia_peso_pct IS NULL;
+  IF null_count = 0 THEN
+    ALTER TABLE productos ALTER COLUMN tolerancia_peso_pct SET NOT NULL;
+  END IF;
+
+  SELECT COUNT(*) INTO null_count FROM productos WHERE dimension_base_cm IS NULL;
+  IF null_count = 0 THEN
+    ALTER TABLE productos ALTER COLUMN dimension_base_cm SET NOT NULL;
+  END IF;
+
+  SELECT COUNT(*) INTO null_count FROM productos WHERE tolerancia_dimension_cm IS NULL;
+  IF null_count = 0 THEN
+    ALTER TABLE productos ALTER COLUMN tolerancia_dimension_cm SET NOT NULL;
+  END IF;
+
+  SELECT COUNT(*) INTO null_count FROM productos WHERE temp_min IS NULL;
+  IF null_count = 0 THEN
+    ALTER TABLE productos ALTER COLUMN temp_min SET NOT NULL;
+  END IF;
+
+  SELECT COUNT(*) INTO null_count FROM productos WHERE temp_max IS NULL;
+  IF null_count = 0 THEN
+    ALTER TABLE productos ALTER COLUMN temp_max SET NOT NULL;
+  END IF;
+
+  SELECT COUNT(*) INTO null_count FROM productos WHERE velocidad_cinta_min IS NULL;
+  IF null_count = 0 THEN
+    ALTER TABLE productos ALTER COLUMN velocidad_cinta_min SET NOT NULL;
+  END IF;
+
+  SELECT COUNT(*) INTO null_count FROM productos WHERE velocidad_cinta_max IS NULL;
+  IF null_count = 0 THEN
+    ALTER TABLE productos ALTER COLUMN velocidad_cinta_max SET NOT NULL;
+  END IF;
+END $$;
 
 -- ============================================================================
 -- TABLA 2: lotes_productivos (Registro transaccional de lotes horneados)

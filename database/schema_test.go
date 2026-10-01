@@ -225,6 +225,8 @@ func TestApply_CreaEsquemaSectorLotes(t *testing.T) {
 		{"productos", "temp_max"},
 		{"productos", "velocidad_cinta_min"},
 		{"productos", "velocidad_cinta_max"},
+		{"productos", "temp_setpoint"},
+		{"productos", "velocidad_cinta_setpoint"},
 		{"productos", "updated_at"},
 		{"sectores", "id"},
 		{"sectores", "nombre"},
@@ -244,6 +246,32 @@ func TestApply_CreaEsquemaSectorLotes(t *testing.T) {
 		err := p.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2)`, tc.table, tc.column).Scan(&exists)
 		require.NoError(t, err)
 		require.True(t, exists, "%s.%s no fue creada", tc.table, tc.column)
+	}
+}
+
+// TestApply_ParametrosControlNotNull verifica que los 8 parámetros de control
+// hayan quedado NOT NULL y que los setpoints sigan siendo nullable.
+func TestApply_ParametrosControlNotNull(t *testing.T) {
+	p := isolatedPool(t)
+	require.NoError(t, Apply(context.Background(), p))
+
+	for _, column := range []string{
+		"peso_referencia_kg", "tolerancia_peso_pct",
+		"dimension_base_cm", "tolerancia_dimension_cm",
+		"temp_min", "temp_max",
+		"velocidad_cinta_min", "velocidad_cinta_max",
+	} {
+		var nullable string
+		err := p.QueryRow(context.Background(), `SELECT is_nullable FROM information_schema.columns WHERE table_name='productos' AND column_name=$1`, column).Scan(&nullable)
+		require.NoError(t, err)
+		require.Equal(t, "NO", nullable, "%s debería ser NOT NULL", column)
+	}
+
+	for _, column := range []string{"temp_setpoint", "velocidad_cinta_setpoint"} {
+		var nullable string
+		err := p.QueryRow(context.Background(), `SELECT is_nullable FROM information_schema.columns WHERE table_name='productos' AND column_name=$1`, column).Scan(&nullable)
+		require.NoError(t, err)
+		require.Equal(t, "YES", nullable, "%s debería ser nullable", column)
 	}
 }
 

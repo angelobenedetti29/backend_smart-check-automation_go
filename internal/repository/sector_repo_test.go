@@ -58,7 +58,12 @@ func TestSectorRepository_DeleteBloqueadoConLotes(t *testing.T) {
 	require.NoError(t, repo.Create(ctx, &sector.Sector{ID: "sector-lotes", Nombre: "Sector Lotes"}))
 
 	const productoID = "aaaaaaaa-0000-0000-0000-0000000000aa"
-	_, err := pool.Exec(ctx, `INSERT INTO productos (id, nombre) VALUES ($1, 'Producto Lotes')`, productoID)
+	_, err := pool.Exec(ctx, `INSERT INTO productos (
+		id, nombre,
+		peso_referencia_kg, tolerancia_peso_pct,
+		dimension_base_cm, tolerancia_dimension_cm,
+		temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
+	) VALUES ($1, 'Producto Lotes', 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3)`, productoID)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
 		INSERT INTO lotes_productivos (producto_id, inicio_at, estado, sector_id)

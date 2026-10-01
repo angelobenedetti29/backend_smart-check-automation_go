@@ -32,7 +32,12 @@ func setupLoteSectorRepo(t *testing.T) (*LoteSectorPostgresRepository, *pgxpool.
 	pool := repositoryTestPool(t)
 	ctx := context.Background()
 	_, err := pool.Exec(ctx,
-		`INSERT INTO productos (id, nombre, activo) VALUES ($1, 'Tostada Test', true)`, testProductoID)
+		`INSERT INTO productos (
+			id, nombre, activo,
+			peso_referencia_kg, tolerancia_peso_pct,
+			dimension_base_cm, tolerancia_dimension_cm,
+			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
+		) VALUES ($1, 'Tostada Test', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3)`, testProductoID)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx,
 		`INSERT INTO sectores (id, nombre) VALUES ($1, 'Sector Test')`, testSectorID)
