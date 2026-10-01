@@ -44,7 +44,7 @@ Operario (panel) ──►┌─────────────────
                                      │
         ┌────────────────────────────┼────────────────────────────┐
         ▼                            ▼                            ▼
-parametros_producto           oven_controller              horno.Repository
+productos                     oven_controller              horno.Repository
 (setpoint o rango,            .SendSetpoint()              .Update()
  según origen)                (simulado, PLC)               (estado en memoria)
                                      │
@@ -71,8 +71,8 @@ parametros_producto           oven_controller              horno.Repository
 ### Piezas existentes que se extendieron (no se reescribieron)
 
 - `internal/domain/horno/horno.go` — se agregaron `VelocidadCinta`, `ProductoID`, `LoteID`, y la constante `EstadoControlManual`. El horno **sigue en memoria** (decisión de arquitectura previa, documentada en `CLAUDE.md`); no hay hardware ni Postgres real detrás todavía.
-- `internal/domain/parametros_producto/parametros_producto.go` — se agregaron `TempSetpoint`/`VelocidadCintaSetpoint` (nullable), leídos por `internal/repository/parametros_producto_repo.go`.
-- `database/schema.sql` — tabla nueva `historial_consignas` + columnas nuevas en `parametros_producto` + catálogo completo de las 6 variedades de panificados.
+- `internal/domain/producto/producto.go` — la antigua tabla `parametros_producto` fue unificada en `productos`; los parámetros de control (incluidos `TempSetpoint`/`VelocidadCintaSetpoint` nullable) viven en el mismo registro del producto, leídos por `internal/repository/producto_repo.go`.
+- `database/schema.sql` — tabla nueva `historial_consignas` + parámetros de control y setpoints embebidos en `productos` + catálogo completo de las 6 variedades de panificados.
 
 ## 2.1 Catálogo de las 6 variedades (subtarea "matriz de parámetros óptimos")
 
@@ -87,7 +87,7 @@ parametros_producto           oven_controller              horno.Repository
 | Medialunas | 190 – **200** – 210 °C | 0.25 – **0.35** – 0.45 m/s |
 | Pan Dulce | 150 – **160** – 170 °C | 0.08 – **0.14** – 0.20 m/s |
 
-El mecanismo (`ConsignaService.DispatchAutomatico`/`DispatchManual` + `parametros_producto.GetByProductoID`) ya era genérico desde SCA-142 — esto fue únicamente carga de datos, sin cambios de código en el servicio. Valores de referencia, ajustables por el equipo de Producción vía `PUT /api/v1/parametros-producto` (que hoy solo actualiza rangos min/max, no los setpoints puntuales — ver nota en `CLAUDE.md`).
+El mecanismo (`ConsignaService.DispatchManual` + `producto.GetByID`) ya era genérico desde SCA-142 — esto fue únicamente carga de datos, sin cambios de lógica en el servicio. Valores de referencia, ajustables por el equipo de Producción vía `PUT /api/v1/productos/{id}` (que actualiza rangos min/max y setpoints opcionales).
 
 ## 2.2 Manejo de fallo de enlace: alerta crítica + CONTROL_MANUAL (histórico)
 
@@ -123,7 +123,7 @@ Fallo de enlace (Aplicada: false)
 - **`POST /api/v1/lotes/inicio` ≠ `POST /api/v1/lotes`**: el segundo sigue siendo un resumen que llega con el lote ya terminado (`inicioAt` y `finAt` juntos). El primero es el trigger real de "la IA identificó el producto", antes de que exista una fila en `lotes_productivos` — por eso genera un UUID de correlación propio (`crypto/rand`, sin dependencia nueva) en vez de esperar un ID real.
 - **`historial_consignas.lote_id` no tiene FK** a propósito: en el despacho automático el lote todavía no está persistido en ese momento. `producto_id` sí tiene FK real.
 - **El controlador físico es 100% simulado**, mismo patrón que `yolo_client`: no hay red, PLC ni hardware de por medio. El día que exista hardware real, se reemplaza `OvenControllerClient.SendSetpoint(...)` por un cliente real con la misma firma — nada más en el flujo cambia.
-- **`ConsignaManualRequest.ProductoID` es obligatorio** en el envío manual: siempre se valida contra el rango real cargado en `parametros_producto`, para no tener una segunda fuente de verdad de "qué es seguro" (límites hardcodeados).
+- **`ConsignaManualRequest.ProductoID` es obligatorio** en el envío manual: siempre se valida contra el rango real cargado en el producto unificado (`productos.temp_min`/`temp_max`, `velocidad_cinta_min`/`max`), para no tener una segunda fuente de verdad de "qué es seguro" (límites hardcodeados).
 - **`ConsignaManualRequest.LoteID` es opcional**: si el panel conoce el `loteId` del lote en curso (por ejemplo, el que devolvió `POST /api/v1/lotes/inicio`), puede mandarlo en el request manual para que ese ajuste quede correlacionado en el mismo historial de auditoría del lote. Si se omite, la consigna manual queda auditada igual, solo que sin lote asociado.
 - **Auditoría incluso en fallos**: si el controlador simulado rechaza la consigna (~5% de las veces), igual se guarda la fila en `historial_consignas` con `exitosa=false` y `motivo_error`.
 

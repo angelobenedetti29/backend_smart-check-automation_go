@@ -108,8 +108,9 @@ Reglas clave:
 - **Historial** (`supervision-table.tsx`): columnas por `conteos`; quitar turno/kg/temps.
 - **Dashboard global** (home): como `/lotes` es **por sector**, iterar `GET /sectores`
   y mergear para los KPIs globales (el número de sectores es chico).
-- **Catálogo**: usar `GET /productos` para el selector (filtrar `activo: true`) o
-  seguir con `/parametros-producto` para la configuración de umbrales.
+- **Catálogo**: usar `GET /api/v1/productos` para el selector (filtrar `activo: true`) y
+  `POST/PUT/DELETE /api/v1/productos[/{id}]` para la configuración de parámetros de control
+  (la antigua ruta `/parametros-producto` fue unificada en `/productos`).
 - **Consigna**: si se necesita consigna manual desde el panel, agregar UI sobre
   `POST /api/v1/horno/consigna` (UI aún no existe; el endpoint ya está disponible, SCA-320).
 

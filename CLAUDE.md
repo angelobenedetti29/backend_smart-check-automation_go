@@ -69,8 +69,7 @@ backend_smart-check-automation_go/
 │   │   ├── dualauth/                                # Auth dual (Bearer de dispositivo o cookie JWT)
 │   │   ├── horno/                                   # GET /api/v1/horno, POST /api/v1/horno/temperatura
 │   │   ├── lote_sector/                             # GET /api/v1/dispositivos/sector, POST /api/v1/lotes/inicio|{id}/eventos|{id}/cierre, GET /api/v1/lotes|/lotes/abierto
-│   │   ├── parametros_producto/                     # Handler GET/POST/PUT /api/v1/parametros-producto
-│   │   ├── producto/                                # GET /api/v1/productos
+│   │   ├── producto/                                # GET/POST /api/v1/productos, PUT|DELETE /api/v1/productos/{id}
 │   │   ├── registro/                                # POST|GET /api/v1/registration-requests (+ approve/reject)
 │   │   ├── sector/                                  # POST /api/v1/sectores, PUT|DELETE /api/v1/sectores/{id}
 │   │   ├── sse/                                     # Handler SSE genérico
@@ -81,8 +80,7 @@ backend_smart-check-automation_go/
 │   │   ├── dispositivo/                             # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo + DeviceRead
 │   │   ├── horno/                                   # Modelo Horno
 │   │   ├── lote_sector/                             # Modelo Lote + Evento + interfaces Repository/Service
-│   │   ├── parametros_producto/                     # Modelo ParametroProducto
-│   │   ├── producto/                                # Modelo Producto (catálogo maestro)
+│   │   ├── producto/                                # Modelo Producto (catálogo maestro + parámetros de control)
 │   │   ├── registro/                                # Modelo de solicitudes de enrolamiento
 │   │   ├── sector/                                  # Modelo Sector + contrato Repository
 │   │   └── user/                                    # Entidad User, constantes de roles, errores centinela
@@ -94,8 +92,7 @@ backend_smart-check-automation_go/
 │   ├── repository/
 │   │   ├── lote_sector_repo.go                      # PostgreSQL — ciclo de lote por sector
 │   │   ├── sector_repo.go                           # PostgreSQL — sectores y relación con dispositivos
-│   │   ├── producto_repo.go                         # PostgreSQL — catálogo de productos
-│   │   ├── parametros_producto_repo.go              # PostgreSQL — GET/CREATE/UPDATE parametros_producto
+│   │   ├── producto_repo.go                         # PostgreSQL — catálogo de productos y sus parámetros de control
 │   │   ├── dispositivo_repo.go                      # PostgreSQL — Dispositivos y métricas
 │   │   ├── device_auth_repo.go                      # PostgreSQL — credenciales de nodos (secret_hash)
 │   │   ├── registro_repo.go                         # PostgreSQL — solicitudes de enrolamiento
@@ -107,13 +104,12 @@ backend_smart-check-automation_go/
 │       ├── dispositivo/                             # Lógica de ping, reaper y SSE
 │       ├── horno/                                   # Lógica de umbrales térmicos y alertas
 │       ├── lote_sector/                             # Ciclo de lote por sector (apertura, eventos, cierre, historial)
-│       ├── parametros_producto/                     # Alta/consulta/actualización de parámetros
-│       ├── producto/                                # Catálogo de productos
+│       ├── producto/                                # Catálogo de productos y sus parámetros de control
 │       ├── registro/                                # Enrolamiento de dispositivos
 │       ├── sector/                                  # CRUD de sectores (slug de id, borrado bloqueado con lotes)
 │       └── user/                                    # ListUsers, CreateUser, UpdateUser
 ├── pkg/response/response.go                         # Envelope JSON estándar {success, message, data, errors}
-├── database/schema.sql                              # DDL: productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo + historial_consignas + usuarios + sectores + eventos_lote + registration_requests + device_lifecycle_audit
+├── database/schema.sql                              # DDL: productos (catálogo + parámetros de control) + lotes_productivos + dispositivos + metricas_dispositivo + historial_consignas + usuarios + sectores + eventos_lote + registration_requests + device_lifecycle_audit
 ├── Dockerfile                                       # Multi-stage build: golang:1.25-alpine → alpine
 ├── docker-compose.yml
 ├── .env.example                                     # Plantilla de variables
@@ -122,9 +118,8 @@ backend_smart-check-automation_go/
 
 ## Schema de base de datos (fuente de verdad: database/schema.sql)
 
-- **productos**: Catálogo maestro.
+- **productos**: Catálogo maestro **y** parámetros de control embebidos (peso, dimensión, temperatura, velocidad de cinta y setpoints opcionales). La antigua tabla `parametros_producto` fue unificada y eliminada; `temp_setpoint`/`velocidad_cinta_setpoint` son nullable y sólo se usan si se reactiva el despacho automático (SCA-142).
 - **lotes_productivos**: Registros transaccionales de horneadas (con `sector_id`).
-- **parametros_producto**: Umbrales ideales y setpoints de cocción.
 - **sectores**: Sectores de producción (`id` legible tipo slug, `nombre`). Un dispositivo pertenece a un sector (`dispositivos.sector_id`, nullable); la columna legacy `dispositivos.ubicacion` fue eliminada y sus valores migrados a sectores al arrancar (migración idempotente; si dos dispositivos del mismo tipo comparten ubicación solo el primero queda asignado, y nunca viola `uq_dispositivos_sector_tipo`). El `DROP COLUMN` es irreversible: un rollback al binario anterior requiere restaurar la columna. El deploy de frontend y backend debe ser coordinado (el decoder es estricto: `ubicacion` vs `sectorId`).
 - **dispositivos** & **metricas_dispositivo**: Nodos Raspberry Pi y telemetría (CPU/RAM/Temp).
 - **historial_consignas**: Auditoría de las consignas manuales enviadas al horno. `origen='AUTOMATICO'` solo aparece en registros históricos: el despacho automático (SCA-142) fue retirado y hoy solo se despacha consigna manual (SCA-320).
@@ -150,6 +145,9 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | GET | /api/v1/horno | JWT cookie | cualquier rol |
 | POST | /api/v1/horno/temperatura | JWT cookie | Supervisor, Admin |
 | GET | /api/v1/productos | Bearer dispositivo o JWT cookie | — |
+| POST | /api/v1/productos | JWT cookie | Supervisor, Admin |
+| PUT | /api/v1/productos/{id} | JWT cookie | Supervisor, Admin |
+| DELETE | /api/v1/productos/{id} | JWT cookie | Supervisor, Admin |
 | GET | /api/v1/dispositivos/sector | Bearer dispositivo | — |
 | GET | /api/v1/sectores | JWT cookie | cualquier rol |
 | POST | /api/v1/sectores | JWT cookie | Supervisor, Admin |
@@ -161,7 +159,6 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | POST | /api/v1/lotes/{id}/cierre | Bearer dispositivo | — |
 | GET | /api/v1/lotes | Bearer dispositivo o JWT cookie | — |
 | GET | /api/v1/lotes/events | JWT cookie | cualquier rol |
-| GET/POST/PUT | /api/v1/parametros-producto | JWT cookie | Supervisor, Admin (escrituras) |
 | POST | /api/v1/dispositivos/ping | Bearer dispositivo | — |
 | GET | /api/v1/dispositivos | JWT cookie | cualquier rol |
 | PUT | /api/v1/dispositivos | JWT cookie | Supervisor, Admin |

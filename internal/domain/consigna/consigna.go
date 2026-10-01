@@ -62,8 +62,8 @@ type Consigna struct {
 
 // ConsignaManualRequest es el payload JSON entrante del panel web para el
 // envío manual de consigna térmica (SCA-320). ProductoID es obligatorio: el
-// despacho manual siempre valida contra el rango real cargado en
-// parametros_producto, sin caer a límites de seguridad hardcodeados.
+// despacho manual siempre valida contra el rango real cargado en el producto
+// unificado, sin caer a límites de seguridad hardcodeados.
 type ConsignaManualRequest struct {
 	HornoID                string  `json:"hornoId"`
 	ProductoID             string  `json:"productoId"`
@@ -79,7 +79,7 @@ type ConsignaManualRequest struct {
 
 // Validate aplica las reglas de forma básicas del request (presencia, valores
 // positivos). El rango seguro específico por producto se valida en el
-// Service, porque depende de datos de parametros_producto, no es una regla
+// Service, porque depende de datos del producto unificado, no es una regla
 // de forma pura de dominio.
 func (r ConsignaManualRequest) Validate() error {
 	var errs []string

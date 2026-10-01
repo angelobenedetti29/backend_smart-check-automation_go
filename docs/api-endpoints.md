@@ -142,6 +142,7 @@ curl -H "Authorization: Bearer $DEVICE_SECRET" http://localhost:8080/api/v1/prod
       "dimensionBaseCm": 12.0, "toleranciaDimensionCm": 0.5,
       "tempMin": 180.0, "tempMax": 220.0,
       "velocidadCintaMin": 0.1, "velocidadCintaMax": 0.3,
+      "tempSetpoint": 200.0, "velocidadCintaSetpoint": 0.2,
       "activo": true, "createdAt": "...", "updatedAt": "..."
     }
   ],
@@ -232,7 +233,24 @@ Respuesta `200 OK` con `{ "id": "...", "activo": false }`.
 | 404 | El producto no existe |
 | 500 | Error interno |
 
-**Reglas de validación (POST/PUT):** `nombre` requerido (1–100 caracteres) · `pesoReferenciaKg > 0` · `toleranciaPesoPct >= 0` · `dimensionBaseCm > 0` · `toleranciaDimensionCm >= 0` · `tempMax > tempMin` · `velocidadCintaMax > velocidadCintaMin`.
+**Reglas de validación (POST/PUT):** `nombre` requerido (1–100 caracteres) · `pesoReferenciaKg > 0` · `toleranciaPesoPct >= 0` · `dimensionBaseCm > 0` · `toleranciaDimensionCm >= 0` · `tempMax > tempMin` · `velocidadCintaMax > velocidadCintaMin` · `tempSetpoint` (opcional) dentro de `[tempMin, tempMax]` · `velocidadCintaSetpoint` (opcional) dentro de `[velocidadCintaMin, velocidadCintaMax]`.
+
+**Setpoints opcionales:** `tempSetpoint` y `velocidadCintaSetpoint` son nullable y opcionales en el body. Si se omiten, la DB los guarda como `NULL`; si se envían, deben caer dentro del rango min/max correspondiente. En la respuesta sólo aparecen cuando tienen valor (`omitempty`).
+
+**Forma del error 422:** `errors` es un objeto campo→mensaje (no un string), para que el frontend pueda poblar `ProductoErrores` campo por campo.
+
+```json
+{
+  "success": false,
+  "message": "Datos de producto inválidos",
+  "data": null,
+  "errors": {
+    "nombre": "es requerido",
+    "pesoReferenciaKg": "debe ser un valor numérico mayor a 0",
+    "tempSetpoint": "debe estar entre tempMin y tempMax"
+  }
+}
+```
 
 ---
 
