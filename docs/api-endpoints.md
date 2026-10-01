@@ -39,7 +39,7 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 |---|---|---|
 | 1 | `GET /api/v1/horno` | Consultar estado actual del horno |
 | 2 | `POST /api/v1/horno/temperatura` | Actualizar temperatura del horno (umbrales/alertas) |
-| 3 | `GET /api/v1/productos` | Catálogo maestro de productos |
+| 3 | `GET/POST /api/v1/productos`, `PUT/DELETE /api/v1/productos/{id}` | Catálogo maestro de productos y sus parámetros de control |
 | 4 | `GET /api/v1/dispositivos/sector` | Sector y compañeros del dispositivo autenticado |
 | 5 | `GET/POST /api/v1/sectores`, `PUT/DELETE /api/v1/sectores/{id}` | CRUD de sectores |
 | 6 | `POST /api/v1/lotes/inicio` | Abrir (o adjuntarse a) el lote abierto del sector |
@@ -47,18 +47,15 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 8 | `POST /api/v1/lotes/{id}/eventos` | Reportar detecciones del lote |
 | 9 | `POST /api/v1/lotes/{id}/cierre` | Cerrar el lote con los conteos finales |
 | 10 | `GET /api/v1/lotes` | Historial paginado de lotes por sector |
-| 11 | `GET /api/v1/parametros-producto` | Listar parámetros de control por producto |
-| 12 | `POST /api/v1/parametros-producto` | Alta de parámetros para un producto |
-| 13 | `PUT /api/v1/parametros-producto` | Modificar parámetros de un producto |
-| 14 | `POST /api/v1/dispositivos/ping` | Recibir telemetría de una Raspberry Pi |
-| 15 | `GET/PUT/DELETE /api/v1/dispositivos`, `PUT /api/v1/dispositivos/{id}/nombre` | Estado online/offline, modificación, baja lógica y rename desde el panel |
-| 16 | `GET /api/v1/dispositivos/metricas` | Historial de métricas de un dispositivo (paginado) |
-| 17 | `POST /api/v1/horno/consigna` | Envío manual de consigna térmica al horno |
-| 18 | `GET /api/v1/horno/consigna/historial` | Historial de auditoría de consignas por lote |
-| 19 | `GET /api/v1/lotes/events` | SSE: ciclo de vida de lotes (`lote.creado`/`actualizado`/`cerrado`) |
-| 20 | `GET /api/v1/dispositivos/events` | SSE: telemetría de dispositivos en tiempo real |
-| 21 | `GET /api/v1/horno/events` | SSE: consignas despachadas al horno |
-| 22 | `GET /health`, `GET /healthz`, `GET /` | Salud del servicio / info |
+| 11 | `POST /api/v1/dispositivos/ping` | Recibir telemetría de una Raspberry Pi |
+| 12 | `GET/PUT/DELETE /api/v1/dispositivos`, `PUT /api/v1/dispositivos/{id}/nombre` | Estado online/offline, modificación, baja lógica y rename desde el panel |
+| 13 | `GET /api/v1/dispositivos/metricas` | Historial de métricas de un dispositivo (paginado) |
+| 14 | `POST /api/v1/horno/consigna` | Envío manual de consigna térmica al horno |
+| 15 | `GET /api/v1/horno/consigna/historial` | Historial de auditoría de consignas por lote |
+| 16 | `GET /api/v1/lotes/events` | SSE: ciclo de vida de lotes (`lote.creado`/`actualizado`/`cerrado`) |
+| 17 | `GET /api/v1/dispositivos/events` | SSE: telemetría de dispositivos en tiempo real |
+| 18 | `GET /api/v1/horno/events` | SSE: consignas despachadas al horno |
+| 19 | `GET /health`, `GET /healthz`, `GET /` | Salud del servicio / info |
 
 ---
 
@@ -121,7 +118,11 @@ curl -X POST http://localhost:8080/api/v1/horno/temperatura \
 
 ---
 
-## 3. `GET /api/v1/productos` — Catálogo maestro de productos
+## 3. `/api/v1/productos` — Catálogo maestro de productos
+
+El catálogo es la fuente única de productos y de sus parámetros de control de horneado (peso, dimensión, temperatura y velocidad de cinta). Ya no existe la tabla/endpoint separado `parametros-producto`.
+
+### `GET /api/v1/productos`
 
 Devuelve el catálogo completo, incluidos los productos inactivos (la Raspberry filtra por vigencia; el panel puebla selectores). Lo consume tanto el nodo como el panel.
 
@@ -134,16 +135,104 @@ curl -H "Authorization: Bearer $DEVICE_SECRET" http://localhost:8080/api/v1/prod
 ```json
 {
   "success": true, "message": "Productos obtenidos exitosamente",
-  "data": [ { "id": "a1b2c3d4-5678-90ab-cdef-1234567890ab", "nombre": "Tostada Integral", "activo": true } ],
+  "data": [
+    {
+      "id": "a1b2c3d4-5678-90ab-cdef-1234567890ab", "nombre": "Tostada Integral",
+      "pesoReferenciaKg": 0.25, "toleranciaPesoPct": 5.0,
+      "dimensionBaseCm": 12.0, "toleranciaDimensionCm": 0.5,
+      "tempMin": 180.0, "tempMax": 220.0,
+      "velocidadCintaMin": 0.1, "velocidadCintaMax": 0.3,
+      "activo": true, "createdAt": "...", "updatedAt": "..."
+    }
+  ],
   "errors": null
 }
 ```
 
 | Código | Motivo |
 |---|---|
-| 405 | Método distinto de GET |
 | 401 | Bearer de dispositivo inválido, o falta la cookie JWT / sesión expirada |
 | 500 | Error interno |
+
+### `POST /api/v1/productos` — Alta de producto
+
+Da de alta un producto nuevo con sus parámetros de control embebidos. El `id` lo asigna el servidor.
+
+**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador. `Content-Type: application/json` obligatorio.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/productos \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
+  -d '{
+    "nombre": "Pan Lactal",
+    "pesoReferenciaKg": 0.5, "toleranciaPesoPct": 8.0,
+    "dimensionBaseCm": 25.0, "toleranciaDimensionCm": 1.0,
+    "tempMin": 180.0, "tempMax": 200.0,
+    "velocidadCintaMin": 0.15, "velocidadCintaMax": 0.35
+  }'
+```
+
+Respuesta `201 Created` con el producto creado (`activo: true` por defecto).
+
+| Código | Motivo |
+|---|---|
+| 403 | Rol insuficiente (se requiere Supervisor o Administrador) |
+| 415 | `Content-Type` inválido |
+| 400 | JSON inválido |
+| 422 | Validación fallida (ver reglas abajo) |
+| 409 | Ya existe un producto con ese nombre (comparación case-insensitive) |
+| 500 | Error interno |
+
+### `PUT /api/v1/productos/{id}` — Modificar producto
+
+Actualiza los datos y parámetros de control de un producto existente. El id se toma del path.
+
+**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador. Mismas reglas de Content-Type/validación que el POST.
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/productos/a1b2c3d4-5678-90ab-cdef-1234567890ab \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
+  -d '{
+    "nombre": "Tostada Integral",
+    "pesoReferenciaKg": 0.28, "toleranciaPesoPct": 5.0,
+    "dimensionBaseCm": 12.0, "toleranciaDimensionCm": 0.5,
+    "tempMin": 185.0, "tempMax": 225.0,
+    "velocidadCintaMin": 0.10, "velocidadCintaMax": 0.30
+  }'
+```
+
+Respuesta `200 OK` con el producto actualizado.
+
+| Código | Motivo |
+|---|---|
+| 403 | Rol insuficiente |
+| 415 | `Content-Type` inválido |
+| 400 | JSON inválido |
+| 404 | El producto no existe |
+| 409 | El nombre colisiona con otro producto |
+| 422 | Validación fallida |
+| 500 | Error interno |
+
+### `DELETE /api/v1/productos/{id}` — Baja lógica de producto
+
+Marca el producto como `activo=false` (no se ofrece para elegir, pero sigue resolviendo lotes históricos).
+
+**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador.
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/productos/a1b2c3d4-5678-90ab-cdef-1234567890ab \
+  -b "session_token=$JWT"
+```
+
+Respuesta `200 OK` con `{ "id": "...", "activo": false }`.
+
+| Código | Motivo |
+|---|---|
+| 403 | Rol insuficiente |
+| 404 | El producto no existe |
+| 500 | Error interno |
+
+**Reglas de validación (POST/PUT):** `nombre` requerido (1–100 caracteres) · `pesoReferenciaKg > 0` · `toleranciaPesoPct >= 0` · `dimensionBaseCm > 0` · `toleranciaDimensionCm >= 0` · `tempMax > tempMin` · `velocidadCintaMax > velocidadCintaMin`.
 
 ---
 
@@ -401,105 +490,7 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/lotes?sector_id=horno
 
 ---
 
-## 11. `GET /api/v1/parametros-producto` — Listar parámetros de control por producto
-
-Devuelve el ABM completo: rangos de temperatura/velocidad y setpoints puntuales por producto (JOIN con `productos`).
-
-**Auth:** cookie JWT `session_token` (cualquier rol).
-
-```bash
-curl -b "session_token=$JWT" http://localhost:8080/api/v1/parametros-producto
-```
-
-```json
-{
-  "success": true, "message": "Parámetros por producto obtenidos exitosamente",
-  "data": [
-    {
-      "id": "pp-1", "productoId": "a1b2c3d4-...", "productoNombre": "Tostada Integral",
-      "pesoReferenciaKg": 0.030, "toleranciaPesoPct": 10.00,
-      "dimensionBaseCm": 8.00, "toleranciaDimensionCm": 0.50,
-      "tempMin": 160.00, "tempMax": 180.00, "tempSetpoint": 170.00,
-      "velocidadCintaMin": 0.10, "velocidadCintaMax": 0.30, "velocidadCintaSetpoint": 0.20,
-      "activo": true, "createdAt": "...", "updatedAt": "..."
-    }
-  ]
-}
-```
-
-| Código | Motivo |
-|---|---|
-| 405 | Método distinto de GET/POST/PUT (los tres endpoints #11/12/13 comparten un único `Handle()` que despacha por `r.Method`) |
-| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
-| 500 | Error interno |
-
----
-
-## 12. `POST /api/v1/parametros-producto` — Alta de parámetros para un producto
-
-Da de alta el set de umbrales de control para un producto que todavía no lo tiene (relación 1:1). No acepta `tempSetpoint`/`velocidadCintaSetpoint` en el body — esos se cargan aparte.
-
-**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador. `Content-Type: application/json` obligatorio.
-
-```bash
-curl -X POST http://localhost:8080/api/v1/parametros-producto \
-  -b "session_token=$JWT" -H "Content-Type: application/json" \
-  -d '{
-    "productoId": "b2c3d4e5-6789-01ab-cdef-234567890abc",
-    "pesoReferenciaKg": 0.5, "toleranciaPesoPct": 8.0,
-    "dimensionBaseCm": 25.0, "toleranciaDimensionCm": 1.0,
-    "tempMin": 180.0, "tempMax": 200.0,
-    "velocidadCintaMin": 0.15, "velocidadCintaMax": 0.35
-  }'
-```
-
-Respuesta `201 Created` con el registro creado (`activo: true` por defecto).
-
-| Código | Motivo |
-|---|---|
-| 403 | Rol insuficiente (se requiere Supervisor o Administrador) |
-| 415 | `Content-Type` inválido |
-| 400 | JSON inválido |
-| 422 | Validación falló (ver reglas abajo), o `productoId` no existe en el catálogo (FK) |
-| 409 | El producto ya tiene un set de parámetros cargado |
-| 500 | Error interno |
-
-**Reglas de validación:** `productoId` requerido · `pesoReferenciaKg > 0` · `toleranciaPesoPct >= 0` · `dimensionBaseCm > 0` · `toleranciaDimensionCm >= 0` · `tempMax > tempMin` · `velocidadCintaMax > velocidadCintaMin`.
-
----
-
-## 13. `PUT /api/v1/parametros-producto` — Modificar parámetros de un producto
-
-Actualiza el set existente. El producto a modificar se identifica por `productoId` **en el body**, no en la URL (mismo endpoint que el GET/POST, dispatch por `r.Method`).
-
-**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador. Mismas reglas de Content-Type/validación que el POST.
-
-```bash
-curl -X PUT http://localhost:8080/api/v1/parametros-producto \
-  -b "session_token=$JWT" -H "Content-Type: application/json" \
-  -d '{
-    "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-    "pesoReferenciaKg": 0.035, "toleranciaPesoPct": 10.0,
-    "dimensionBaseCm": 8.0, "toleranciaDimensionCm": 0.5,
-    "tempMin": 165.0, "tempMax": 185.0,
-    "velocidadCintaMin": 0.10, "velocidadCintaMax": 0.30
-  }'
-```
-
-Respuesta `200 OK` con el registro actualizado.
-
-| Código | Motivo |
-|---|---|
-| 403 | Rol insuficiente |
-| 415 | `Content-Type` inválido |
-| 400 | JSON inválido |
-| 422 | Validación falló |
-| 404 | No existe un set de parámetros para ese `productoId` |
-| 500 | Error interno |
-
----
-
-## 14. `POST /api/v1/dispositivos/ping` — Telemetría de Raspberry Pi
+## 11. `POST /api/v1/dispositivos/ping` — Telemetría de Raspberry Pi
 
 Cada Raspberry Pi manda esto cada ~10s con su estado de salud (CPU/RAM/almacenamiento/temperatura del chip). Actualiza el caché de estado online/offline en memoria, persiste el historial en Postgres (fire-and-forget) y emite SSE.
 
@@ -538,7 +529,7 @@ curl -X POST http://localhost:8080/api/v1/dispositivos/ping \
 
 ---
 
-## 15. `GET /api/v1/dispositivos` — Estado online/offline de todos los dispositivos
+## 12. `GET /api/v1/dispositivos` — Estado online/offline de todos los dispositivos
 
 Lectura desde el caché en memoria (no toca Postgres) — rápida, para refrescar el panel. La misma ruta para `PUT` administra el catálogo y para `DELETE` da de baja lógica un dispositivo (ambos requieren JWT con rol Supervisor/Admin).
 
@@ -636,7 +627,7 @@ curl -X PUT -b "session_token=$JWT" -H "Content-Type: application/json" \
 
 ---
 
-## 16. `GET /api/v1/dispositivos/metricas` — Historial de métricas de un dispositivo
+## 13. `GET /api/v1/dispositivos/metricas` — Historial de métricas de un dispositivo
 
 Historial paginado desde Postgres (`metricas_dispositivo`), no el caché.
 
@@ -664,7 +655,7 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos/metricas
 
 ---
 
-## 17. `POST /api/v1/horno/consigna` — Envío manual de consigna térmica — SCA-320
+## 14. `POST /api/v1/horno/consigna` — Envío manual de consigna térmica — SCA-320
 
 Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual).
 
@@ -712,7 +703,7 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
 
 ---
 
-## 18. `GET /api/v1/horno/consigna/historial` — Historial de auditoría por lote
+## 15. `GET /api/v1/horno/consigna/historial` — Historial de auditoría por lote
 
 Devuelve todas las consignas asociadas a un `loteId`, ordenadas de más reciente a más antigua. `origen='AUTOMATICO'` solo aparece en registros históricos: el despacho automático (SCA-142) fue retirado.
 
@@ -741,7 +732,7 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno/consigna/histor
 
 ---
 
-## 19–21. Endpoints SSE (Server-Sent Events)
+## 16–18. Endpoints SSE (Server-Sent Events)
 
 Los tres comparten el mismo handler genérico, cada uno con su propio broker (sin cruce de eventos entre sí). Requieren la cookie JWT `session_token` y aceptan cualquier rol autenticado. No usan el envelope JSON estándar — son streams `text/event-stream`.
 
@@ -777,7 +768,7 @@ Se manda un comentario `: heartbeat` cada 30s para mantener la conexión viva. L
 
 ---
 
-## 22. Salud del servicio
+## 19. Salud del servicio
 
 **`GET /health`, `GET /healthz`** — hacen `ping` a PostgreSQL con timeout de 2s.
 
@@ -812,7 +803,7 @@ Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database un
 | `PUT /api/v1/dispositivos/{id}/nombre` | JWT cookie (`session_token`), Supervisor/Admin | ✅ | ✅ |
 | `DELETE /api/v1/dispositivos` | JWT cookie (`session_token`), Supervisor/Admin | — | — |
 | `POST /api/v1/horno/temperatura` | JWT cookie, Supervisor/Admin | ❌ | ❌ |
-| `POST/PUT /api/v1/parametros-producto` | JWT cookie, Supervisor/Admin | ✅ | ✅ |
+| `POST /api/v1/productos`, `PUT/DELETE /api/v1/productos/{id}` | JWT cookie, Supervisor/Admin | ✅ (POST/PUT) | ✅ (POST/PUT) |
 | `POST /api/v1/horno/consigna` | JWT cookie, Operario/Supervisor/Admin | ✅ | ✅ |
 | `GET /api/v1/dispositivos` | JWT cookie (`session_token`) | — | — |
 | `GET /api/v1/dispositivos/metricas` | JWT cookie (`session_token`) | — | — |
