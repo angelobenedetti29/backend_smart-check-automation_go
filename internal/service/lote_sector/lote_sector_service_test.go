@@ -122,6 +122,22 @@ func (f *fakeProductoRepo) GetByID(ctx context.Context, id string) (*producto.Pr
 	return f.getByID(ctx, id)
 }
 
+func (f *fakeProductoRepo) Create(context.Context, *producto.Producto) (*producto.Producto, error) {
+	return nil, producto.ErrDesconocido
+}
+
+func (f *fakeProductoRepo) Update(context.Context, *producto.Producto) (*producto.Producto, error) {
+	return nil, producto.ErrDesconocido
+}
+
+func (f *fakeProductoRepo) Deactivate(context.Context, string) error {
+	return producto.ErrDesconocido
+}
+
+func (f *fakeProductoRepo) ExistsByNombre(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
 // --- Helpers ---------------------------------------------------------------
 
 func sectorConDispositivo() *fakeSectorRepo {

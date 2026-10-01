@@ -17,6 +17,13 @@ import (
 // los repositorios que traducen ese 22P02 a un error de dominio.
 const pgErrCodeInvalidTextRepresentation = "22P02"
 
+// Códigos de error de PostgreSQL relevantes (ver
+// https://www.postgresql.org/docs/current/errcodes-appendix.html).
+const (
+	pgErrCodeUniqueViolation     = "23505"
+	pgErrCodeForeignKeyViolation = "23503"
+)
+
 // SectorPostgresRepository implementa sector.Repository usando pgxpool.
 type SectorPostgresRepository struct {
 	db *pgxpool.Pool

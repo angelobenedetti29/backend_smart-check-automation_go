@@ -10,7 +10,7 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
-	parametrosproducto "github.com/angelobenedetti29/smart-check-automation/internal/domain/parametros_producto"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
@@ -32,7 +32,7 @@ type OvenController interface {
 type ConsignaService struct {
 	consignaRepo consigna.Repository
 	hornoRepo    horno.Repository
-	paramRepo    parametrosproducto.Repository
+	productoRepo producto.Repository
 	alertaRepo   alerta.Repository
 	controller   OvenController
 	broker       *sse.Broker
@@ -44,7 +44,7 @@ type ConsignaService struct {
 func NewConsignaService(
 	consignaRepo consigna.Repository,
 	hornoRepo horno.Repository,
-	paramRepo parametrosproducto.Repository,
+	productoRepo producto.Repository,
 	controller OvenController,
 	broker *sse.Broker,
 	alertaRepo alerta.Repository,
@@ -52,20 +52,20 @@ func NewConsignaService(
 	return &ConsignaService{
 		consignaRepo: consignaRepo,
 		hornoRepo:    hornoRepo,
-		paramRepo:    paramRepo,
+		productoRepo: productoRepo,
 		alertaRepo:   alertaRepo,
 		controller:   controller,
 		broker:       broker,
 	}
 }
 
-// DispatchManual valida el request contra el rango seguro cargado en
-// parametros_producto para req.ProductoID y, si es válido, despacha la
-// consigna solicitada por el operario desde el panel (SCA-320). No se bloquea
-// si el horno está en CONTROL_MANUAL — es justamente la vía de escape para
-// reactivarlo.
+// DispatchManual valida el request contra el rango seguro cargado en el
+// producto (temp_min/temp_max y velocidad_cinta_min/max) y, si es válido,
+// despacha la consigna solicitada por el operario desde el panel (SCA-320). No
+// se bloquea si el horno está en CONTROL_MANUAL — es justamente la vía de
+// escape para reactivarlo.
 func (s *ConsignaService) DispatchManual(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
-	p, err := s.paramRepo.GetByProductoID(ctx, req.ProductoID)
+	p, err := s.productoRepo.GetByID(ctx, req.ProductoID)
 	if err != nil {
 		return nil, consigna.ErrParametrosNoExiste
 	}

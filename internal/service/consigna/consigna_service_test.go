@@ -8,7 +8,7 @@ import (
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
-	parametrosproducto "github.com/angelobenedetti29/smart-check-automation/internal/domain/parametros_producto"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
@@ -30,52 +30,63 @@ func (f *fakeController) SendSetpoint(hornoID string, temperatura, velocidad flo
 
 const testProductoID = "a1b2c3d4-5678-90ab-cdef-1234567890ab"
 
-// fakeParamRepo es un mock en memoria de parametros_producto.Repository.
+// fakeParamRepo es un mock en memoria de producto.Repository.
 type fakeParamRepo struct {
-	byProducto map[string]parametrosproducto.ParametroProducto
+	byProducto map[string]producto.Producto
 }
 
 func newFakeParamRepo() *fakeParamRepo {
-	return &fakeParamRepo{byProducto: make(map[string]parametrosproducto.ParametroProducto)}
+	return &fakeParamRepo{byProducto: make(map[string]producto.Producto)}
 }
 
-func (f *fakeParamRepo) GetAll(ctx context.Context) ([]parametrosproducto.ParametroProducto, error) {
-	var out []parametrosproducto.ParametroProducto
+func (f *fakeParamRepo) List(context.Context) ([]producto.Producto, error) {
+	var out []producto.Producto
 	for _, p := range f.byProducto {
 		out = append(out, p)
 	}
 	return out, nil
 }
 
-func (f *fakeParamRepo) GetByProductoID(ctx context.Context, productoID string) (*parametrosproducto.ParametroProducto, error) {
+func (f *fakeParamRepo) GetByID(ctx context.Context, productoID string) (*producto.Producto, error) {
 	if p, ok := f.byProducto[productoID]; ok {
 		return &p, nil
 	}
-	return nil, parametrosproducto.ErrNotFound
+	return nil, producto.ErrDesconocido
 }
 
-func (f *fakeParamRepo) Create(ctx context.Context, p *parametrosproducto.ParametroProducto) error {
-	f.byProducto[p.ProductoID] = *p
+func (f *fakeParamRepo) Create(ctx context.Context, p *producto.Producto) (*producto.Producto, error) {
+	f.byProducto[p.ID] = *p
+	return p, nil
+}
+
+func (f *fakeParamRepo) Update(ctx context.Context, p *producto.Producto) (*producto.Producto, error) {
+	f.byProducto[p.ID] = *p
+	return p, nil
+}
+
+func (f *fakeParamRepo) Deactivate(ctx context.Context, id string) error {
+	p, ok := f.byProducto[id]
+	if !ok {
+		return producto.ErrDesconocido
+	}
+	p.Activo = false
+	f.byProducto[id] = p
 	return nil
 }
 
-func (f *fakeParamRepo) Update(ctx context.Context, p *parametrosproducto.ParametroProducto) error {
-	f.byProducto[p.ProductoID] = *p
-	return nil
+func (f *fakeParamRepo) ExistsByNombre(ctx context.Context, nombre string, exceptoID string) (bool, error) {
+	return false, nil
 }
 
-func floatPtr(v float64) *float64 { return &v }
-
-// baseParametros devuelve un set de parámetros válido con setpoint cargado para testProductoID.
-func baseParametros() parametrosproducto.ParametroProducto {
-	return parametrosproducto.ParametroProducto{
-		ProductoID:             testProductoID,
-		TempMin:                160.00,
-		TempMax:                180.00,
-		VelocidadCintaMin:      0.10,
-		VelocidadCintaMax:      0.30,
-		TempSetpoint:           floatPtr(170.00),
-		VelocidadCintaSetpoint: floatPtr(0.20),
+// baseParametros devuelve un producto válido con rango de control cargado para testProductoID.
+func baseParametros() producto.Producto {
+	return producto.Producto{
+		ID:                testProductoID,
+		Nombre:            "Tostada Integral",
+		TempMin:           160.00,
+		TempMax:           180.00,
+		VelocidadCintaMin: 0.10,
+		VelocidadCintaMax: 0.30,
 	}
 }
 

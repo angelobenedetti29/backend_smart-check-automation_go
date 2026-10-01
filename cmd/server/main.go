@@ -23,7 +23,6 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/dualauth"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
-	parametrosProductoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/parametros_producto"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
 	registroController "github.com/angelobenedetti29/smart-check-automation/internal/controller/registro"
 	sectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sector"
@@ -42,7 +41,6 @@ import (
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
-	parametrosProductoService "github.com/angelobenedetti29/smart-check-automation/internal/service/parametros_producto"
 	productoService "github.com/angelobenedetti29/smart-check-automation/internal/service/producto"
 	registroService "github.com/angelobenedetti29/smart-check-automation/internal/service/registro"
 	sectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/sector"
@@ -95,7 +93,6 @@ func main() {
 	ovenController := oven_controller.NewOvenControllerClient("http://localhost:8600/plc/horno")
 
 	// Real PostgreSQL repositories
-	parametrosProductoRepo := repository.NewParametrosProductoPostgresRepository(pgPool)
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
 	consignaRepo := repository.NewConsignaPostgresRepository(pgPool)
 	userRepo := repository.NewUserPostgresRepository(pgPool)
@@ -120,14 +117,13 @@ func main() {
 
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
-	parametrosProductoSvc := parametrosProductoService.NewParametrosProductoService(parametrosProductoRepo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	renamePushTimeout := getEnvDuration("DISPOSITIVO_RENAME_PUSH_TIMEOUT", 10*time.Second)
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker, renamePushTimeout)
 	// Autenticación de nodos: Bearer <secret> resuelto por hash contra dispositivos activos.
 	deviceVerifier := &deviceauth.Verifier{Store: deviceAuthRepo}
 	registroSvc := registroService.NewService(registrationRepo)
-	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, parametrosProductoRepo, ovenController, hornoSSEBroker, dbRepo)
+	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, productoRepo, ovenController, hornoSSEBroker, dbRepo)
 
 	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
 	userSvc := userService.NewService(userRepo)
@@ -152,7 +148,6 @@ func main() {
 
 	// 4. Instantiate Presentation HTTP Handlers
 	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
-	parametrosProductoHandler := parametrosProductoController.NewParametrosProductoHandler(parametrosProductoSvc)
 	loteSectorSSEHandler := sseController.NewSSEHandler(loteSectorSSEBroker)
 	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc, dispositivoRepo)
 	registroHandler := registroController.NewHandler(registroSvc)
@@ -217,7 +212,19 @@ func main() {
 			response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
 		}
 	}))
-	mux.HandleFunc("/api/v1/productos", loggingMiddleware(dualauth.DualAuth(deviceVerifier, jwtSecretBytes, productoHandler.Handle)))
+	// Catálogo de productos: GET mantiene el auth dual (Bearer de dispositivo o
+	// cookie JWT) para que la Raspberry resuelva el catálogo; POST/PUT/DELETE son
+	// escrituras del panel con JWT y rol Supervisor/Administrador.
+	productoWrite := authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(productoHandler.Handle)))
+	productoRoleAware := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, productoHandler.Handle)(w, r)
+			return
+		}
+		productoWrite(w, r)
+	}
+	mux.HandleFunc("/api/v1/productos", loggingMiddleware(productoRoleAware))
+	mux.HandleFunc("/api/v1/productos/", loggingMiddleware(productoRoleAware))
 	mux.HandleFunc("/api/v1/dispositivos/sector", loggingMiddleware(loteSectorHandler.HandleSector))
 	// Sectores: GET para cualquier rol autenticado; alta/edición/baja para
 	// Supervisor/Administrador, con rate limit por usuario (management) aplicado
@@ -234,14 +241,6 @@ func main() {
 	}
 	mux.HandleFunc("/api/v1/sectores", loggingMiddleware(sectorRoleAware(sectorHandler.HandleSectores)))
 	mux.HandleFunc("/api/v1/sectores/", loggingMiddleware(sectorRoleAware(sectorHandler.HandleSectorByID)))
-	parametrosRoleAware := func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost || r.Method == http.MethodPut {
-			authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, parametrosProductoHandler.Handle)(w, r)
-			return
-		}
-		parametrosProductoHandler.Handle(w, r)
-	}
-	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, management(parametrosRoleAware))))
 	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		dispositivoHandler.HandlePing(w, r)
 	}))
@@ -442,7 +441,7 @@ func isManagementWrite(r *http.Request) bool {
 	if strings.HasSuffix(r.URL.Path, "/approve") || strings.HasSuffix(r.URL.Path, "/reject") {
 		return strings.HasPrefix(r.URL.Path, "/api/v1/registration-requests/")
 	}
-	return strings.HasPrefix(r.URL.Path, "/api/v1/admin/") || strings.HasPrefix(r.URL.Path, "/api/v1/dispositivos") || strings.HasPrefix(r.URL.Path, "/api/v1/parametros-producto") || strings.HasPrefix(r.URL.Path, "/api/v1/sectores") || strings.HasPrefix(r.URL.Path, "/api/v1/horno/")
+	return strings.HasPrefix(r.URL.Path, "/api/v1/admin/") || strings.HasPrefix(r.URL.Path, "/api/v1/dispositivos") || strings.HasPrefix(r.URL.Path, "/api/v1/productos") || strings.HasPrefix(r.URL.Path, "/api/v1/sectores") || strings.HasPrefix(r.URL.Path, "/api/v1/horno/")
 }
 
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
