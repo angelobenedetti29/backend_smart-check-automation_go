@@ -71,16 +71,39 @@ func TestApply_CreaColumnasModernas(t *testing.T) {
 		{"dispositivos", "whep_url"},
 		{"dispositivos", "secret_hash"},
 		{"dispositivos", "tipo"},
+		{"dispositivos", "rename_url"},
+		{"dispositivos", "rename_token"},
 		{"lotes_productivos", "dispositivo_id"},
 		{"historial_consignas", "dispositivo_id"},
 		{"registration_requests", "request_id"},
 		{"registration_requests", "secret"},
 		{"registration_requests", "tipo"},
+		{"registration_requests", "rename_url"},
 	} {
 		var exists bool
 		err := p.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2)`, tc.table, tc.column).Scan(&exists)
 		require.NoError(t, err)
 		require.True(t, exists, "%s.%s no fue creada", tc.table, tc.column)
+	}
+}
+
+// TestApply_EliminaColumnasListenLegacy verifica que el refactor de rename_url
+// haya eliminado el anuncio previo por par (listen_address/listen_port) en ambas
+// tablas, dejando solo rename_url. Las bases de test se crean aisladas y frescas,
+// así que la ausencia es determinista.
+func TestApply_EliminaColumnasListenLegacy(t *testing.T) {
+	p := isolatedPool(t)
+	require.NoError(t, Apply(context.Background(), p))
+	for _, tc := range []struct{ table, column string }{
+		{"dispositivos", "listen_address"},
+		{"dispositivos", "listen_port"},
+		{"registration_requests", "listen_address"},
+		{"registration_requests", "listen_port"},
+	} {
+		var exists bool
+		err := p.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2)`, tc.table, tc.column).Scan(&exists)
+		require.NoError(t, err)
+		require.False(t, exists, "%s.%s no debería existir tras el refactor", tc.table, tc.column)
 	}
 }
 

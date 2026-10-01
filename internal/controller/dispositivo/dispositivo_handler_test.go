@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,10 +41,21 @@ type fakeDispositivoService struct {
 	renameID    string
 	renameName  string
 	renameCalls int
-	revokeErr   error
-	revokeActor string
-	revokeID    string
-	revokeCalls int
+
+	renameFromPanelResp  *dispositivo.EstadoDispositivo
+	renameFromPanelErr   error
+	renameFromPanelID    string
+	renameFromPanelName  string
+	renameFromPanelCalls int
+
+	renameURLErr   error
+	renameURLID    string
+	renameURLValue string
+	renameURLCalls int
+	revokeErr      error
+	revokeActor    string
+	revokeID       string
+	revokeCalls    int
 }
 
 func (f *fakeDispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
@@ -77,6 +89,20 @@ func (f *fakeDispositivoService) Rename(ctx context.Context, deviceID, nombre st
 	f.renameID = deviceID
 	f.renameName = nombre
 	return f.renameResp, f.renameErr
+}
+
+func (f *fakeDispositivoService) RenameFromPanel(ctx context.Context, deviceID, nombre string) (*dispositivo.EstadoDispositivo, error) {
+	f.renameFromPanelCalls++
+	f.renameFromPanelID = deviceID
+	f.renameFromPanelName = nombre
+	return f.renameFromPanelResp, f.renameFromPanelErr
+}
+
+func (f *fakeDispositivoService) UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error {
+	f.renameURLCalls++
+	f.renameURLID = deviceID
+	f.renameURLValue = renameURL
+	return f.renameURLErr
 }
 
 func (f *fakeDispositivoService) Revoke(ctx context.Context, actorEmail, id string) error {
@@ -644,6 +670,14 @@ func buildSupervisorCookie(t *testing.T) *http.Cookie {
 	return &http.Cookie{Name: "session_token", Value: signed}
 }
 
+// withTestSupervisorJWT adjunta al request una cookie de Supervisor válida.
+// Útil para ejercitar los handlers que dependen de JWTMiddleware.
+func withTestSupervisorJWT(t *testing.T, req *http.Request) *http.Request {
+	t.Helper()
+	req.AddCookie(buildSupervisorCookie(t))
+	return req
+}
+
 func TestHandleDelete_Success(t *testing.T) {
 	svc := &fakeDispositivoService{}
 	h := NewDispositivoHandler(svc)
@@ -970,7 +1004,7 @@ func TestHandleEstados_ExponeWhepURL(t *testing.T) {
 // and case-alias members fail at the decode boundary, before the service.
 func TestHandleUpdate_RejectsStrictJSONViolationsBeforeService(t *testing.T) {
 	for name, body := range map[string]string{
-		"duplicate-sectorId": `{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1","sectorId":"horno-2"}`,
+		"duplicate-sectorId":  `{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1","sectorId":"horno-2"}`,
 		"case-alias-sectorId": `{"dispositivoId":"11111111-1111-1111-1111-111111111111","SectorId":"horno-1"}`,
 		"trailing-doc":        `{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1"}{"x":1}`,
 	} {
@@ -1167,5 +1201,336 @@ func TestHandleRename_Success(t *testing.T) {
 	}
 	if data["nombre"] != "Pi Renombrada" {
 		t.Fatalf("expected renamed name in response, got %v", data["nombre"])
+	}
+}
+
+func TestHandleRenameURL_WrongMethod(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dispositivos/rename-url", nil)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestHandleRenameURL_InvalidContentType(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"rename_url":"https://mi-tunel.trycloudflare.com"}`)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos/rename-url", body)
+	req.Header.Set("Content-Type", "text/plain")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d", rec.Code)
+	}
+}
+
+func TestHandleRenameURL_UnauthorizedWithoutPrincipal(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"rename_url":"https://mi-tunel.trycloudflare.com"}`)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos/rename-url", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleRenameURL_InvalidJSON(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{})
+	body := bytes.NewBufferString(`{"rename_url":`)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos/rename-url", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleRenameURL_MissingRenameURL(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{}`)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos/rename-url", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if svc.renameURLCalls != 0 {
+		t.Fatalf("invalid request must not reach service, got %d calls", svc.renameURLCalls)
+	}
+}
+
+func TestHandleRenameURL_EmptyRenameURL(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"rename_url":""}`)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos/rename-url", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if svc.renameURLCalls != 0 {
+		t.Fatalf("invalid request must not reach service, got %d calls", svc.renameURLCalls)
+	}
+}
+
+func TestHandleRenameURL_InvalidRenameURLNotAbsolute(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"rename_url":"hola"}`)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos/rename-url", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", rec.Code)
+	}
+	if svc.renameURLCalls != 0 {
+		t.Fatalf("invalid request must not reach service, got %d calls", svc.renameURLCalls)
+	}
+}
+
+func TestHandleRenameURL_NotFound(t *testing.T) {
+	h := NewDispositivoHandler(&fakeDispositivoService{renameURLErr: dispositivo.ErrDispositivoNotFound})
+	body := bytes.NewBufferString(`{"rename_url":"https://mi-tunel.trycloudflare.com"}`)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos/rename-url", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+// TestHandleRenameURL_Success verifica el 204 sin body y que el servicio recibe
+// el id del principal, nunca uno del body.
+func TestHandleRenameURL_Success(t *testing.T) {
+	const renameURL = "https://mi-tunel.trycloudflare.com"
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+	body := bytes.NewBufferString(`{"rename_url":"` + renameURL + `"}`)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dispositivos/rename-url", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestDevicePrincipal(req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameURL(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("expected empty body, got %q", rec.Body.String())
+	}
+	if svc.renameURLCalls != 1 {
+		t.Fatalf("expected rename-url to reach service, got %d calls", svc.renameURLCalls)
+	}
+	if svc.renameURLID != "b1c2d3e4-5678-90ab-cdef-1234567890ab" {
+		t.Fatalf("expected principal id, got %q", svc.renameURLID)
+	}
+	if svc.renameURLValue != renameURL {
+		t.Fatalf("expected rename_url passed to service, got %q", svc.renameURLValue)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HandleRenameByID — push-first (errores del servicio)
+// ---------------------------------------------------------------------------
+
+func TestHandleRenameByID_DelegaARenameFromPanel(t *testing.T) {
+	estado := &dispositivo.EstadoDispositivo{
+		DispositivoID: "11111111-1111-1111-1111-111111111111",
+		Nombre:        "Pi Nueva",
+		Estado:        dispositivo.EstadoOnline,
+	}
+	svc := &fakeDispositivoService{renameFromPanelResp: estado}
+	h := NewDispositivoHandler(svc)
+
+	body := bytes.NewBufferString(`{"nombre":"Pi Nueva"}`)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/dispositivos/11111111-1111-1111-1111-111111111111/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestSupervisorJWT(t, req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameByID(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if svc.renameFromPanelCalls != 1 {
+		t.Fatalf("expected RenameFromPanel to be invoked, got %d calls", svc.renameFromPanelCalls)
+	}
+	if svc.renameFromPanelID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("expected device id from path, got %q", svc.renameFromPanelID)
+	}
+	if svc.renameFromPanelName != "Pi Nueva" {
+		t.Fatalf("expected nombre passed to service, got %q", svc.renameFromPanelName)
+	}
+	// El rename Pi→Go NO debe invocarse desde el flujo panel.
+	if svc.renameCalls != 0 {
+		t.Fatalf("Rename must NOT be called from panel flow, got %d", svc.renameCalls)
+	}
+}
+
+func TestHandleRenameByID_NotFound(t *testing.T) {
+	svc := &fakeDispositivoService{renameFromPanelErr: dispositivo.ErrDispositivoNotFound}
+	h := NewDispositivoHandler(svc)
+
+	body := bytes.NewBufferString(`{"nombre":"Pi Nueva"}`)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/dispositivos/11111111-1111-1111-1111-111111111111/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestSupervisorJWT(t, req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameByID(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleRenameByID_LegacySinPush_Rechaza422(t *testing.T) {
+	svc := &fakeDispositivoService{renameFromPanelErr: dispositivo.ErrRenameNotPushable}
+	h := NewDispositivoHandler(svc)
+
+	body := bytes.NewBufferString(`{"nombre":"Pi Nueva"}`)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/dispositivos/11111111-1111-1111-1111-111111111111/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestSupervisorJWT(t, req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameByID(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	// El operador debe saber que NO se aplicaron cambios para no quedar con
+	// el nombre desactualizado en la Pi.
+	if !strings.Contains(rec.Body.String(), "push de renombre") {
+		t.Fatalf("expected error message to mention push de renombre, got %s", rec.Body.String())
+	}
+}
+
+func TestHandleRenameByID_FallaPushDevuelve502(t *testing.T) {
+	svc := &fakeDispositivoService{renameFromPanelErr: errors.New("no se pudo contactar al dispositivo para el renombre: connection refused")}
+	h := NewDispositivoHandler(svc)
+
+	body := bytes.NewBufferString(`{"nombre":"Pi Nueva"}`)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/dispositivos/11111111-1111-1111-1111-111111111111/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestSupervisorJWT(t, req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameByID(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 on push failure, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no se aplicaron cambios") {
+		t.Fatalf("expected message to clarify no changes were applied, got %s", rec.Body.String())
+	}
+}
+
+func TestHandleRenameByID_PathSinID(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+
+	body := bytes.NewBufferString(`{"nombre":"Pi Nueva"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos//nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestSupervisorJWT(t, req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameByID(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if svc.renameFromPanelCalls != 0 {
+		t.Fatalf("service must not be called when path id is missing, got %d", svc.renameFromPanelCalls)
+	}
+}
+
+func TestHandleRenameByID_PathIDInvalido(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+
+	body := bytes.NewBufferString(`{"nombre":"Pi Nueva"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/dispositivos/no-es-uuid/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestSupervisorJWT(t, req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameByID(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if svc.renameFromPanelCalls != 0 {
+		t.Fatalf("service must not be called with malformed uuid, got %d", svc.renameFromPanelCalls)
+	}
+}
+
+func TestHandleRenameByID_NombreInvalido(t *testing.T) {
+	svc := &fakeDispositivoService{}
+	h := NewDispositivoHandler(svc)
+
+	body := bytes.NewBufferString(`{"nombre":"   "}`)
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/dispositivos/11111111-1111-1111-1111-111111111111/nombre", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestSupervisorJWT(t, req)
+	rec := httptest.NewRecorder()
+
+	h.HandleRenameByID(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", rec.Code)
+	}
+	if svc.renameFromPanelCalls != 0 {
+		t.Fatalf("invalid nombre must not reach service, got %d calls", svc.renameFromPanelCalls)
 	}
 }

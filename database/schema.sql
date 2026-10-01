@@ -238,9 +238,11 @@ ON CONFLICT (producto_id) DO NOTHING;
 -- TABLA 4: dispositivos (Catálogo de nodos Raspberry Pi / SBC de monitoreo)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS dispositivos (
-    id          UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    nombre      VARCHAR(100)    NOT NULL,
-    created_at  TIMESTAMPTZ     NOT NULL DEFAULT now()
+    id             UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+    nombre         VARCHAR(100)   NOT NULL,
+    rename_url     TEXT,
+    rename_token   TEXT,
+    created_at     TIMESTAMPTZ    NOT NULL DEFAULT now()
 );
 
 COMMENT ON TABLE  dispositivos     IS 'Catálogo de nodos Raspberry Pi que reportan telemetría al backend';
@@ -416,6 +418,28 @@ END $$;
 COMMENT ON COLUMN dispositivos.tipo IS 'Tipo/ubicación funcional del nodo en la línea: ENTRADA_HORNO o SALIDA_HORNO (nullable para filas legadas)';
 
 -- ============================================================================
+-- ALTER: dispositivos — URL de renombre del nodo y credencial del push
+-- Idempotente para bases existentes. Reemplaza el anuncio previo por par
+-- (listen_address/listen_port): se eliminan esas columnas y su CHECK, y se
+-- agrega rename_url, la URL completa (esquema + host + puerto) que el nodo
+-- expone para el push de renombre. rename_token es la credencial Bearer de un
+-- solo uso que el backend usa para empujar el renombre. Ambas nullable: una Pi
+-- legacy no anuncia URL y no recibe token (su push queda deshabilitado sin
+-- romper el alta).
+-- ============================================================================
+ALTER TABLE dispositivos DROP CONSTRAINT IF EXISTS chk_dispositivos_listen_port;
+ALTER TABLE dispositivos
+    DROP COLUMN IF EXISTS listen_address,
+    DROP COLUMN IF EXISTS listen_port;
+
+ALTER TABLE dispositivos
+    ADD COLUMN IF NOT EXISTS rename_url TEXT,
+    ADD COLUMN IF NOT EXISTS rename_token TEXT;
+
+COMMENT ON COLUMN dispositivos.rename_url IS 'URL completa (esquema + host + puerto) que el nodo expone para el push de renombre (PUT {rename_url}/api/v1/dispositivos/nombre); NULL = no anunciada (legacy)';
+COMMENT ON COLUMN dispositivos.rename_token IS 'Credencial Bearer entregada al nodo en el pickup; el backend la usa para empujar el renombre. Plaintext, NULL para dispositivos legacy o sin push';
+
+-- ============================================================================
 -- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
 -- ============================================================================
 INSERT INTO productos (id, nombre) VALUES
@@ -574,6 +598,7 @@ CREATE TABLE IF NOT EXISTS registration_requests (
     status       VARCHAR(12)  NOT NULL DEFAULT 'PENDING',
     device_id    UUID         REFERENCES dispositivos(id) ON DELETE SET NULL,
     secret       TEXT,
+    rename_url   TEXT,
     resolved_by  UUID         REFERENCES usuarios(id) ON DELETE RESTRICT,
     resolved_at  TIMESTAMPTZ,
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -601,11 +626,19 @@ COMMENT ON COLUMN registration_requests.secret IS 'Secret en texto plano retenid
 COMMENT ON COLUMN registration_requests.expires_at IS 'Vencimiento de la solicitud; vencida no puede aprobarse ni entregarse';
 
 -- ============================================================================
--- ALTER: registration_requests — tipo de dispositivo solicitado
--- Idempotente para bases existentes. Nullable para no invalidar solicitudes
--- legadas creadas antes de incorporar el tipo.
+-- ALTER: registration_requests — tipo solicitado y URL de renombre
+-- Idempotente para bases existentes. Reemplaza el anuncio previo por par
+-- (listen_address/listen_port) por una única rename_url. Nullable para no
+-- invalidar solicitudes legadas creadas antes de incorporar estos campos.
 -- ============================================================================
 ALTER TABLE registration_requests ADD COLUMN IF NOT EXISTS tipo VARCHAR(16);
+
+ALTER TABLE registration_requests DROP CONSTRAINT IF EXISTS chk_registration_requests_listen_port;
+ALTER TABLE registration_requests
+    DROP COLUMN IF EXISTS listen_address,
+    DROP COLUMN IF EXISTS listen_port;
+
+ALTER TABLE registration_requests ADD COLUMN IF NOT EXISTS rename_url TEXT;
 
 DO $$
 BEGIN
@@ -616,6 +649,7 @@ BEGIN
 END $$;
 
 COMMENT ON COLUMN registration_requests.tipo IS 'Tipo/ubicación funcional que el nodo solicita al registrarse: ENTRADA_HORNO o SALIDA_HORNO (nullable para solicitudes legadas)';
+COMMENT ON COLUMN registration_requests.rename_url IS 'URL completa (esquema + host + puerto) anunciada por el nodo para el push de renombre; NULL si el firmware es legacy';
 
 -- Auditoría de ciclo de vida de dispositivos. Se conserva la tabla: el alta
 -- (approve) y el rechazo (reject) dejan traza con actor y estado anterior/nuevo.

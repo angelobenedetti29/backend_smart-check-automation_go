@@ -10,6 +10,11 @@ ni clave pública.
 1. **El nodo pide el registro** — `POST /api/v1/registration-requests` con
    `{"hostname":"smartcheck-rpi-01","type":"ENTRADA_HORNO"}`. Público. `type` es
    obligatorio (`ENTRADA_HORNO`/`SALIDA_HORNO`); ausente o inválido responde `400`.
+   Opcionalmente el nodo agrega `rename_url` (string, URL completa con esquema,
+   host y puerto; ej. `http://localhost:8090` o
+   `https://mi-tunel.trycloudflare.com`) para que el backend pueda empujarle el
+   renombre; si falta o viene vacío, el push se omite (firmware legacy). Si viene
+   con valor, debe ser una URL absoluta válida (esquema + host) o responde `400`.
    Devuelve `201` con JSON **plano** `{"request_id":"req_...","status":"PENDING"}`.
    El `request_id` son 32 bytes de `crypto/rand` en base64url (43 chars) y vence a
    los 15 minutos. Ver `docs/backend-go-tipos-dispositivo.md`.
@@ -26,8 +31,12 @@ ni clave pública.
    `dispositivos.secret_hash`. La respuesta nunca incluye el secret.
 5. **El nodo consulta su solicitud** — `GET /api/v1/registration-requests/{id}`,
    público. Mientras no se resuelva devuelve `{"status":"PENDING"}` / `REJECTED` /
-   `EXPIRED`. Aprobada, entrega **una sola vez**:
-   `{"status":"APPROVED","device_id":"<uuid>","secret":"<secret>","type":"ENTRADA_HORNO"}`.
+   `EXPIRED`. Aprobada, entrega **una sola vez** (el `rename_token` viaja junto con
+   el `secret` y no se repite en pickups posteriores):
+   `{"status":"APPROVED","device_id":"<uuid>","secret":"<secret>","rename_token":"<hex>","type":"ENTRADA_HORNO"}`.
+   El `rename_token` es la credencial Bearer que el backend usa para empujar el
+   renombre al nodo (`PUT {rename_url}/api/v1/dispositivos/nombre`). La
+   `rename_url` NO viaja en el pickup: el nodo ya conoce su propia URL.
 6. **El nodo ya está registrado** — envía `Authorization: Bearer <secret>`. El
    backend hashea el secret y busca el dispositivo activo por `secret_hash`, así
    que el nodo nunca manda `device_id`.
@@ -70,11 +79,14 @@ inyecta desde el principal.
 - `registration_requests`: `request_id` PK, `hostname`, `tipo`
   (`ENTRADA_HORNO`/`SALIDA_HORNO`), `status`
   (`PENDING`/`APPROVED`/`REJECTED`/`EXPIRED`), `device_id` FK nullable, `secret`
-  (texto plano sólo hasta el pickup), `resolved_by`/`resolved_at`, `created_at`,
+  (texto plano sólo hasta el pickup), `rename_url` (URL completa anunciada por el
+  nodo para el push, nullable), `resolved_by`/`resolved_at`, `created_at`,
   `expires_at`. Índice único parcial por hostname `PENDING`.
 - `dispositivos`: `tipo` (`ENTRADA_HORNO`/`SALIDA_HORNO`, inmutable tras el alta),
-  `auth_status` (`unenrolled`/`active`/`disabled`/`revoked`) y
-  `secret_hash VARCHAR(64)` único parcial, nullable, nulo al revocar.
+  `auth_status` (`unenrolled`/`active`/`disabled`/`revoked`),
+  `secret_hash VARCHAR(64)` único parcial, nullable, nulo al revocar, y
+  `rename_url`/`rename_token` (URL completa y credencial del push de renombre;
+  nullables para filas legacy).
 - `device_lifecycle_audit`: conservada; `approve`/`reject` dejan traza con actor,
   `request_id` y estados anterior/nuevo (sin secretos).
 - Se eliminaron `device_credentials`, `device_enrollments`,

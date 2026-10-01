@@ -51,7 +51,7 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 12 | `POST /api/v1/parametros-producto` | Alta de parámetros para un producto |
 | 13 | `PUT /api/v1/parametros-producto` | Modificar parámetros de un producto |
 | 14 | `POST /api/v1/dispositivos/ping` | Recibir telemetría de una Raspberry Pi |
-| 15 | `GET/PUT/DELETE /api/v1/dispositivos` | Estado online/offline, modificación y baja lógica de dispositivos |
+| 15 | `GET/PUT/DELETE /api/v1/dispositivos`, `PUT /api/v1/dispositivos/{id}/nombre` | Estado online/offline, modificación, baja lógica y rename desde el panel |
 | 16 | `GET /api/v1/dispositivos/metricas` | Historial de métricas de un dispositivo (paginado) |
 | 17 | `POST /api/v1/horno/consigna` | Envío manual de consigna térmica al horno |
 | 18 | `GET /api/v1/horno/consigna/historial` | Historial de auditoría de consignas por lote |
@@ -559,7 +559,7 @@ curl -b "session_token=$JWT" http://localhost:8080/api/v1/dispositivos
 
 El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #14. El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: es opcional y nullable; se omite cuando el dispositivo no tiene cámara configurada. El campo `sectorId` es el sector al que pertenece el dispositivo (nullable); la columna legacy `ubicacion` fue eliminada y sus valores migrados a sectores.
 
-**Modificación (`PUT`):** el body acepta únicamente `dispositivoId` (requerido; debe ser un UUID válido, 422 en caso contrario), `sectorId` (string o `null`) y `whepUrl` (string opcional). El `nombre` es **inmutable desde el panel**: el decoder estricto rechaza campos desconocidos (incluido `nombre`), y solo el rename autenticado del nodo (`PUT /api/v1/dispositivos/nombre`) puede cambiarlo. **Semántica de `sectorId`:** al ser un PUT de reemplazo, **omitir la clave equivale a enviar `null`** (desasigna el dispositivo del sector); el frontend siempre la envía explícitamente para no desasignar al editar solo WHEP. Un `sectorId` inexistente → 400; violar el índice único `uq_dispositivos_sector_tipo` → 409. Si `whepUrl` se omite o se envía vacío, el dispositivo queda sin stream (`NULL`); si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario 422.
+**Modificación (`PUT`):** el body acepta únicamente `dispositivoId` (requerido; debe ser un UUID válido, 422 en caso contrario), `sectorId` (string o `null`) y `whepUrl` (string opcional). El `nombre` es **inmutable desde el ruta del panel**: el decoder estricto rechaza campos desconocidos (incluido `nombre`), y solo el rename autenticado puede cambiarlo. El panel lo hace en `PUT /api/v1/dispositivos/{id}/nombre` (ver subsección más abajo), y la propia Raspberry en `PUT /api/v1/dispositivos/nombre` (ver #14). **Semántica de `sectorId`:** al ser un PUT de reemplazo, **omitir la clave equivale a enviar `null`** (desasigna el dispositivo del sector); el frontend siempre la envía explícitamente para no desasignar al editar solo WHEP. Un `sectorId` inexistente → 400; violar el índice único `uq_dispositivos_sector_tipo` → 409. Si `whepUrl` se omite o se envía vacío, el dispositivo queda sin stream (`NULL`); si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario 422.
 
 ```json
 { "dispositivoId": "b1c2d3e4-5678-90ab-cdef-1234567890ab", "sectorId": "horno-1", "whepUrl": "https://camaras.example.com/whep/horno-1" }
@@ -596,6 +596,42 @@ curl -X DELETE -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivo
 | 401 | Falta la cookie JWT o la sesión es inválida/expirada |
 | 403 | Rol insuficiente (se requiere Supervisor/Admin) |
 | 404 | `dispositivoId` no existe en el catálogo (o ya no es un UUID válido) |
+| 500 | Error interno |
+
+**Renombrar desde el panel (`PUT /api/v1/dispositivos/{id}/nombre`):** el operador autenticado cambia el nombre de un dispositivo identificado por `{id}` en el path. Es la contraparte simétrica del rename que emite la propia Raspberry (`PUT /api/v1/dispositivos/nombre`, ver #14), pensada para que el panel de Next.js pueda corregir/etiquetar un nodo sin necesidad de esperar a que el nodo renombre su hostname. La Raspberry sigue usando la ruta sin `{id}` porque sólo conoce su principal autenticado; el id en el path es la fuente de verdad para el panel (nunca se acepta desde el body). La operación preserva `sector` y `whepUrl` y emite el mismo evento SSE `dispositivo.state` que el rename del nodo, así el panel en vivo se entera del cambio sin re-fetchear.
+
+**Auth:** cookie JWT `session_token` con rol **Supervisor** o **Administrador**.
+
+```bash
+curl -X PUT -b "session_token=$JWT" -H "Content-Type: application/json" \
+  -d '{"nombre":"Raspberry Pi Horno 1 - Reasignada"}' \
+  http://localhost:8080/api/v1/dispositivos/b1c2d3e4-5678-90ab-cdef-1234567890ab/nombre
+```
+
+```json
+{
+  "success": true, "message": "Dispositivo renombrado exitosamente",
+  "data": {
+    "dispositivoId": "b1c2d3e4-5678-90ab-cdef-1234567890ab",
+    "nombre": "Raspberry Pi Horno 1 - Reasignada",
+    "sectorId": "horno-1",
+    "whepUrl": "https://camaras.example.com/whep/horno-1",
+    "estado": "online",
+    "ultimaMetrica": { "...": "..." },
+    "lastSeen": "..."
+  }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de PUT |
+| 415 | `Content-Type` inválido (debe ser `application/json`) |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente (se requiere Supervisor/Admin) |
+| 400 | Path sin `{id}` o con un id que no es un UUID válido |
+| 422 | `nombre` vacío o mayor a 100 caracteres |
+| 404 | `{id}` no existe en el catálogo |
 | 500 | Error interno |
 
 ---
@@ -772,6 +808,8 @@ Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database un
 | `GET /api/v1/lotes` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
 | `POST /api/v1/dispositivos/ping` | Bearer de dispositivo | ✅ | ✅ |
 | `PUT /api/v1/dispositivos` | JWT cookie (`session_token`), Supervisor/Admin | ✅ | ✅ |
+| `PUT /api/v1/dispositivos/nombre` | Bearer de dispositivo | ✅ | ✅ |
+| `PUT /api/v1/dispositivos/{id}/nombre` | JWT cookie (`session_token`), Supervisor/Admin | ✅ | ✅ |
 | `DELETE /api/v1/dispositivos` | JWT cookie (`session_token`), Supervisor/Admin | — | — |
 | `POST /api/v1/horno/temperatura` | JWT cookie, Supervisor/Admin | ❌ | ❌ |
 | `POST/PUT /api/v1/parametros-producto` | JWT cookie, Supervisor/Admin | ✅ | ✅ |

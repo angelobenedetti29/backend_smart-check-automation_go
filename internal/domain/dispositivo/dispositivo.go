@@ -74,14 +74,25 @@ var ErrSectorNotFound = errors.New("el sector indicado no existe")
 // tipo funcional (violación de uq_dispositivos_sector_tipo). Se traduce a 409.
 var ErrSectorTipoDuplicado = errors.New("el sector ya tiene un dispositivo de ese tipo")
 
+// ErrRenameNotPushable indica que el dispositivo no tiene `rename_url` y/o
+// `rename_token` anunciados, así que el backend no puede empujar el renombre a
+// la Pi. Para mantener la consistencia entre backend y Raspberry, el rename
+// desde el panel se rechaza con este error en lugar de tocar la DB (la Pi
+// volvería a sobreescribir el nombre con su polling). Se traduce a 422.
+var ErrRenameNotPushable = errors.New("el dispositivo no tiene push de renombre configurado")
+
 // Dispositivo representa un nodo Raspberry Pi del catálogo de monitoreo.
+// RenameURL/RenameToken son el anuncio del nodo para el push de renombre: la
+// credencial nunca se expone (json:"-").
 type Dispositivo struct {
-	ID        string    `json:"id"        db:"id"`
-	Nombre    string    `json:"nombre"    db:"nombre"`
-	SectorID  *string   `json:"sectorId,omitempty" db:"sector_id"`
-	WhepURL   string    `json:"whepUrl,omitempty" db:"whep_url"`
-	Tipo      *string   `json:"type,omitempty" db:"tipo"`
-	CreatedAt time.Time `json:"createdAt" db:"created_at"`
+	ID          string    `json:"id"        db:"id"`
+	Nombre      string    `json:"nombre"    db:"nombre"`
+	SectorID    *string   `json:"sectorId,omitempty" db:"sector_id"`
+	WhepURL     string    `json:"whepUrl,omitempty" db:"whep_url"`
+	Tipo        *string   `json:"type,omitempty" db:"tipo"`
+	RenameURL   *string   `json:"renameUrl,omitempty" db:"rename_url"`
+	RenameToken *string   `json:"-" db:"rename_token"`
+	CreatedAt   time.Time `json:"createdAt" db:"created_at"`
 }
 
 // MetricaDispositivo representa un registro de telemetría recibido de un dispositivo.
@@ -101,11 +112,15 @@ type MetricaDispositivo struct {
 // EstadoDispositivo representa el estado de salud actual de un dispositivo,
 // calculado a partir de su último heartbeat (last_seen).
 type EstadoDispositivo struct {
-	DispositivoID string              `json:"dispositivoId"`
-	Nombre        string              `json:"nombre"`
-	SectorID      *string             `json:"sectorId,omitempty"`
-	WhepURL       string              `json:"whepUrl,omitempty"`
-	Tipo          *string             `json:"type,omitempty"`
+	DispositivoID string  `json:"dispositivoId"`
+	Nombre        string  `json:"nombre"`
+	SectorID      *string `json:"sectorId,omitempty"`
+	WhepURL       string  `json:"whepUrl,omitempty"`
+	Tipo          *string `json:"type,omitempty"`
+	// Metadatos del push de renombre. Se mantienen internos (json:"-") para no
+	// cambiar el contrato de las respuestas ni filtrar la credencial del nodo.
+	RenameURL     *string             `json:"-"`
+	RenameToken   *string             `json:"-"`
 	Estado        string              `json:"estado"`
 	UltimaMetrica *MetricaDispositivo `json:"ultimaMetrica,omitempty"`
 	LastSeen      *time.Time          `json:"lastSeen,omitempty"`
@@ -316,11 +331,37 @@ func (req RenameDispositivoRequest) Validate() error {
 	return nil
 }
 
+// RenamePushPath compone la ruta del push de renombre que el backend Go le
+// hace a la Raspberry: se anexa al `rename_url` anunciado por el nodo. El path
+// lleva el `device_id` para que la Pi valide que coincide con su principal
+// (defensa en profundidad junto con el `rename_token`).
+func RenamePushPath(deviceID string) string {
+	return "/api/v1/dispositivos/" + deviceID + "/nombre"
+}
+
+// RenameURLDispositivoRequest representa el payload del reanuncio de la URL de
+// renombre que emite la propia Raspberry autenticada con su secret.
+type RenameURLDispositivoRequest struct {
+	RenameURL string `json:"rename_url"`
+}
+
+// Validate verifica que rename_url sea una URL absoluta con esquema y host,
+// replicando la semántica de validateRenameURL del dominio de registro.
+func (req RenameURLDispositivoRequest) Validate() error {
+	trimmed := strings.TrimSpace(req.RenameURL)
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return &ValidationError{Fields: []string{"rename_url: debe ser una URL absoluta con esquema y host (ej: http://host:puerto)"}}
+	}
+	return nil
+}
+
 // Repository define el contrato de persistencia de dispositivos y métricas.
 // Las implementaciones viven en la capa de infraestructura (internal/repository).
 type Repository interface {
 	Create(ctx context.Context, d *Dispositivo) error
 	Update(ctx context.Context, d *Dispositivo) error
+	UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error
 	Revoke(ctx context.Context, actorEmail, id string) error
 	InsertMetrica(ctx context.Context, m *MetricaDispositivo) error
 	GetDispositivosConUltimaMetrica(ctx context.Context) ([]DispositivoConUltimaMetrica, error)
@@ -345,6 +386,14 @@ type Service interface {
 	Create(ctx context.Context, req CreateDispositivoRequest) (*EstadoDispositivo, error)
 	Update(ctx context.Context, req UpdateDispositivoRequest) (*EstadoDispositivo, error)
 	Rename(ctx context.Context, deviceID, nombre string) (*EstadoDispositivo, error)
+	// RenameFromPanel cambia el nombre desde el panel del operador. Aplica
+	// push-first: si la Pi anunció rename_url/rename_token, el push debe
+	// completarse antes de persistir en la DB. Si falla, devuelve un error y
+	// no toca la DB (la Pi conservaría su nombre viejo). Si la Pi no anunció
+	// credenciales de push (firmware legacy), devuelve ErrRenameNotPushable
+	// para que el handler rechace con 422 y mantenga la consistencia.
+	RenameFromPanel(ctx context.Context, deviceID, nombre string) (*EstadoDispositivo, error)
+	UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error
 	Revoke(ctx context.Context, actorEmail, id string) error
 	ProcessPing(ctx context.Context, req PingRequest) (*EstadoDispositivo, error)
 	GetAllEstados() []EstadoDispositivo

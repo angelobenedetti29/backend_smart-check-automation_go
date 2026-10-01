@@ -122,7 +122,8 @@ func main() {
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
 	parametrosProductoSvc := parametrosProductoService.NewParametrosProductoService(parametrosProductoRepo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
-	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker)
+	renamePushTimeout := getEnvDuration("DISPOSITIVO_RENAME_PUSH_TIMEOUT", 10*time.Second)
+	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker, renamePushTimeout)
 	// Autenticación de nodos: Bearer <secret> resuelto por hash contra dispositivos activos.
 	deviceVerifier := &deviceauth.Verifier{Store: deviceAuthRepo}
 	registroSvc := registroService.NewService(registrationRepo)
@@ -258,6 +259,20 @@ func main() {
 	}))))
 	// Rename emitido por la propia Raspberry con su secret Bearer; sin JWT.
 	mux.HandleFunc("/api/v1/dispositivos/nombre", loggingMiddleware(dispositivoHandler.HandleRename))
+	// Reanuncio de la rename_url emitido por la propia Raspberry con su secret
+	// Bearer; sin JWT, igual que /nombre.
+	mux.HandleFunc("/api/v1/dispositivos/rename-url", loggingMiddleware(dispositivoHandler.HandleRenameURL))
+	// Rename emitido por el panel del operador (Supervisor/Admin) sobre un
+	// dispositivo del catálogo, identificado por {id} en el path. La Raspberry
+	// sigue usando /api/v1/dispositivos/nombre (sin id) porque solo conoce su
+	// principal autenticado.
+	mux.HandleFunc("/api/v1/dispositivos/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/nombre") && r.Method == http.MethodPut {
+			dispositivoHandler.HandleRenameByID(w, r)
+			return
+		}
+		response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
+	})))))
 
 	// Registro de dispositivos bajo /api/v1, alineado con el resto de la API. El
 	// cliente Raspberry debe apuntar api.registration_requests_endpoint a

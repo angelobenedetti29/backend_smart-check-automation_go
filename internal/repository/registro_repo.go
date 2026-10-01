@@ -2,8 +2,11 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -50,11 +53,12 @@ func (r *RegistrationRepository) registrationActorID(ctx context.Context, tx pgx
 	return id, err
 }
 
-// Issue crea la solicitud PENDING de un hostname con su tipo de dispositivo. Si
-// ya existe una solicitud vigente para el mismo hostname, devuelve la misma
-// (idempotente) actualizando el tipo al último solicitado. Las solicitudes
-// vencidas se marcan EXPIRED antes de decidir.
-func (r *RegistrationRepository) Issue(ctx context.Context, hostname, tipo, requestID string, expiresAt time.Time) (*registro.IssueResponse, error) {
+// Issue crea la solicitud PENDING de un hostname con su tipo de dispositivo y su
+// URL de renombre opcional (rename_url) para el push. Si ya existe una solicitud
+// vigente para el mismo hostname, devuelve la misma (idempotente) actualizando
+// tipo y URL al último solicitado. Las solicitudes vencidas se marcan EXPIRED
+// antes de decidir.
+func (r *RegistrationRepository) Issue(ctx context.Context, hostname, tipo, requestID string, expiresAt time.Time, renameURL *string) (*registro.IssueResponse, error) {
 	tx, err := beginRegistrationLocked(ctx, r.db, "registration-issue:"+hostname)
 	if err != nil {
 		return nil, fmt.Errorf("issue registration: begin: %w", err)
@@ -65,6 +69,7 @@ func (r *RegistrationRepository) Issue(ctx context.Context, hostname, tipo, requ
 	if tipo != "" {
 		tipoVal = &tipo
 	}
+	renameURL = normalizeRenameURL(renameURL)
 
 	// Las solicitudes vencidas dejan de bloquear el hostname.
 	if _, err = tx.Exec(ctx, `
@@ -76,16 +81,19 @@ func (r *RegistrationRepository) Issue(ctx context.Context, hostname, tipo, requ
 
 	var existing string
 	var existingTipo *string
+	var existingURL *string
 	err = tx.QueryRow(ctx, `
-		SELECT request_id, tipo FROM registration_requests
+		SELECT request_id, tipo, rename_url FROM registration_requests
 		WHERE hostname=$1 AND status='PENDING' AND expires_at>clock_timestamp()
-		ORDER BY created_at DESC LIMIT 1`, hostname).Scan(&existing, &existingTipo)
+		ORDER BY created_at DESC LIMIT 1`, hostname).Scan(&existing, &existingTipo, &existingURL)
 	if err == nil {
-		// Último tipo gana: si la solicitud PENDING ya existente trae otro tipo,
-		// se actualiza para reflejar el pedido más reciente del nodo.
-		if tipoValue(existingTipo) != tipoValue(tipoVal) {
+		// Último pedido gana: si cambió el tipo o la URL, se actualiza para
+		// reflejar lo más reciente que mandó el nodo.
+		if tipoValue(existingTipo) != tipoValue(tipoVal) ||
+			renameURLValue(existingURL) != renameURLValue(renameURL) {
 			if _, uerr := tx.Exec(ctx,
-				`UPDATE registration_requests SET tipo=$1 WHERE request_id=$2`, tipoVal, existing); uerr != nil {
+				`UPDATE registration_requests SET tipo=$1, rename_url=$2 WHERE request_id=$3`,
+				tipoVal, renameURL, existing); uerr != nil {
 				return nil, fmt.Errorf("issue registration: update pending tipo: %w", uerr)
 			}
 		}
@@ -99,8 +107,8 @@ func (r *RegistrationRepository) Issue(ctx context.Context, hostname, tipo, requ
 	}
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO registration_requests (request_id, hostname, tipo, expires_at)
-		VALUES ($1, $2, $3, $4)`, requestID, hostname, tipoVal, expiresAt)
+		INSERT INTO registration_requests (request_id, hostname, tipo, rename_url, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`, requestID, hostname, tipoVal, renameURL, expiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -110,15 +118,18 @@ func (r *RegistrationRepository) Issue(ctx context.Context, hostname, tipo, requ
 			_ = tx.Rollback(ctx)
 			var won string
 			var wonTipo *string
+			var wonURL *string
 			if qerr := r.db.QueryRow(ctx, `
-				SELECT request_id, tipo FROM registration_requests
+				SELECT request_id, tipo, rename_url FROM registration_requests
 				WHERE hostname=$1 AND status='PENDING'
-				ORDER BY created_at DESC LIMIT 1`, hostname).Scan(&won, &wonTipo); qerr != nil {
+				ORDER BY created_at DESC LIMIT 1`, hostname).Scan(&won, &wonTipo, &wonURL); qerr != nil {
 				return nil, fmt.Errorf("issue registration: resolve duplicate: %w", qerr)
 			}
-			if tipoValue(wonTipo) != tipoValue(tipoVal) {
+			if tipoValue(wonTipo) != tipoValue(tipoVal) ||
+				renameURLValue(wonURL) != renameURLValue(renameURL) {
 				if _, uerr := r.db.Exec(ctx,
-					`UPDATE registration_requests SET tipo=$1 WHERE request_id=$2`, tipoVal, won); uerr != nil {
+					`UPDATE registration_requests SET tipo=$1, rename_url=$2 WHERE request_id=$3`,
+					tipoVal, renameURL, won); uerr != nil {
 					return nil, fmt.Errorf("issue registration: update duplicate tipo: %w", uerr)
 				}
 			}
@@ -139,6 +150,37 @@ func tipoValue(t *string) string {
 		return ""
 	}
 	return *t
+}
+
+// renameURLValue normaliza un *string nullable de URL a string vacío.
+func renameURLValue(u *string) string {
+	if u == nil {
+		return ""
+	}
+	return *u
+}
+
+// normalizeRenameURL trata una URL vacía o en blanco como "sin anuncio" (NULL).
+// Es defensiva: la validación de dominio ya normaliza y valida la URL.
+func normalizeRenameURL(u *string) *string {
+	if u == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*u)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+// generateRenameToken devuelve 32 bytes de crypto/rand en hex (64 chars). Es la
+// credencial Bearer con la que el backend empuja el renombre al nodo.
+func generateRenameToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // ListPending devuelve las solicitudes PENDING vigentes, más recientes primero.
@@ -172,7 +214,8 @@ func (r *RegistrationRepository) ListPending(ctx context.Context) ([]registro.Re
 }
 
 // Approve resuelve la solicitud como APPROVED: valida vigencia, crea el
-// dispositivo activo con el hash del secret, extiende el vencimiento a la
+// dispositivo activo con el hash del secret, la URL de renombre anunciada por el
+// nodo y un rename_token nuevo (para el push), extiende el vencimiento a la
 // ventana de pickup y deja traza de auditoría. Todo en una transacción.
 func (r *RegistrationRepository) Approve(ctx context.Context, actor, requestID, secret, secretHash string, pickupExpiresAt time.Time) (*registro.Approval, error) {
 	tx, err := beginRegistrationLocked(ctx, r.db, "registration:"+requestID)
@@ -189,7 +232,8 @@ func (r *RegistrationRepository) Approve(ctx context.Context, actor, requestID, 
 	var status string
 	var expiresAt time.Time
 	var tipo *string
-	err = tx.QueryRow(ctx, `SELECT status, expires_at, tipo FROM registration_requests WHERE request_id=$1 FOR UPDATE`, requestID).Scan(&status, &expiresAt, &tipo)
+	var renameURL *string
+	err = tx.QueryRow(ctx, `SELECT status, expires_at, tipo, rename_url FROM registration_requests WHERE request_id=$1 FOR UPDATE`, requestID).Scan(&status, &expiresAt, &tipo, &renameURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, registro.ErrRequestNotFound
 	}
@@ -219,11 +263,19 @@ func (r *RegistrationRepository) Approve(ctx context.Context, actor, requestID, 
 		return nil, fmt.Errorf("approve registration: hostname: %w", err)
 	}
 
+	// rename_token: credencial Bearer de un solo uso para el push de renombre.
+	// Se genera en Go (crypto/rand) y se guarda en claro en el dispositivo; el
+	// nodo la recibe una única vez en el pickup.
+	renameToken, err := generateRenameToken()
+	if err != nil {
+		return nil, fmt.Errorf("approve registration: generar rename_token: %w", err)
+	}
+
 	var deviceID string
 	if err = tx.QueryRow(ctx, `
-		INSERT INTO dispositivos (nombre, tipo, auth_status, secret_hash, auth_updated_at)
-		VALUES ($1, $2, 'active', $3, clock_timestamp())
-		RETURNING id`, hostname, tipo, secretHash).Scan(&deviceID); err != nil {
+		INSERT INTO dispositivos (nombre, tipo, auth_status, secret_hash, auth_updated_at, rename_url, rename_token)
+		VALUES ($1, $2, 'active', $3, clock_timestamp(), $4, $5)
+		RETURNING id`, hostname, tipo, secretHash, renameURL, renameToken).Scan(&deviceID); err != nil {
 		return nil, fmt.Errorf("approve registration: create device: %w", err)
 	}
 
@@ -309,6 +361,8 @@ func (r *RegistrationRepository) Reject(ctx context.Context, actor, requestID st
 // Pickup entrega el secret de una solicitud aprobada una única vez. Usa un
 // UPDATE ... RETURNING con CTE para que solo un poll concurrente obtenga el
 // secret; en los demás casos devuelve el estado actual sin secret.
+// El rename_url NO se incluye en la respuesta a propósito: el nodo ya conoce su
+// propia URL y solo necesita el rename_token (que viaja una única vez).
 func (r *RegistrationRepository) Pickup(ctx context.Context, requestID string) (*registro.Pickup, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -318,12 +372,15 @@ func (r *RegistrationRepository) Pickup(ctx context.Context, requestID string) (
 
 	var deviceID, secret string
 	var tipo *string
+	var renameToken *string
 	err = tx.QueryRow(ctx, `
 		WITH picked AS (
-			SELECT request_id, device_id, secret, status, expires_at, tipo
-			FROM registration_requests
-			WHERE request_id=$1
-			FOR UPDATE
+			SELECT rr.request_id, rr.device_id, rr.secret, rr.status, rr.expires_at, rr.tipo,
+			       d.rename_token AS rename_token
+			FROM registration_requests rr
+			LEFT JOIN dispositivos d ON d.id = rr.device_id
+			WHERE rr.request_id=$1
+			FOR UPDATE OF rr
 		)
 		UPDATE registration_requests r
 		SET secret=NULL
@@ -332,12 +389,12 @@ func (r *RegistrationRepository) Pickup(ctx context.Context, requestID string) (
 		  AND p.status='APPROVED'
 		  AND p.secret IS NOT NULL
 		  AND p.expires_at>clock_timestamp()
-		RETURNING r.device_id, p.secret, p.tipo`, requestID).Scan(&deviceID, &secret, &tipo)
+		RETURNING r.device_id, p.secret, p.tipo, p.rename_token`, requestID).Scan(&deviceID, &secret, &tipo, &renameToken)
 	if err == nil {
 		if err = tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("pickup registration: commit delivery: %w", err)
 		}
-		return &registro.Pickup{Status: registro.StatusApproved, DeviceID: &deviceID, Secret: &secret, Type: tipo}, nil
+		return &registro.Pickup{Status: registro.StatusApproved, DeviceID: &deviceID, Secret: &secret, RenameToken: renameToken, Type: tipo}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("pickup registration: deliver: %w", err)

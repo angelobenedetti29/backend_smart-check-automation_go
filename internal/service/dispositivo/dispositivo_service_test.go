@@ -4,7 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,6 +71,21 @@ func (f *fakeDispositivoRepo) Update(ctx context.Context, d *dispositivo.Disposi
 	cur.SectorID = d.SectorID
 	cur.WhepURL = d.WhepURL
 	f.dispositivos[d.ID] = cur
+	return nil
+}
+
+// UpdateRenameURL registra la URL de renombre en el map y devuelve
+// ErrDispositivoNotFound si el id no existe.
+func (f *fakeDispositivoRepo) UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	cur, ok := f.dispositivos[deviceID]
+	if !ok {
+		return dispositivo.ErrDispositivoNotFound
+	}
+	cur.RenameURL = &renameURL
+	f.dispositivos[deviceID] = cur
 	return nil
 }
 
@@ -171,7 +191,7 @@ func TestProcessPing_UpdatesStateAndBroadcasts(t *testing.T) {
 	client := broker.Subscribe()
 	defer broker.Unsubscribe(client)
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	estado, err := svc.ProcessPing(testDeviceContext(), dispositivo.PingRequest{
 		DispositivoID:      "d1",
@@ -205,7 +225,7 @@ func TestProcessPing_UpdatesStateAndBroadcasts(t *testing.T) {
 
 func TestProcessPing_RequiresOperationalPrincipal(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{"d1": {ID: "d1", Nombre: "Pi 1"}}}
-	svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
+	svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker(), 0)
 	_, err := svc.ProcessPing(context.Background(), dispositivo.PingRequest{DispositivoID: "d1"})
 	if !errors.Is(err, deviceauth.ErrInvalidToken) {
 		t.Fatalf("expected invalid device token, got %v", err)
@@ -227,7 +247,7 @@ func TestProcessPing_PropagaTelemetriaExtendidaAlEstadoHistorialYSSE(t *testing.
 	memTotal := 1024.0
 	almacenamientoDisponible := 20000.0
 	almacenamientoTotal := 64000.0
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 	estado, err := svc.ProcessPing(testDeviceContext(), dispositivo.PingRequest{
 		DispositivoID:              "d1",
 		MemRamDisponibleMb:         512,
@@ -282,7 +302,7 @@ func TestProcessPing_NoStateEventWhenAlreadyOnline(t *testing.T) {
 	client := broker.Subscribe()
 	defer broker.Unsubscribe(client)
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	ping := dispositivo.PingRequest{DispositivoID: "d1", CpuPct: 20, MemRamDisponibleMb: 400, TempChip: 50, AiProcessorPct: 35}
 	if _, err := svc.ProcessPing(testDeviceContext(), ping); err != nil {
@@ -305,7 +325,7 @@ func TestProcessPing_DispositivoNotFound(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	_, err := svc.ProcessPing(testDeviceContextFor("missing"), dispositivo.PingRequest{
 		DispositivoID:      "missing",
@@ -326,7 +346,7 @@ func TestProcessPing_InsertsMetricaHistory(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 	if _, err := svc.ProcessPing(testDeviceContext(), dispositivo.PingRequest{
 		DispositivoID: "d1", CpuPct: 30, MemRamDisponibleMb: 500, TempChip: 55, AiProcessorPct: 40,
 	}); err != nil {
@@ -353,7 +373,7 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	client := broker.Subscribe()
 	defer broker.Unsubscribe(client)
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 	sectorID := "horno-1"
 
 	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
@@ -412,7 +432,7 @@ func TestCreate_PropagatesRepoError(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	_, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{Nombre: "Pi X", Tipo: "ENTRADA_HORNO"})
 	if err == nil {
@@ -435,7 +455,7 @@ func TestGetMetricas_AppliesDefaults(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	res, err := svc.GetMetricas(context.Background(), "d1", 0, 0)
 	if err != nil {
@@ -453,7 +473,7 @@ func TestGetMetricas_CapsPageSize(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	res, err := svc.GetMetricas(context.Background(), "d1", 1, 500)
 	if err != nil {
@@ -469,7 +489,7 @@ func TestGetMetricas_DispositivoNotFound(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	_, err := svc.GetMetricas(context.Background(), "missing", 1, 10)
 	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
@@ -493,7 +513,7 @@ func TestStartReaper_EmitsOfflineState(t *testing.T) {
 		DispositivoID: "d1", AiProcessorPct: 0, ReceivedAt: time.Now().UTC().Add(-1 * time.Minute),
 	})
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -552,7 +572,7 @@ func TestUpdate_PreservaNombreYActualizaSector(t *testing.T) {
 	client := broker.Subscribe()
 	defer broker.Unsubscribe(client)
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	nuevoSector := "horno-2"
 	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
@@ -607,7 +627,7 @@ func TestRename_PreservaSectorYWhepURL(t *testing.T) {
 	client := broker.Subscribe()
 	defer broker.Unsubscribe(client)
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	estado, err := svc.Rename(context.Background(), "d1", "  Pi 1 Renombrada  ")
 	if err != nil {
@@ -650,7 +670,7 @@ func TestRename_NotFound(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	_, err := svc.Rename(context.Background(), "missing", "Pi X")
 	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
@@ -663,7 +683,7 @@ func TestUpdate_NotFound(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	_, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
 		DispositivoID: "missing",
@@ -681,7 +701,7 @@ func TestRevoke_RemueveDelCacheYPasaActor(t *testing.T) {
 	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1"})
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	if err := svc.Revoke(context.Background(), "supervisor@fermar.com.ar", "d1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -708,7 +728,7 @@ func TestRevoke_Idempotente(t *testing.T) {
 	}}
 	store := database.NewMemoryDispositivoStateStore()
 	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1"})
-	svc := NewDispositivoService(repo, store, sse.NewBroker())
+	svc := NewDispositivoService(repo, store, sse.NewBroker(), 0)
 
 	if err := svc.Revoke(context.Background(), "supervisor@fermar.com.ar", "d1"); err != nil {
 		t.Fatalf("unexpected error on first revoke: %v", err)
@@ -723,7 +743,7 @@ func TestRevoke_NotFound(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 
 	err := svc.Revoke(context.Background(), "supervisor@fermar.com.ar", "missing")
 	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
@@ -736,7 +756,7 @@ func TestCreate_PropagaWhepURL(t *testing.T) {
 	store := database.NewMemoryDispositivoStateStore()
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 	whep := "https://camaras.example.com/whep/horno-2"
 
 	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
@@ -768,7 +788,7 @@ func TestUpdate_PropagaWhepURL(t *testing.T) {
 	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", WhepURL: "https://camaras.example.com/whep/viejo"})
 	broker := sse.NewBroker()
 
-	svc := NewDispositivoService(repo, store, broker)
+	svc := NewDispositivoService(repo, store, broker, 0)
 	whep := "https://camaras.example.com/whep/horno-1"
 
 	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
@@ -802,7 +822,7 @@ func TestCreate_TipoInvalido(t *testing.T) {
 	for _, tipo := range []string{"", "   ", "HORNO", "entrada-horno"} {
 		t.Run(tipo, func(t *testing.T) {
 			repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
-			svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
+			svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker(), 0)
 
 			_, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{Nombre: "Pi", Tipo: tipo})
 			if err == nil {
@@ -822,7 +842,7 @@ func TestCreate_TipoInvalido(t *testing.T) {
 // de persistirlo.
 func TestCreate_NormalizaTipo(t *testing.T) {
 	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
-	svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
+	svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker(), 0)
 
 	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{Nombre: "Pi", Tipo: "  salida_horno "})
 	if err != nil {
@@ -841,7 +861,7 @@ func TestUpdate_PreservaTipo(t *testing.T) {
 	}}
 	store := database.NewMemoryDispositivoStateStore()
 	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Tipo: &tipo})
-	svc := NewDispositivoService(repo, store, sse.NewBroker())
+	svc := NewDispositivoService(repo, store, sse.NewBroker(), 0)
 
 	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
 		DispositivoID: "d1",
@@ -870,7 +890,7 @@ func TestRename_PreservaTipo(t *testing.T) {
 	}}
 	store := database.NewMemoryDispositivoStateStore()
 	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", Tipo: &tipo})
-	svc := NewDispositivoService(repo, store, sse.NewBroker())
+	svc := NewDispositivoService(repo, store, sse.NewBroker(), 0)
 
 	estado, err := svc.Rename(context.Background(), "d1", "Pi 1 Renombrada")
 	if err != nil {
@@ -898,7 +918,7 @@ func TestUpdate_DesasignaSectorConNil(t *testing.T) {
 	}}
 	store := database.NewMemoryDispositivoStateStore()
 	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID})
-	svc := NewDispositivoService(repo, store, sse.NewBroker())
+	svc := NewDispositivoService(repo, store, sse.NewBroker(), 0)
 
 	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
 		DispositivoID: "d1",
@@ -928,7 +948,7 @@ func TestUpdate_PropagaErroresDeSector(t *testing.T) {
 			dispositivos: map[string]dispositivo.Dispositivo{"d1": {ID: "d1", Nombre: "Pi 1"}},
 			updateErr:    repoErr,
 		}
-		svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker())
+		svc := NewDispositivoService(repo, database.NewMemoryDispositivoStateStore(), sse.NewBroker(), 0)
 
 		sectorID := "horno-1"
 		_, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
@@ -938,5 +958,265 @@ func TestUpdate_PropagaErroresDeSector(t *testing.T) {
 		if !errors.Is(err, repoErr) {
 			t.Fatalf("expected %v propagated, got %v", repoErr, err)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RenameFromPanel — push-first (cancelación ante falla de red)
+// ---------------------------------------------------------------------------
+
+// fakeRenameServer arma un httptest.Server que imita al ServidorRenombre de la
+// Pi: valida método, ruta, Authorization Bearer y payload, y opcionalmente
+// devuelve un código a elección o cuelga la conexión hasta ctx.Done().
+type fakeRenameServer struct {
+	server     *httptest.Server
+	calls      atomic.Int32
+	lastMethod string
+	lastPath   string
+	lastAuth   string
+	lastBody   string
+	responseFn func(w http.ResponseWriter, r *http.Request)
+}
+
+func newFakeRenameServer(response func(w http.ResponseWriter, r *http.Request)) *fakeRenameServer {
+	f := &fakeRenameServer{}
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.calls.Add(1)
+		f.lastMethod = r.Method
+		f.lastPath = r.URL.Path
+		f.lastAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		f.lastBody = string(body)
+		response(w, r)
+	}))
+	return f
+}
+
+func (f *fakeRenameServer) close() { f.server.Close() }
+func (f *fakeRenameServer) URL() string {
+	return f.server.URL
+}
+
+// TestRenameFromPanel_PushExitosoPersiste verifica el happy path: el push al
+// nodo devuelve 2xx, el servicio persiste en DB y emite SSE.
+func TestRenameFromPanel_PushExitosoPersiste(t *testing.T) {
+	renameToken := "rename-tok-abc"
+	fake := newFakeRenameServer(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"nombre":"Pi Nueva"}`))
+	})
+	defer fake.close()
+
+	renameURL := fake.URL()
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi Vieja", RenameURL: &renameURL, RenameToken: &renameToken},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(repo.dispositivos["d1"])
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	svc := NewDispositivoService(repo, store, broker, 5*time.Second)
+
+	estado, err := svc.RenameFromPanel(context.Background(), "d1", "  Pi Nueva  ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if estado.Nombre != "Pi Nueva" {
+		t.Fatalf("expected trimmed new name, got %q", estado.Nombre)
+	}
+	if fake.calls.Load() != 1 {
+		t.Fatalf("expected 1 push call, got %d", fake.calls.Load())
+	}
+	if fake.lastMethod != http.MethodPut {
+		t.Fatalf("expected PUT, got %s", fake.lastMethod)
+	}
+	wantPath := dispositivo.RenamePushPath("d1")
+	if fake.lastPath != wantPath {
+		t.Fatalf("expected path %s, got %s", wantPath, fake.lastPath)
+	}
+	if fake.lastAuth != "Bearer "+renameToken {
+		t.Fatalf("expected bearer with rename_token, got %q", fake.lastAuth)
+	}
+	if !strings.Contains(fake.lastBody, `"nombre":"Pi Nueva"`) {
+		t.Fatalf("expected body to carry trimmed nombre, got %q", fake.lastBody)
+	}
+	persisted, err := repo.GetDispositivoByID(context.Background(), "d1")
+	if err != nil {
+		t.Fatalf("expected device persisted, got %v", err)
+	}
+	if persisted.Nombre != "Pi Nueva" {
+		t.Fatalf("expected persisted name to match, got %q", persisted.Nombre)
+	}
+	if !containsAll(drainEvents(client, 500*time.Millisecond), "dispositivo.state") {
+		t.Fatal("expected dispositivo.state event after successful push+persist")
+	}
+}
+
+// TestRenameFromPanel_PushFallaNoPersiste verifica la consistencia estricta:
+// si la red falla, la DB no se toca y el operador ve el error para reintentar.
+func TestRenameFromPanel_PushFallaNoPersiste(t *testing.T) {
+	renameToken := "rename-tok-abc"
+	fake := newFakeRenameServer(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"db caida en la Pi"}`))
+	})
+	defer fake.close()
+
+	renameURL := fake.URL()
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi Vieja", RenameURL: &renameURL, RenameToken: &renameToken},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(repo.dispositivos["d1"])
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	svc := NewDispositivoService(repo, store, broker, 5*time.Second)
+
+	_, err := svc.RenameFromPanel(context.Background(), "d1", "Pi Nueva")
+	if err == nil {
+		t.Fatal("expected error when push returns non-2xx, got nil")
+	}
+	if fake.calls.Load() != 1 {
+		t.Fatalf("expected 1 push call, got %d", fake.calls.Load())
+	}
+	// Consistencia: DB y caché conservan el nombre viejo.
+	persisted, perr := repo.GetDispositivoByID(context.Background(), "d1")
+	if perr != nil {
+		t.Fatalf("unexpected repo error: %v", perr)
+	}
+	if persisted.Nombre != "Pi Vieja" {
+		t.Fatalf("DB MUST be untouched on push failure, got %q", persisted.Nombre)
+	}
+	cached, ok := store.Get("d1")
+	if !ok {
+		t.Fatal("expected device in cache")
+	}
+	if cached.Nombre != "Pi Vieja" {
+		t.Fatalf("cache MUST be untouched on push failure, got %q", cached.Nombre)
+	}
+	// No debe emitir SSE de cambio de estado.
+	if types := drainEvents(client, 200*time.Millisecond); containsAll(types, "dispositivo.state") {
+		t.Fatalf("must NOT emit dispositivo.state when push failed, got %v", types)
+	}
+}
+
+// TestRenameFromPanel_TimeoutCancela verifica que si la Pi cuelga el request
+// más allá del timeout configurado, el rename se cancela sin tocar la DB.
+func TestRenameFromPanel_TimeoutCancela(t *testing.T) {
+	renameToken := "rename-tok-abc"
+	fake := newFakeRenameServer(func(w http.ResponseWriter, r *http.Request) {
+		// Simula Pi inalcanzable: nunca responde. El cliente debe cortar por timeout.
+		<-r.Context().Done()
+	})
+	defer fake.close()
+
+	renameURL := fake.URL()
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi Vieja", RenameURL: &renameURL, RenameToken: &renameToken},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(repo.dispositivos["d1"])
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker, 100*time.Millisecond)
+
+	inicio := time.Now()
+	_, err := svc.RenameFromPanel(context.Background(), "d1", "Pi Nueva")
+	transcurrido := time.Since(inicio)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if transcurrido > 2*time.Second {
+		t.Fatalf("RenameFromPanel no respetó el timeout: tardó %s", transcurrido)
+	}
+	persisted, _ := repo.GetDispositivoByID(context.Background(), "d1")
+	if persisted.Nombre != "Pi Vieja" {
+		t.Fatalf("DB MUST be untouched on timeout, got %q", persisted.Nombre)
+	}
+}
+
+// TestRenameFromPanel_LegacySinPush verifica que una Pi legacy sin
+// rename_url/rename_token hace que el rename se rechace con
+// ErrRenameNotPushable, preservando la consistencia.
+func TestRenameFromPanel_LegacySinPush(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi Vieja"}, // sin RenameURL/RenameToken
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(repo.dispositivos["d1"])
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker, 0)
+
+	_, err := svc.RenameFromPanel(context.Background(), "d1", "Pi Nueva")
+	if !errors.Is(err, dispositivo.ErrRenameNotPushable) {
+		t.Fatalf("expected ErrRenameNotPushable, got %v", err)
+	}
+	persisted, _ := repo.GetDispositivoByID(context.Background(), "d1")
+	if persisted.Nombre != "Pi Vieja" {
+		t.Fatalf("legacy rename must not touch DB, got %q", persisted.Nombre)
+	}
+}
+
+// TestRenameFromPanel_NoAnunciaURL verifica que renameURL vacío (no anunciado)
+// también devuelve ErrRenameNotPushable.
+func TestRenameFromPanel_NoAnunciaURL(t *testing.T) {
+	vacia := ""
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi Vieja", RenameURL: &vacia},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(repo.dispositivos["d1"])
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker, 0)
+
+	_, err := svc.RenameFromPanel(context.Background(), "d1", "Pi Nueva")
+	if !errors.Is(err, dispositivo.ErrRenameNotPushable) {
+		t.Fatalf("expected ErrRenameNotPushable for empty rename_url, got %v", err)
+	}
+}
+
+// TestRenameFromPanel_NotFound verifica el camino de id inexistente: error
+// antes de intentar cualquier HTTP.
+func TestRenameFromPanel_NotFound(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{}}
+	store := database.NewMemoryDispositivoStateStore()
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker, 0)
+
+	_, err := svc.RenameFromPanel(context.Background(), "missing", "Pi Nueva")
+	if !errors.Is(err, dispositivo.ErrDispositivoNotFound) {
+		t.Fatalf("expected ErrDispositivoNotFound, got %v", err)
+	}
+}
+
+// TestRenameFromPanel_URLInalcanzable verifica que un rename_url que apunta a
+// un puerto cerrado se trata como fallo de red y NO toca la DB. Usa un puerto
+// sin listener (1) y timeout corto para no alargar el test.
+func TestRenameFromPanel_URLInalcanzable(t *testing.T) {
+	renameToken := "rename-tok-abc"
+	urlMuerta := "http://127.0.0.1:1"
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi Vieja", RenameURL: &urlMuerta, RenameToken: &renameToken},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Register(repo.dispositivos["d1"])
+	broker := sse.NewBroker()
+
+	svc := NewDispositivoService(repo, store, broker, 250*time.Millisecond)
+
+	_, err := svc.RenameFromPanel(context.Background(), "d1", "Pi Nueva")
+	if err == nil {
+		t.Fatal("expected error for unreachable rename_url, got nil")
+	}
+	persisted, _ := repo.GetDispositivoByID(context.Background(), "d1")
+	if persisted.Nombre != "Pi Vieja" {
+		t.Fatalf("DB MUST be untouched on unreachable host, got %q", persisted.Nombre)
 	}
 }

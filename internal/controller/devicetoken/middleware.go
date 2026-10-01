@@ -13,10 +13,11 @@ import (
 // protectedExact es el conjunto explícito de endpoints device-only ("MÉTODO ruta")
 // de coincidencia exacta que requieren autenticación por token de dispositivo.
 var protectedExact = map[string]struct{}{
-	"POST /api/v1/dispositivos/ping":  {},
-	"PUT /api/v1/dispositivos/nombre": {},
-	"POST /api/v1/lotes/inicio":       {},
-	"GET /api/v1/dispositivos/sector": {},
+	"POST /api/v1/dispositivos/ping":        {},
+	"PUT /api/v1/dispositivos/nombre":       {},
+	"PATCH /api/v1/dispositivos/rename-url": {},
+	"POST /api/v1/lotes/inicio":             {},
+	"GET /api/v1/dispositivos/sector":       {},
 }
 
 // loteEventPattern cubre POST /api/v1/lotes/{id}/eventos y .../{id}/cierre, donde

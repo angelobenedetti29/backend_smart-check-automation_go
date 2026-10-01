@@ -19,6 +19,7 @@ type fakeRepo struct {
 	issueHostname  string
 	issueTipo      string
 	issueRequestID string
+	issueRenameURL *string
 	issueExpiresAt time.Time
 	issueErr       error
 
@@ -44,11 +45,12 @@ type fakeRepo struct {
 	listErr  error
 }
 
-func (f *fakeRepo) Issue(_ context.Context, hostname, tipo, requestID string, expiresAt time.Time) (*registro.IssueResponse, error) {
+func (f *fakeRepo) Issue(_ context.Context, hostname, tipo, requestID string, expiresAt time.Time, renameURL *string) (*registro.IssueResponse, error) {
 	f.issueCalls++
 	f.issueHostname = hostname
 	f.issueTipo = tipo
 	f.issueRequestID = requestID
+	f.issueRenameURL = renameURL
 	f.issueExpiresAt = expiresAt
 	if f.issueErr != nil {
 		return nil, f.issueErr
@@ -99,8 +101,9 @@ func TestIssue_GeneraRequestIDConPrefijoYVencimiento(t *testing.T) {
 	repo := &fakeRepo{}
 	svc := NewService(repo)
 	before := time.Now()
+	renameURL := "https://mi-tunel.trycloudflare.com"
 
-	res, err := svc.Issue(context.Background(), registro.CreateRequest{Hostname: "  rpi-01  ", Type: "salida_horno"})
+	res, err := svc.Issue(context.Background(), registro.CreateRequest{Hostname: "  rpi-01  ", Type: "salida_horno", RenameURL: &renameURL})
 
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(res.RequestID, "req_"))
@@ -110,6 +113,8 @@ func TestIssue_GeneraRequestIDConPrefijoYVencimiento(t *testing.T) {
 	require.Equal(t, 1, repo.issueCalls)
 	require.Equal(t, "rpi-01", repo.issueHostname, "debe pasar el hostname ya trimeado")
 	require.Equal(t, "SALIDA_HORNO", repo.issueTipo, "debe propagar el tipo normalizado")
+	require.NotNil(t, repo.issueRenameURL)
+	require.Equal(t, renameURL, *repo.issueRenameURL, "debe propagar la rename_url")
 	// El TTL debe ser ~15 minutos desde ahora.
 	require.WithinDuration(t, before.Add(requestTTL), repo.issueExpiresAt, 5*time.Second)
 }

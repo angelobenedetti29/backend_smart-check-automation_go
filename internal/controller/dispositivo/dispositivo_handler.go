@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,11 @@ import (
 
 // maxRequestBodyBytes limita el tamaño del body a 1 MB para evitar DoS por memoria.
 const maxRequestBodyBytes = 1 << 20 // 1 MB
+
+// dispositivoUUIDPattern valida el id del dispositivo extraído del path para el
+// rename desde el panel. Es el mismo patrón que el dominio aplica al id
+// informado en el body de CreateDispositivoRequest/UpdateDispositivoRequest.
+var dispositivoUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // DispositivoHandler maneja los endpoints HTTP para dispositivos Raspberry Pi.
 type DispositivoHandler struct {
@@ -300,6 +306,145 @@ func (h *DispositivoHandler) HandleRename(w http.ResponseWriter, r *http.Request
 	}
 
 	response.JSON(w, http.StatusOK, true, "Dispositivo renombrado exitosamente", estado, nil)
+}
+
+// HandleRenameURL maneja PATCH /api/v1/dispositivos/rename-url — la propia
+// Raspberry, autenticada con su secret, vuelve a anunciar su URL de renombre. El
+// id del dispositivo es siempre el del principal verificado, nunca el del body.
+func (h *DispositivoHandler) HandleRenameURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+		return
+	}
+
+	principal, ok := deviceauth.PrincipalFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "Token de dispositivo inválido", map[string]string{"code": "invalid_device_token"})
+		return
+	}
+
+	var req dispositivo.RenameURLDispositivoRequest
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
+		return
+	}
+
+	// Falta rename_url o viene vacío: 400 según el contrato del endpoint, antes
+	// de la validación de URL absoluta (que responde 422).
+	if strings.TrimSpace(req.RenameURL) == "" {
+		response.Error(w, http.StatusBadRequest, "El campo rename_url es requerido", nil)
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		return
+	}
+
+	if err := h.service.UpdateRenameURL(r.Context(), principal.DeviceID, strings.TrimSpace(req.RenameURL)); err != nil {
+		switch {
+		case errors.Is(err, dispositivo.ErrDispositivoNotFound):
+			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+		case dispositivo.IsValidationError(err):
+			response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		default:
+			log.Printf("[ERROR] Error al actualizar la rename_url del dispositivo: %v", err)
+			response.Error(w, http.StatusInternalServerError, "Error al actualizar la rename_url", nil)
+		}
+		return
+	}
+
+	// El contrato del endpoint es 204 sin body.
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleRenameByID maneja PUT /api/v1/dispositivos/{id}/nombre — un operador
+// autenticado por JWT (rol Supervisor/Administrador) cambia el nombre de un
+// dispositivo del catálogo, identificado por el {id} del path. La ruta NO está
+// protegida por BeforeMux: pasa por JWTMiddleware + RequireRoleFromDB en el
+// wiring. Se conserva HandleRename (sin id en el path) para que la Raspberry
+// pueda autopropiarse su nombre sin necesidad de conocer su UUID.
+//
+// Aplica push-first: si la Pi anunció `rename_url`/`rename_token`, el cambio
+// se propaga a la Raspberry antes de persistir en la DB. Si la red falla, se
+// cancela sin tocar la DB (la Pi conserva su nombre) y se devuelve 502 para
+// que el operador reintente. Si la Pi es legacy (no anunció push), se rechaza
+// con 422 para evitar la inconsistencia que el polling posterior introduciría.
+func (h *DispositivoHandler) HandleRenameByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+		return
+	}
+
+	deviceID := extractDispositivoID(r.URL.Path)
+	if deviceID == "" {
+		response.Error(w, http.StatusBadRequest, "El path debe incluir el id del dispositivo", nil)
+		return
+	}
+	if !dispositivoUUIDPattern.MatchString(deviceID) {
+		response.Error(w, http.StatusBadRequest, "El id del dispositivo debe ser un UUID válido", nil)
+		return
+	}
+
+	var req dispositivo.RenameDispositivoRequest
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		return
+	}
+
+	estado, err := h.service.RenameFromPanel(r.Context(), deviceID, req.Nombre)
+	if err != nil {
+		switch {
+		case errors.Is(err, dispositivo.ErrDispositivoNotFound):
+			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+		case errors.Is(err, dispositivo.ErrRenameNotPushable):
+			// Legacy / sin push anunciado: rechazar para no generar inconsistencia
+			// con el próximo polling de la Pi.
+			response.Error(w, http.StatusUnprocessableEntity,
+				"El dispositivo no tiene push de renombre configurado; renombrar solo desde la Pi", err.Error())
+		default:
+			// Falla de red, timeout o respuesta no-2xx: la DB no se tocó.
+			log.Printf("[ERROR] Error al renombrar dispositivo (push cancelado): %v", err)
+			response.Error(w, http.StatusBadGateway,
+				"No se pudo propagar el renombre al dispositivo; no se aplicaron cambios", err.Error())
+		}
+		return
+	}
+
+	response.JSON(w, http.StatusOK, true, "Dispositivo renombrado exitosamente", estado, nil)
+}
+
+// extractDispositivoID obtiene el {id} de /api/v1/dispositivos/{id}/nombre
+// decodificando el path manualmente (las rutas se registran en el subtree y
+// PathValue no está disponible). Devuelve "" si el path no tiene un id válido
+// (UUID).
+func extractDispositivoID(path string) string {
+	const prefix = "/api/v1/dispositivos/"
+	const suffix = "/nombre"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	// Quita el "/nombre" final; queda "{id}" o vacío si el id falta.
+	rest := strings.TrimSuffix(path, suffix)
+	rest = strings.TrimPrefix(rest, prefix)
+	rest = strings.Trim(rest, "/")
+	if rest == "" || strings.Contains(rest, "/") {
+		return ""
+	}
+	return rest
 }
 
 // HandleEstados maneja GET /api/v1/dispositivos.

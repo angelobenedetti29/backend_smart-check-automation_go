@@ -167,6 +167,7 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | PUT | /api/v1/dispositivos | JWT cookie | Supervisor, Admin |
 | DELETE | /api/v1/dispositivos | JWT cookie | Supervisor, Admin |
 | PUT | /api/v1/dispositivos/nombre | Bearer dispositivo | — |
+| PUT | /api/v1/dispositivos/{id}/nombre | JWT cookie | Supervisor, Admin |
 | GET | /api/v1/dispositivos/metricas | JWT cookie | cualquier rol |
 | GET | /api/v1/dispositivos/events | JWT cookie | cualquier rol |
 | POST | /api/v1/horno/consigna | JWT cookie | Operario, Supervisor, Admin |

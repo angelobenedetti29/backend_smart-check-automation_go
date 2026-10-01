@@ -109,6 +109,29 @@ func (r *PostgresDispositivoRepository) Update(ctx context.Context, d *dispositi
 	return nil
 }
 
+// UpdateRenameURL actualiza solo la URL de renombre anunciada por el
+// dispositivo; no toca nombre, sector ni whep_url. Devuelve
+// dispositivo.ErrDispositivoNotFound si el dispositivo no existe, está revocado
+// o el id no es un UUID válido (22P02).
+func (r *PostgresDispositivoRepository) UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error {
+	const query = `
+		UPDATE dispositivos SET rename_url = $1 WHERE id = $2 AND auth_status <> 'revoked'`
+
+	tag, err := r.db.Exec(ctx, query, renameURL, deviceID)
+	if err != nil {
+		// Un id que no es UUID válido produce 22P02; se traduce a "no encontrado".
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeInvalidTextRepresentation {
+			return dispositivo.ErrDispositivoNotFound
+		}
+		return fmt.Errorf("failed to update rename_url: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return dispositivo.ErrDispositivoNotFound
+	}
+	return nil
+}
+
 // Revoke da de baja lógica un dispositivo: revoca su credencial (secret_hash a
 // NULL + auth_status='revoked'), lo desasigna del sector y deja traza de
 // auditoría con el actor resuelto por email. No borra la fila para no violar las
@@ -206,6 +229,7 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT ON (d.id)
 			d.id, d.nombre, d.sector_id, d.whep_url, d.created_at, d.tipo,
+			d.rename_url, d.rename_token,
 			m.id, m.cpu_pct, m.mem_ram_disponible_mb, m.mem_ram_total_mb,
 			m.almacenamiento_disponible_mb, m.almacenamiento_total_mb,
 			m.temp_chip, m.ai_processor_pct, m.received_at
@@ -225,6 +249,8 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 			d                        dispositivo.Dispositivo
 			whepURL                  *string
 			tipo                     *string
+			renameURL                *string
+			renameToken              *string
 			m                        dispositivo.MetricaDispositivo
 			mID                      *string
 			cpu                      *float64
@@ -236,13 +262,15 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 			aiProc                   *float64
 			received                 *time.Time
 		)
-		if err := rows.Scan(&d.ID, &d.Nombre, &d.SectorID, &whepURL, &d.CreatedAt, &tipo, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
+		if err := rows.Scan(&d.ID, &d.Nombre, &d.SectorID, &whepURL, &d.CreatedAt, &tipo, &renameURL, &renameToken, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
 			return nil, fmt.Errorf("failed to scan dispositivo con ultima metrica: %w", err)
 		}
 		if whepURL != nil {
 			d.WhepURL = *whepURL
 		}
 		d.Tipo = tipo
+		d.RenameURL = renameURL
+		d.RenameToken = renameToken
 
 		item := dispositivo.DispositivoConUltimaMetrica{Dispositivo: d}
 		if mID != nil {
@@ -274,10 +302,10 @@ func (r *PostgresDispositivoRepository) GetDispositivoByID(ctx context.Context, 
 	var whepURL *string
 	var tipo *string
 	err := r.db.QueryRow(ctx, `
-		SELECT id, nombre, sector_id, whep_url, created_at, tipo
+		SELECT id, nombre, sector_id, whep_url, created_at, tipo, rename_url, rename_token
 		FROM dispositivos
 		WHERE id = $1 AND auth_status <> 'revoked'
-	`, id).Scan(&d.ID, &d.Nombre, &d.SectorID, &whepURL, &d.CreatedAt, &tipo)
+	`, id).Scan(&d.ID, &d.Nombre, &d.SectorID, &whepURL, &d.CreatedAt, &tipo, &d.RenameURL, &d.RenameToken)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, dispositivo.ErrDispositivoNotFound
@@ -364,7 +392,8 @@ func (r *PostgresDispositivoRepository) GetMetricasByDispositivo(ctx context.Con
 func (r *PostgresDispositivoRepository) ListDeviceReads(ctx context.Context) ([]dispositivo.DeviceRead, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT d.id, d.nombre, COALESCE(d.whep_url, ''),
-			d.tipo, d.sector_id, d.auth_status, (d.secret_hash IS NOT NULL), d.auth_updated_at
+			d.tipo, d.sector_id, d.auth_status, (d.secret_hash IS NOT NULL), d.auth_updated_at,
+			d.rename_url, d.rename_token
 		FROM dispositivos d
 		WHERE d.auth_status <> 'revoked'
 		ORDER BY d.nombre
@@ -377,16 +406,20 @@ func (r *PostgresDispositivoRepository) ListDeviceReads(ctx context.Context) ([]
 	out := []dispositivo.DeviceRead{}
 	for rows.Next() {
 		var (
-			x       dispositivo.DeviceRead
-			tipo    *string
-			status  string
-			updated *time.Time
+			x           dispositivo.DeviceRead
+			tipo        *string
+			status      string
+			updated     *time.Time
+			renameURL   *string
+			renameToken *string
 		)
-		if err := rows.Scan(&x.DispositivoID, &x.Nombre, &x.WhepURL, &tipo, &x.SectorID, &status, &x.HasSecret, &updated); err != nil {
+		if err := rows.Scan(&x.DispositivoID, &x.Nombre, &x.WhepURL, &tipo, &x.SectorID, &status, &x.HasSecret, &updated, &renameURL, &renameToken); err != nil {
 			return nil, fmt.Errorf("failed to scan device read: %w", err)
 		}
 		x.Tipo = tipo
 		x.EstadoDispositivo.Tipo = tipo
+		x.RenameURL = renameURL
+		x.RenameToken = renameToken
 		x.AuthStatus = dispositivo.AuthStatus(status)
 		x.AuthUpdatedAt = updated
 		x.Estado = dispositivo.EstadoOffline

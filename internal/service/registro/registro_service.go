@@ -46,7 +46,7 @@ func (s *Service) Issue(ctx context.Context, req registro.CreateRequest) (*regis
 	if err != nil {
 		return nil, fmt.Errorf("generar request_id: %w", err)
 	}
-	return s.repo.Issue(ctx, req.Hostname, req.Type, "req_"+token, time.Now().Add(requestTTL))
+	return s.repo.Issue(ctx, req.Hostname, req.Type, "req_"+token, time.Now().Add(requestTTL), req.RenameURL)
 }
 
 // List devuelve las solicitudes pendientes vigentes para el panel.

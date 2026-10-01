@@ -42,7 +42,7 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 
 	t.Run("issue persiste tipo y hostname duplicado devuelve el mismo request_id", func(t *testing.T) {
 		id := fakeRepoID("a")
-		res, err := repo.Issue(ctx, "host-a", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute))
+		res, err := repo.Issue(ctx, "host-a", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 		require.Equal(t, id, res.RequestID)
 		require.Equal(t, registro.StatusPending, res.Status)
@@ -53,17 +53,17 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 		require.NotNil(t, tipo)
 		require.Equal(t, "ENTRADA_HORNO", *tipo)
 
-		res2, err := repo.Issue(ctx, "host-a", "ENTRADA_HORNO", fakeRepoID("b"), time.Now().Add(15*time.Minute))
+		res2, err := repo.Issue(ctx, "host-a", "ENTRADA_HORNO", fakeRepoID("b"), time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 		require.Equal(t, id, res2.RequestID, "no debe crear una segunda PENDING para el mismo hostname")
 	})
 
 	t.Run("issue idempotente actualiza el tipo de la PENDING (último gana)", func(t *testing.T) {
 		id := fakeRepoID("a2")
-		_, err := repo.Issue(ctx, "host-a2", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute))
+		_, err := repo.Issue(ctx, "host-a2", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 
-		res, err := repo.Issue(ctx, "host-a2", "SALIDA_HORNO", fakeRepoID("b2"), time.Now().Add(15*time.Minute))
+		res, err := repo.Issue(ctx, "host-a2", "SALIDA_HORNO", fakeRepoID("b2"), time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 		require.Equal(t, id, res.RequestID, "debe conservar el request_id original")
 
@@ -76,7 +76,7 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 	t.Run("approve crea dispositivo activo con tipo y pickup entrega el secret una vez", func(t *testing.T) {
 		id := fakeRepoID("c")
 		secret := "secreto-de-alta"
-		_, err := repo.Issue(ctx, "host-c", "SALIDA_HORNO", id, time.Now().Add(15*time.Minute))
+		_, err := repo.Issue(ctx, "host-c", "SALIDA_HORNO", id, time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 
 		ap, err := repo.Approve(ctx, "sup@example.com", id, secret, sha256Hex(secret), time.Now().Add(10*time.Minute))
@@ -124,11 +124,90 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 		require.Equal(t, "SALIDA_HORNO", *p2.Type)
 	})
 
+	t.Run("approve persiste rename_url y entrega rename_token una sola vez", func(t *testing.T) {
+		id := fakeRepoID("lp")
+		renameURL := "https://mi-tunel.trycloudflare.com"
+		_, err := repo.Issue(ctx, "host-lp", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute), &renameURL)
+		require.NoError(t, err)
+
+		// La URL queda guardada en la solicitud para que approve la lea.
+		var reqURL *string
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT rename_url FROM registration_requests WHERE request_id=$1`, id).Scan(&reqURL))
+		require.NotNil(t, reqURL)
+		require.Equal(t, renameURL, *reqURL)
+
+		secret := "s-lp"
+		ap, err := repo.Approve(ctx, "sup@example.com", id, secret, sha256Hex(secret), time.Now().Add(10*time.Minute))
+		require.NoError(t, err)
+
+		// El dispositivo hereda la URL y recibe un rename_token hex de 32 bytes.
+		var devURL *string
+		var devToken *string
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT rename_url, rename_token FROM dispositivos WHERE id=$1`, ap.DeviceID).Scan(&devURL, &devToken))
+		require.NotNil(t, devURL)
+		require.Equal(t, renameURL, *devURL)
+		require.NotNil(t, devToken)
+		require.Len(t, *devToken, 64, "rename_token son 32 bytes en hex")
+		_, hexErr := hex.DecodeString(*devToken)
+		require.NoError(t, hexErr)
+
+		// El read path del catálogo (GetDispositivoByID) devuelve la URL y el
+		// token, que es lo que el service usa para el push.
+		repoDisp := NewPostgresDispositivoRepository(pool)
+		got, err := repoDisp.GetDispositivoByID(ctx, ap.DeviceID)
+		require.NoError(t, err)
+		require.NotNil(t, got.RenameURL)
+		require.Equal(t, renameURL, *got.RenameURL)
+		require.NotNil(t, got.RenameToken)
+		require.Equal(t, *devToken, *got.RenameToken)
+
+		// Primer pickup: entrega el secret y el rename_token. rename_url NO viaja
+		// en el pickup (el nodo ya conoce su propia URL).
+		p, err := repo.Pickup(ctx, id)
+		require.NoError(t, err)
+		require.NotNil(t, p.Secret)
+		require.NotNil(t, p.RenameToken)
+		require.Equal(t, *devToken, *p.RenameToken)
+
+		// Segundo pickup: ya no entrega el rename_token (misma semántica de un solo
+		// uso que el secret), pero el dispositivo conserva el suyo para el push.
+		p2, err := repo.Pickup(ctx, id)
+		require.NoError(t, err)
+		require.Nil(t, p2.RenameToken)
+
+		var stillThere *string
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT rename_token FROM dispositivos WHERE id=$1`, ap.DeviceID).Scan(&stillThere))
+		require.NotNil(t, stillThere, "el rename_token debe persistir en el dispositivo para el push")
+	})
+
+	t.Run("nodo sin rename_url queda sin URL pero igual recibe rename_token", func(t *testing.T) {
+		id := fakeRepoID("lg")
+		_, err := repo.Issue(ctx, "host-lp-legacy", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute), nil)
+		require.NoError(t, err)
+		secret := "s-lg"
+		ap, err := repo.Approve(ctx, "sup@example.com", id, secret, sha256Hex(secret), time.Now().Add(10*time.Minute))
+		require.NoError(t, err)
+
+		var devURL *string
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT rename_url FROM dispositivos WHERE id=$1`, ap.DeviceID).Scan(&devURL))
+		require.Nil(t, devURL)
+
+		// Sin URL el push se omite, pero el token igual se genera y persiste
+		// para que un re-registro posterior pueda habilitar el push.
+		p, err := repo.Pickup(ctx, id)
+		require.NoError(t, err)
+		require.NotNil(t, p.RenameToken)
+	})
+
 	t.Run("múltiples dispositivos del mismo tipo están permitidos", func(t *testing.T) {
 		const tipo = "ENTRADA_HORNO"
 		for _, host := range []string{"host-m1", "host-m2"} {
 			id := fakeRepoID(strings.ReplaceAll(host, "-", ""))
-			_, err := repo.Issue(ctx, host, tipo, id, time.Now().Add(15*time.Minute))
+			_, err := repo.Issue(ctx, host, tipo, id, time.Now().Add(15*time.Minute), nil)
 			require.NoError(t, err)
 			secret := "s-" + host
 			_, err = repo.Approve(ctx, "sup@example.com", id, secret, sha256Hex(secret), time.Now().Add(10*time.Minute))
@@ -144,7 +223,7 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 	t.Run("tipo inmutable tras Update", func(t *testing.T) {
 		repoDisp := NewPostgresDispositivoRepository(pool)
 		id := fakeRepoID("inv")
-		_, err := repo.Issue(ctx, "host-inv", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute))
+		_, err := repo.Issue(ctx, "host-inv", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 		secret := "s-inv"
 		ap, err := repo.Approve(ctx, "sup@example.com", id, secret, sha256Hex(secret), time.Now().Add(10*time.Minute))
@@ -167,7 +246,7 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 
 	t.Run("list pending expone tipo", func(t *testing.T) {
 		id := fakeRepoID("lt")
-		_, err := repo.Issue(ctx, "host-lt", "SALIDA_HORNO", id, time.Now().Add(15*time.Minute))
+		_, err := repo.Issue(ctx, "host-lt", "SALIDA_HORNO", id, time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 
 		list, err := repo.ListPending(ctx)
@@ -185,7 +264,7 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 
 	t.Run("reject marca REJECTED y no admite segunda resolución", func(t *testing.T) {
 		id := fakeRepoID("d")
-		_, err := repo.Issue(ctx, "host-d", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute))
+		_, err := repo.Issue(ctx, "host-d", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 		require.NoError(t, repo.Reject(ctx, "sup@example.com", id))
 
@@ -199,7 +278,7 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 
 	t.Run("approve de solicitud vencida devuelve ErrRequestExpired", func(t *testing.T) {
 		id := fakeRepoID("e")
-		_, err := repo.Issue(ctx, "host-e", "ENTRADA_HORNO", id, time.Now().Add(-time.Minute))
+		_, err := repo.Issue(ctx, "host-e", "ENTRADA_HORNO", id, time.Now().Add(-time.Minute), nil)
 		require.NoError(t, err)
 
 		_, err = repo.Approve(ctx, "sup@example.com", id, "s", sha256Hex("s"), time.Now().Add(10*time.Minute))
@@ -213,7 +292,7 @@ func TestRegistrationRepository_RegistroFlow(t *testing.T) {
 
 	t.Run("list pending y request inexistente", func(t *testing.T) {
 		id := fakeRepoID("f")
-		_, err := repo.Issue(ctx, "host-f", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute))
+		_, err := repo.Issue(ctx, "host-f", "ENTRADA_HORNO", id, time.Now().Add(15*time.Minute), nil)
 		require.NoError(t, err)
 
 		list, err := repo.ListPending(ctx)
