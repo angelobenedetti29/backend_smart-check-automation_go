@@ -1,0 +1,9 @@
+# Python (sidecar predictor y train)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Modelos entrenados (artefactos, no código; se montan como volumen en Docker)
+cmd/predictor_svc/models_xgb/*.json
+!cmd/predictor_svc/models_xgb/.gitkeep
