@@ -61,7 +61,7 @@ func (f *fakeService) SectorDelDispositivo(context.Context, string) (*loteSector
 	return f.sectorInfo, f.sectorErr
 }
 
-func (f *fakeService) Abrir(context.Context, string, string, string) (*lotesector.Lote, bool, error) {
+func (f *fakeService) Abrir(context.Context, string, string, string, *lotesector.AbrirParams) (*lotesector.Lote, bool, error) {
 	return f.abrirLote, f.abrirCreado, f.abrirErr
 }
 

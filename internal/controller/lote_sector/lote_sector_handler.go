@@ -38,7 +38,7 @@ func isUUID(s string) bool { return uuidPattern.MatchString(s) }
 // LoteSectorService es el contrato que consume el handler.
 type LoteSectorService interface {
 	SectorDelDispositivo(ctx context.Context, deviceID string) (*loteSectorService.SectorInfo, error)
-	Abrir(ctx context.Context, deviceID, productoID, idempotencyKey string) (*lotesector.Lote, bool, error)
+	Abrir(ctx context.Context, deviceID, productoID, idempotencyKey string, params *lotesector.AbrirParams) (*lotesector.Lote, bool, error)
 	Abierto(ctx context.Context, sectorID string) (*lotesector.Lote, error)
 	RegistrarEventos(ctx context.Context, deviceID, loteID string, eventos []lotesector.Evento) (int, int, *lotesector.Lote, error)
 	Cerrar(ctx context.Context, deviceID, loteID, motivo string, conteos lotesector.Conteos, idempotencyKey string) (*lotesector.Lote, error)
@@ -57,11 +57,22 @@ func NewLoteSectorHandler(svc LoteSectorService) *LoteSectorHandler {
 }
 
 // inicioRequest es el payload de POST /api/v1/lotes/inicio. Momento es
-// informativo: el servidor usa su propio reloj.
+// informativo: el servidor usa su propio reloj. Desde SCA-400 admite los
+// parámetros de operación del control (modo, ventanas, tolerancias, umbrales,
+// pesos, flag de horno2, inicio manual con estado inicial).
 type inicioRequest struct {
-	IdempotencyKey string     `json:"idempotency_key"`
-	ProductoID     string     `json:"producto_id"`
-	Momento        *time.Time `json:"momento"`
+	IdempotencyKey             string                              `json:"idempotency_key"`
+	ProductoID                 string                              `json:"producto_id"`
+	Momento                    *time.Time                          `json:"momento"`
+	Modo                       string                              `json:"modo,omitempty"`
+	IniciadoManualmente        bool                                `json:"iniciado_manualmente"`
+	VentanaEvaluacionSegundos  int                                 `json:"ventana_evaluacion_segundos"`
+	VentanaActualizacionSegundos int                               `json:"ventana_actualizacion_segundos"`
+	ToleranciaTempC            float64                             `json:"tolerancia_temp_c"`
+	UmbralAceptacionCrudo      float64                             `json:"umbral_aceptacion_crudo"`
+	UmbralAceptacionQuemado    float64                             `json:"umbral_aceptacion_quemado"`
+	PesosObjetivo              *lotesector.PesosObjetivo           `json:"pesos_objetivo,omitempty"`
+	EstadoInicial              *lotesector.EstadoInicialLote       `json:"estado_inicial,omitempty"`
 }
 
 // eventoDTO es una detección reportada por la salida.
@@ -135,6 +146,11 @@ func (h *LoteSectorHandler) HandleSector(w http.ResponseWriter, r *http.Request)
 
 // HandleInicio maneja POST /api/v1/lotes/inicio (device-only): abre o se
 // adjunta al lote abierto del sector. No dispara consigna.
+//
+// Desde SCA-400 acepta los parámetros de operación del control (modo,
+// ventanas, tolerancias, umbrales, pesos, asumiendo estado manual). Si no
+// llegan, se aplican defaults seguros (modo MANUAL) para no romper clientes
+// existentes.
 func (h *LoteSectorHandler) HandleInicio(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
@@ -151,7 +167,19 @@ func (h *LoteSectorHandler) HandleInicio(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	lote, creado, err := h.service.Abrir(r.Context(), principal.DeviceID, req.ProductoID, req.IdempotencyKey)
+	params := &lotesector.AbrirParams{
+		Modo:                        req.Modo,
+		IniciadoManualmente:         req.IniciadoManualmente,
+		VentanaEvaluacionSegundos:   req.VentanaEvaluacionSegundos,
+		VentanaActualizacionSegundos: req.VentanaActualizacionSegundos,
+		ToleranciaTempC:             req.ToleranciaTempC,
+		UmbralAceptacionCrudo:       req.UmbralAceptacionCrudo,
+		UmbralAceptacionQuemado:     req.UmbralAceptacionQuemado,
+		PesosObjetivo:               req.PesosObjetivo,
+		EstadoInicial:               req.EstadoInicial,
+	}
+
+	lote, creado, err := h.service.Abrir(r.Context(), principal.DeviceID, req.ProductoID, req.IdempotencyKey, params)
 	if err != nil {
 		writeError(w, err)
 		return
