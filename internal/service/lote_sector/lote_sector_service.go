@@ -187,6 +187,18 @@ func (s *Service) Abrir(ctx context.Context, deviceID, productoID, idempotencyKe
 	return lote, creado, nil
 }
 
+// GetByID devuelve el lote por id, propagando ErrNotFound desde el repo.
+// Aplicado por el control automático (SCA-400) y por el endpoint de
+// telemetría del horno que necesita saber el sector/estado del lote.
+func (s *Service) GetByID(ctx context.Context, loteID string) (*lotesector.Lote, error) {
+	lote, err := s.loteRepo.GetByID(ctx, loteID)
+	if err != nil {
+		return nil, err
+	}
+	s.applyInactividad(lote)
+	return lote, nil
+}
+
 // Abierto devuelve el lote abierto del sector, o nil si no hay ninguno.
 func (s *Service) Abierto(ctx context.Context, sectorID string) (*lotesector.Lote, error) {
 	lote, err := s.loteRepo.GetAbiertoBySector(ctx, sectorID)

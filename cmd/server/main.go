@@ -23,6 +23,7 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/dualauth"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
+	metricashornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/metricashorno"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
 	registroController "github.com/angelobenedetti29/smart-check-automation/internal/controller/registro"
 	sectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sector"
@@ -101,6 +102,7 @@ func main() {
 	productoRepo := repository.NewProductoPostgresRepository(pgPool)
 	sectorRepo := repository.NewSectorPostgresRepository(pgPool)
 	loteSectorRepo := repository.NewLoteSectorPostgresRepository(pgPool)
+	metricasHornoRepo := repository.NewMetricasHornoPostgresRepository(pgPool)
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
@@ -156,6 +158,7 @@ func main() {
 	hornoSSEHandler := sseController.NewSSEHandler(hornoSSEBroker)
 	productoHandler := productoController.NewProductoHandler(productoSvc)
 	loteSectorHandler := loteSectorController.NewLoteSectorHandler(loteSectorSvc)
+	metricasHornoHandler := metricashornoController.NewMetricasHornoHandler(metricasHornoRepo, loteSectorSvc)
 	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
 
 	authHandler := authController.NewAuthHandler(authSvc)
@@ -208,6 +211,8 @@ func main() {
 			loteSectorHandler.HandleEventos(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/cierre"):
 			loteSectorHandler.HandleCierre(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
+			metricasHornoHandler.Handle(w, r)
 		default:
 			response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
 		}
