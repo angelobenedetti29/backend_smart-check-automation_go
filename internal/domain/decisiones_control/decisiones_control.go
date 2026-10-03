@@ -19,6 +19,17 @@ const (
 	AplicadoPorNadie    = "NADIE"    // propuesta descartada o no aprobada
 )
 
+// PrediccionResumen es el subset de la salida del XGBoost que viaja al
+// cliente (lo demás es interno). Permite al operario distinguir si la
+// decisión del MPC vino del modelo real o del placeholder determinístico.
+type PrediccionResumen struct {
+	PctCrudos     float64 `json:"pctCrudos"`
+	PctOk         float64 `json:"pctOk"`
+	PctQuemados   float64 `json:"pctQuemados"`
+	ModelVersion  string  `json:"modelVersion"`
+	EsPlaceholder bool    `json:"esPlaceholder"`
+}
+
 // DecisionControl es el registro persistido.
 type DecisionControl struct {
 	ID              string     `json:"id"`
@@ -36,13 +47,16 @@ type DecisionControl struct {
 	VelPropuesto    float64    `json:"vel_propuesto"`
 	TempAplicado    *float64   `json:"temp_aplicado,omitempty"`
 	VelAplicado     *float64   `json:"vel_aplicado,omitempty"`
-	// Prediccion es la salida cruda del XGBoost (model_version, es_placeholder, ...)
-	Prediccion     []byte `json:"-"`
-	ZObservado     *float64 `json:"z_observado,omitempty"`
-	ZPredicho      *float64 `json:"z_predicho,omitempty"`
-	RazonSkipped   *string `json:"razon_skipped,omitempty"`
-	AplicadoPor    string  `json:"aplicado_por"`
-	CreatedAt      time.Time `json:"created_at"`
+	// Prediccion es la salida cruda del XGBoost (model_version, es_placeholder, ...).
+	// En la API se serializa como PrediccionResumen (subset); el []byte raw
+	// persiste en BD como JSONB pero no viaja en el response.
+	Prediccion     []byte             `json:"-"`
+	PrediccionView *PrediccionResumen `json:"prediccion,omitempty"`
+	ZObservado     *float64           `json:"z_observado,omitempty"`
+	ZPredicho      *float64           `json:"z_predicho,omitempty"`
+	RazonSkipped   *string            `json:"razon_skipped,omitempty"`
+	AplicadoPor    string             `json:"aplicado_por"`
+	CreatedAt      time.Time          `json:"created_at"`
 }
 
 // ErrNoHayDecision indica que se intentó cargar una decisión que no existe.

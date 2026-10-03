@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -74,6 +75,9 @@ razon_skipped, aplicado_por, created_at`
 
 // ListByLote devuelve las últimas N decisiones del lote, ordenadas por
 // created_at DESC. Un lote sin decisiones devuelve slice vacío.
+//
+// Adicionalmente decodifica `prediccion` (JSONB crudo persistido por el
+// Loop) en `PrediccionView`, que es el subset que viaja al cliente.
 func (r *DecisionesControlPostgresRepository) ListByLote(ctx context.Context, loteID string, limite int) ([]decisiones_control.DecisionControl, error) {
 	if limite <= 0 {
 		limite = 50
@@ -102,6 +106,12 @@ func (r *DecisionesControlPostgresRepository) ListByLote(ctx context.Context, lo
 			&d.RazonSkipped, &d.AplicadoPor, &d.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan decisiones_control: %w", err)
+		}
+		if len(d.Prediccion) > 0 {
+			var view decisiones_control.PrediccionResumen
+			if err := json.Unmarshal(d.Prediccion, &view); err == nil {
+				d.PrediccionView = &view
+			}
 		}
 		out = append(out, d)
 	}
