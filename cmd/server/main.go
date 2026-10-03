@@ -122,6 +122,11 @@ func main() {
 	// Dedicated SSE broker for the sector/lotes stream (GET /api/v1/lotes/events).
 	loteSectorSSEBroker := sse.NewBroker()
 
+	// Dedicated SSE broker for control.propuesta events emitted by the MPC
+	// loop. Aislado del broker de horno/consigna para que el dashboard pueda
+	// suscribirse sólo a lo que le interesa.
+	controlSSEBroker := sse.NewBroker()
+
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
@@ -180,11 +185,14 @@ func main() {
 	loopRegistry := controlController.NewLoopRegistry()
 	controlHandler := &controlController.ControlHandler{}
 	controlDeps := controlController.ControlDeps{
-		LoteLookup:   loteSectorSvc,
-		ProductoRepo: productoRepo,
-		Optimizer:    optimizer,
-		Consigna:     consignaSvc,
-		LoopCancels:  loopRegistry,
+		LoteLookup:     loteSectorSvc,
+		ProductoRepo:   productoRepo,
+		Optimizer:      optimizer,
+		Consigna:       consignaSvc,
+		LoopCancels:    loopRegistry,
+		MetricasRepo:   metricasHornoRepo,
+		DecisionesRepo: decisionesRepo,
+		Broker:         controlSSEBroker,
 	}
 	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
 

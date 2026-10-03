@@ -25,9 +25,11 @@ import (
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
-	"github.com/angelobenedetti29/smart-check-automation/internal/service/predictor"
+	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
 
@@ -52,13 +54,29 @@ func NewLoopRegistry() *LoopRegistry {
 	}
 }
 
-// deps que el handler necesita del lote_sector para configurar el loop.
+// MetricasRepo es el mínimo del repo de telemetría para alimentar el Loop.
+type MetricasRepo interface {
+	GetUltimasParaLote(ctx context.Context, loteID string, limite int) ([]metricashorno.MetricaHorno, error)
+}
+
+// DecisionesRepo es el mínimo del repo de decisiones para persistir el audit del MPC.
+type DecisionesRepo interface {
+	Save(ctx context.Context, d *decisiones_control.DecisionControl) error
+}
+
+// Deps que el handler necesita del lote_sector para configurar el loop.
+// Las tres dependencias siguientes (MetricasRepo, DecisionesRepo, Broker)
+// son OBLIGATORIAS: el Loop las invoca dentro del tick y un nil ahí produce
+// nil pointer dereference.
 type ControlDeps struct {
-	LoteLookup   LoteLookupService
-	ProductoRepo ProductoRepo
-	Optimizer    *optimizador.Optimizer
-	Consigna     control.ConsignaDispatchService
-	LoopCancels  *LoopRegistry
+	LoteLookup    LoteLookupService
+	ProductoRepo  ProductoRepo
+	Optimizer     *optimizador.Optimizer
+	Consigna      control.ConsignaDispatchService
+	LoopCancels   *LoopRegistry
+	MetricasRepo  MetricasRepo
+	DecisionesRepo DecisionesRepo
+	Broker        *sse.Broker
 }
 
 // ProductoRepo es el mínimo del repo de productos para el handler.
@@ -117,12 +135,12 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 		ctx, cancel := context.WithCancel(r.Context())
 		loop := control.NewLoop(
 			lote.ID, deps.LoteLookup,
-			nil, // metricasRepo: se inyecta desde main.go
+			deps.MetricasRepo,
 			deps.ProductoRepo,
 			deps.Optimizer,
 			deps.Consigna,
-			nil, // decisionesRepo: se inyecta desde main.go
-			nil, // broker: se inyecta desde main.go
+			deps.DecisionesRepo,
+			deps.Broker,
 		)
 		loop.Configurar(
 			prod.ID, lote.Modo, lote.Horno2Habilitado,
@@ -213,7 +231,13 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 			response.Error(w, http.StatusInternalServerError, "Registry corrupto", nil)
 			return
 		}
-		cons, err := loop.AplicarPropuesta(r.Context())
+		// Identidad del operario desde el JWT, para la auditoría.
+		claims := authController.GetClaimsFromContext(r.Context())
+		usuario := ""
+		if claims != nil {
+			usuario = claims.Email
+		}
+		cons, err := loop.AplicarPropuesta(r.Context(), usuario)
 		if err != nil {
 			if errors.Is(err, control.ErrLoteNoAbierto) {
 				response.Error(w, http.StatusConflict, "No hay propuesta pendiente", nil)
@@ -261,6 +285,10 @@ func rolValido(r *http.Request, roles ...string) bool {
 }
 
 func writeAplicarError(w http.ResponseWriter, err error) {
+	if errors.Is(err, consigna.ErrHorno2NoHabilitado) {
+		response.Error(w, http.StatusUnprocessableEntity, "El producto del lote no tiene el horno 2 habilitado", map[string]string{"code": "horno2_no_habilitado"})
+		return
+	}
 	if errors.Is(err, consigna.ErrFueraDeRango) {
 		response.Error(w, http.StatusUnprocessableEntity, "Setpoint fuera de rango del producto", nil)
 		return
@@ -322,6 +350,4 @@ func (r *LoopRegistry) SetLoop(loteID string, loop any) {
 	r.loops[loteID] = loop
 }
 
-// evitar import no usado del predictor; algunas funciones auxiliares podrían
-// usarlo en futuras versiones.
-var _ = predictor.NewClientePredictor
+// (predicador eliminado: el predictor se inyecta al Optimizer desde main.go.)
