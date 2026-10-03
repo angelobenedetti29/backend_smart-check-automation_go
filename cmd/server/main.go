@@ -196,6 +196,7 @@ func main() {
 		Broker:         controlSSEBroker,
 	}
 	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
+	controlSSEHandler := controlController.NewControlSSEHandler(controlSSEBroker)
 
 	authHandler := authController.NewAuthHandler(authSvc)
 	userHandler := userController.NewUserHandler(userSvc)
@@ -255,6 +256,8 @@ func main() {
 			controlHandler.HandleControlStop()(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/consigna-propuesta"):
 			controlHandler.HandleConsignaPropuesta()(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/events"):
+			authController.JWTMiddleware(jwtSecretBytes, controlSSEHandler.HandleControlEvents)(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/aplicar-consigna"):
 			controlHandler.HandleAplicarConsigna(controlDeps)(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/decisiones"):
