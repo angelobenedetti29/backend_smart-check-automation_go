@@ -34,7 +34,7 @@ services:
   predictor-svc:
     build:
       context: .
-      dockerfile: cmd/predictor-svc/Dockerfile
+      dockerfile: cmd/predictor_svc/Dockerfile
     ports:
       - "8090:8090"
     environment:
@@ -43,7 +43,7 @@ services:
       # contrato del backend (PREDICTOR_URL=http://predictor-svc:8090).
       - PYTHONUNBUFFERED=1
     volumes:
-      - predictor_models:/app/models_xgb
+      - predictor_models:/app/predictor_svc/models_xgb
     restart: unless-stopped
 
 volumes:
