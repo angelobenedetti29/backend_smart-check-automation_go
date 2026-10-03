@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
@@ -64,10 +65,15 @@ type DecisionesRepo interface {
 	Save(ctx context.Context, d *decisiones_control.DecisionControl) error
 }
 
+// EventosRepo es el mínimo del repo de lote para contar eventos en la ventana.
+type EventosRepo interface {
+	CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (ok, crudo, quemado int, err error)
+}
+
 // Deps que el handler necesita del lote_sector para configurar el loop.
-// Las tres dependencias siguientes (MetricasRepo, DecisionesRepo, Broker)
-// son OBLIGATORIAS: el Loop las invoca dentro del tick y un nil ahí produce
-// nil pointer dereference.
+// Las cuatro dependencias siguientes (MetricasRepo, EventosRepo, DecisionesRepo,
+// Broker) son OBLIGATORIAS: el Loop las invoca dentro del tick y un nil ahí
+// produce nil pointer dereference.
 type ControlDeps struct {
 	LoteLookup    LoteLookupService
 	ProductoRepo  ProductoRepo
@@ -75,6 +81,7 @@ type ControlDeps struct {
 	Consigna      control.ConsignaDispatchService
 	LoopCancels   *LoopRegistry
 	MetricasRepo  MetricasRepo
+	EventosRepo   EventosRepo
 	DecisionesRepo DecisionesRepo
 	Broker        *sse.Broker
 }
@@ -136,6 +143,7 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 		loop := control.NewLoop(
 			lote.ID, deps.LoteLookup,
 			deps.MetricasRepo,
+			deps.EventosRepo,
 			deps.ProductoRepo,
 			deps.Optimizer,
 			deps.Consigna,

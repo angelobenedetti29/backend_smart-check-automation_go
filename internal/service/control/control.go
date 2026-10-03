@@ -60,6 +60,7 @@ type Loop struct {
 
 	clienteLote loteLookupService
 	clienteMet  metricasRepo
+	eventos     eventosRepo
 	producto   productoLookupService
 	optimizer   *optimizador.Optimizer
 	consigna    ConsignaDispatchService
@@ -88,6 +89,12 @@ type productoLookupService interface {
 	GetByID(ctx context.Context, id string) (*producto.Producto, error)
 }
 
+// Interface mínima para contar eventos del lote en una ventana temporal.
+// La implementación real vive en internal/repository/lote_sector_repo.go.
+type eventosRepo interface {
+	CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (ok, crudo, quemado int, err error)
+}
+
 // Interface mínima para despachar la consigna (reusa ConsignaService).
 type ConsignaDispatchService interface {
 	Dispatch(ctx context.Context, req consigna.ConsignaManualRequest, origen consigna.Origen, usuario *string) (*consigna.Consigna, error)
@@ -104,6 +111,7 @@ func NewLoop(
 	loteID string,
 	clienteLote loteLookupService,
 	clienteMet metricasRepo,
+	eventos eventosRepo,
 	producto productoLookupService,
 	optimizer *optimizador.Optimizer,
 	consignaSrv ConsignaDispatchService,
@@ -113,6 +121,7 @@ func NewLoop(
 	return &Loop{
 		clienteLote: clienteLote,
 		clienteMet:  clienteMet,
+		eventos:     eventos,
 		producto:   producto,
 		optimizer:   optimizer,
 		consigna:    consignaSrv,
@@ -218,6 +227,12 @@ func (l *Loop) tick(ctx context.Context) {
 		return
 	}
 
+	// 2. contar eventos del lote en la misma ventana: es la observación real
+	//    que alimenta z_observado y los % del audit. Si la ventana está
+	//    vacía de eventos, z_observado se persiste como NULL.
+	var pctCrudos, pctOk, pctQuemados float64
+	zObs, zObsSet := l.calcularZObservado(ctx, ventanaInicio, now, &pctCrudos, &pctOk, &pctQuemados)
+
 	estado := l.estadoDesdeMetricas(filtradas)
 	predXGB, err := l.optimizer.Resolver(ctx, l.productoID, estado, l.limites, l.pesos)
 	if err != nil {
@@ -226,7 +241,6 @@ func (l *Loop) tick(ctx context.Context) {
 	}
 
 	// 5. persistir y broadcast.
-	zObservado := l.zObservado(estado, predXGB.Prediccion)
 	decision := &decisiones_control.DecisionControl{
 		LoteID:         l.loteID,
 		VentanaInicio:  ventanaInicio,
@@ -234,17 +248,18 @@ func (l *Loop) tick(ctx context.Context) {
 		Muestras:       len(filtradas),
 		TempActual:     estado.TempHorno1,
 		VelActual:      &estado.VelocidadCinta,
-		PctCrudosObs:   0, // sin eventos en este path: el control sólo tiene métricas
-		PctOkObs:       0,
-		PctQuemadosObs: 0,
+		PctCrudosObs:   pctCrudos,
+		PctOkObs:       pctOk,
+		PctQuemadosObs: pctQuemados,
 		ConfPromedio:   confianzaPromedio(filtradas),
 		TempPropuesto:  predXGB.Temp1,
 		VelPropuesto:   predXGB.Velocidad,
-		ZObservado:     &zObservado,
+		ZObservado:     zObs, // nil cuando la ventana no tuvo eventos
 		ZPredicho:      &predXGB.Z,
 		AplicadoPor:    decisiones_control.AplicadoPorNadie,
 		Prediccion:     serializarPrediccion(predXGB.Prediccion),
 	}
+	_ = zObsSet // sólo para documentar el set en tests / debug
 	if predXGB.Temp2 != nil {
 		// T2 no entra como columna en decisiones_control (la columna temp2_objetivo
 		// está en lotes_productivos). Se serializa dentro de Prediccion.
@@ -268,6 +283,41 @@ func (l *Loop) tick(ctx context.Context) {
 			log.Printf("[control] Save decision (supervision): %v", err)
 		}
 	}
+}
+
+// calcularZObservado cuenta los eventos del lote en la ventana y devuelve:
+//   - zObs, zObsSet: Z observada (nil cuando no hay eventos)
+//   - *pctCrudos, *pctOk, *pctQuemados: porcentajes observados en la ventana
+//
+// Si el repo falla, se persiste el error como skipped_observation (no se
+// rompe el despacho de la propuesta). Si no hay eventos, los porcentajes
+// quedan en 0 y zObs en nil: la decisión queda registrada sin Z observada,
+// coherente con la promesa del audit ("z_observado requiere eventos en la
+// ventana").
+func (l *Loop) calcularZObservado(
+	ctx context.Context, ventanaInicio, ventanaFin time.Time,
+	pctCrudos, pctOk, pctQuemado *float64,
+) (*float64, bool) {
+	if l.eventos == nil {
+		return nil, false
+	}
+	okN, crudoN, quemadoN, err := l.eventos.CountEventosEnVentana(ctx, l.loteID, ventanaInicio, ventanaFin)
+	if err != nil {
+		log.Printf("[control] CountEventosEnVentana: %v", err)
+		return nil, false
+	}
+	total := okN + crudoN + quemadoN
+	if total == 0 {
+		return nil, false
+	}
+	cPct := 100.0 * float64(crudoN) / float64(total)
+	oPct := 100.0 * float64(okN) / float64(total)
+	qPct := 100.0 * float64(quemadoN) / float64(total)
+	*pctCrudos = cPct
+	*pctOk = oPct
+	*pctQuemado = qPct
+	z := l.pesos.WC*cPct + l.pesos.WQ*qPct
+	return &z, true
 }
 
 // AplicarPropuesta aplica manualmente (operario) la propuesta pendiente del
@@ -397,18 +447,6 @@ func (l *Loop) estadoDesdeMetricas(m []metricashorno.MetricaHorno) optimizador.E
 		estado.VelObjetivo = estado.VelocidadCinta
 	}
 	return estado
-}
-
-// zObservado calcula el valor del objetivo con los datos del estado
-// actual. Para v1 usamos el mismo cálculo que el optimizador (best-effort):
-// wc*0 + wq*0 porque no tenemos los % observados de salida del lote en
-// este punto (esos viven en eventos_lote y los contamos por lote). La
-// columna z_observado queda para una segunda iteración donde el control
-// también leerá eventos_lote.
-func (l *Loop) zObservado(estado optimizador.Estado, pred optimizador.PrediccionSalida) float64 {
-	// Placeholder: igual a Z_predicho hasta tener los eventos agregados.
-	_ = estado
-	return l.pesos.WC*pred.PctCrudos + l.pesos.WQ*pred.PctQuemados
 }
 
 // --- helpers ---

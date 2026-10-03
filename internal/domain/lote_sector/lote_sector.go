@@ -283,4 +283,10 @@ type Repository interface {
 	// Historial devuelve una página de lotes (más nuevos primero) y el total
 	// que matchea los filtros.
 	Historial(ctx context.Context, params HistorialParams) ([]Lote, int, error)
+	// CountEventosEnVentana cuenta los eventos del lote cuyo timestamp cae
+	// en [desde, hasta], agrupados por estado (ok/crudo/quemado). Los que
+	// tienen estado NULL no se cuentan en ningún bucket. total==0 cuando
+	// no hay eventos en la ventana (se persiste z_observado=NULL en ese
+	// caso para no contaminar el audit con una Z falsa).
+	CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (ok, crudo, quemado int, err error)
 }

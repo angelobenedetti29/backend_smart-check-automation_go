@@ -72,6 +72,10 @@ func (f *fakeLoteRepo) Historial(ctx context.Context, params lotesector.Historia
 	return f.historial(ctx, params)
 }
 
+func (f *fakeLoteRepo) CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (int, int, int, error) {
+	return 0, 0, 0, nil
+}
+
 type fakeSectorRepo struct {
 	deviceInfo    *sector.DeviceInfo
 	deviceErr     error

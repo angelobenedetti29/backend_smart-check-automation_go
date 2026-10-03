@@ -191,6 +191,7 @@ func main() {
 		Consigna:       consignaSvc,
 		LoopCancels:    loopRegistry,
 		MetricasRepo:   metricasHornoRepo,
+		EventosRepo:    loteSectorRepo,
 		DecisionesRepo: decisionesRepo,
 		Broker:         controlSSEBroker,
 	}

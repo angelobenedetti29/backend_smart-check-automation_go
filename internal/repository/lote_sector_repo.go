@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -559,4 +560,44 @@ func (r *LoteSectorPostgresRepository) Historial(ctx context.Context, params lot
 		return nil, 0, fmt.Errorf("historial lotes: count: %w", err)
 	}
 	return out, total, nil
+}
+
+// CountEventosEnVentana cuenta los eventos del lote cuyo timestamp cae en
+// [desde, hasta] agrupados por estado. Los NULL se omiten de cualquier bucket.
+// total==0 cuando la ventana está vacía; el caller lo traduce a z_observado=NULL.
+func (r *LoteSectorPostgresRepository) CountEventosEnVentana(
+	ctx context.Context, loteID string, desde, hasta time.Time,
+) (okN, crudoN, quemadoN int, err error) {
+	rows, qerr := r.db.Query(ctx, `
+		SELECT estado, COUNT(*)
+		FROM eventos_lote
+		WHERE lote_id = $1 AND momento >= $2 AND momento < $3
+		GROUP BY estado`,
+		loteID, desde, hasta)
+	if qerr != nil {
+		return 0, 0, 0, fmt.Errorf("count eventos en ventana: %w", qerr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var estado *string
+		var n int
+		if scanErr := rows.Scan(&estado, &n); scanErr != nil {
+			return 0, 0, 0, fmt.Errorf("count eventos scan: %w", scanErr)
+		}
+		if estado == nil {
+			continue
+		}
+		switch *estado {
+		case lotesector.EstadoOK:
+			okN = n
+		case lotesector.EstadoCrudo:
+			crudoN = n
+		case lotesector.EstadoQuemado:
+			quemadoN = n
+		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return 0, 0, 0, fmt.Errorf("count eventos rows: %w", rowsErr)
+	}
+	return okN, crudoN, quemadoN, nil
 }
