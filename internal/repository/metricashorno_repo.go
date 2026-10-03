@@ -2,10 +2,8 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
@@ -84,9 +82,6 @@ func (r *MetricasHornoPostgresRepository) GetUltimasParaLote(ctx context.Context
 		ORDER BY received_at DESC
 		LIMIT $2`, loteID, limite)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return []metricashorno.MetricaHorno{}, nil
-		}
 		return nil, fmt.Errorf("query metricas_horno by lote: %w", err)
 	}
 	defer rows.Close()

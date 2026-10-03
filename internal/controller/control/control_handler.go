@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -139,6 +140,10 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 		}
 		pesos := optimizador.PesosDesdeLote(lote.PesosObjetivo)
 		limites := optimizador.LimitesDesdeProducto(prod)
+		hornoID := os.Getenv("MPC_HORNO_ID")
+		if hornoID == "" {
+			hornoID = "horno-1"
+		}
 		ctx, cancel := context.WithCancel(r.Context())
 		loop := control.NewLoop(
 			lote.ID, deps.LoteLookup,
@@ -151,7 +156,7 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 			deps.Broker,
 		)
 		loop.Configurar(
-			prod.ID, lote.Modo, lote.Horno2Habilitado,
+			prod.ID, lote.Modo, lote.Horno2Habilitado, hornoID,
 			lote.VentanaEvaluacionSegundos, lote.VentanaActualizacionSegundos,
 			pesos, limites,
 		)
