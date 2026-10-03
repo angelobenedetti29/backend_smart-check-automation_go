@@ -71,7 +71,9 @@ type Consigna struct {
 	// SCA-400: horno 2 (T2). NULL cuando la línea tiene un solo horno.
 	TempHorno2Objetivo     *float64  `json:"tempHorno2Objetivo,omitempty" db:"temp_horno2_objetivo"`
 	TempHorno2Previa       *float64  `json:"tempHorno2Previa,omitempty"   db:"temp_horno2_previa"`
-	Horno2Habilitado       bool      `json:"horno2Habilitado"             db:"horno2_habilitado"`
+	// Horno2Habilitado: snapshot del flag del producto al momento del despacho.
+	// NULL en consignas previas a SCA-400 (migración); true/false en las nuevas.
+	Horno2Habilitado       *bool     `json:"horno2Habilitado,omitempty"   db:"horno2_habilitado"`
 	CreadaEn               time.Time `json:"creadaEn"                  db:"creada_en"`
 }
 

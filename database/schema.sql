@@ -1028,9 +1028,16 @@ ALTER TABLE historial_consignas
     ADD COLUMN IF NOT EXISTS temp_horno2_previa   NUMERIC(6,2),
     ADD COLUMN IF NOT EXISTS horno2_habilitado    BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- SCA-400 (post-deploy): horno2_habilitado pasa a nullable para distinguir
+-- "no aplica" (NULL, registro histórico) de "explícitamente false" (línea
+-- sin segundo horno). Idempotente: ALTER COLUMN ... DROP NOT NULL es seguro
+-- si la columna ya es nullable.
+ALTER TABLE historial_consignas
+    ALTER COLUMN horno2_habilitado DROP NOT NULL;
+
 COMMENT ON COLUMN historial_consignas.temp_horno2_objetivo IS 'Setpoint despachado al horno 2 (NULL cuando la línea tiene un solo horno)';
 COMMENT ON COLUMN historial_consignas.temp_horno2_previa   IS 'Temperatura activa del horno 2 inmediatamente antes de este despacho';
-COMMENT ON COLUMN historial_consignas.horno2_habilitado    IS 'Snapshot del flag del producto al momento del despacho';
+COMMENT ON COLUMN historial_consignas.horno2_habilitado    IS 'Snapshot del flag del producto al momento del despacho. NULL en consignas previas a SCA-400';
 
 -- ----------------------------------------------------------------------------
 -- 3) lotes_productivos: modo, ventanas, tolerancias, umbrales, pesos, último

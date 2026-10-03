@@ -147,6 +147,10 @@ func (s *ConsignaService) dispatch(
 
 	result := s.controller.SendSetpoint(hornoID, temperatura, velocidad)
 
+	// Snapshot del flag al momento del despacho: se persiste como puntero
+	// para distinguir NULL histórico (sin SCA-400) de false explícito.
+	horno2Snapshot := horno2Habilitado
+
 	rec := &consigna.Consigna{
 		HornoID:                hornoID,
 		LoteID:                 loteID,
@@ -160,7 +164,7 @@ func (s *ConsignaService) dispatch(
 		VelocidadCintaPrevia:   &prevVel,
 		TempHorno2Objetivo:     tempHorno2,
 		TempHorno2Previa:       prevTemp2,
-		Horno2Habilitado:       horno2Habilitado,
+		Horno2Habilitado:       &horno2Snapshot,
 	}
 	if principal, ok := deviceauth.PrincipalFromContext(ctx); ok {
 		rec.DispositivoID = &principal.DeviceID
