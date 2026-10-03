@@ -169,7 +169,9 @@ func (loop *Loop) run(ctx context.Context) {
 		loop.ventanaEvalSeg = 600
 	}
 	// Esperar la primera ventana antes de la primera evaluación: queremos
-	// histórico suficiente para una decisión informada.
+	// histórico suficiente para una decisión informada. Se interrumpe si
+	// cambian el modo a MANUAL (ctx no se cancela en ese caso: lo relee
+	// `tick` al inicio del bucle).
 	select {
 	case <-ctx.Done():
 		return
@@ -177,6 +179,13 @@ func (loop *Loop) run(ctx context.Context) {
 	}
 
 	for {
+		// Chequeo temprano: si el lote ya pasó a MANUAL antes de este tick,
+		// salimos sin gastar el sleep entero. El próximo operador que
+		// reanude el control debe llamar a /control/start de nuevo.
+		if loop.modo == lote_sector.ModoManual {
+			return
+		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -184,6 +193,12 @@ func (loop *Loop) run(ctx context.Context) {
 		}
 
 		loop.tick(ctx)
+
+		if loop.modo == lote_sector.ModoManual {
+			// El tick ya detectó el cambio a MANUAL y abortó; salimos sin
+			// dormir más para liberar la goroutine inmediatamente.
+			return
+		}
 
 		select {
 		case <-ctx.Done():
