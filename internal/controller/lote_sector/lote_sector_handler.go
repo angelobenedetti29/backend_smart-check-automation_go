@@ -14,6 +14,7 @@ import (
 	"time"
 
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/helpers"
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
@@ -382,20 +383,12 @@ func (h *LoteSectorHandler) resolveSector(r *http.Request) (string, error) {
 	return sectorID, nil
 }
 
-// extractLoteID obtiene el {id} de /api/v1/lotes/{id}/<suffix> decodificando el
-// path manualmente: las rutas se registran en el subtree /api/v1/lotes/ y
-// PathValue no está disponible.
+// extractLoteID obtiene el {id} de /api/v1/lotes/{id}/<suffix>. Wrapper sobre
+// helpers.ExtractLoteID que devuelve string vacío (en vez de error) por
+// compatibilidad con los callers existentes.
 func extractLoteID(path, suffix string) string {
-	const prefix = "/api/v1/lotes/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
-		return ""
-	}
-	mid := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	mid = strings.Trim(mid, "/")
-	if mid == "" || strings.Contains(mid, "/") {
-		return ""
-	}
-	return mid
+	id, _ := helpers.ExtractLoteID(path, suffix)
+	return id
 }
 
 // parseLimite lee el query param limite, aplicando default 20 y tope 100.

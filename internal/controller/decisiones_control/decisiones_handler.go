@@ -8,9 +8,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 
-	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/helpers"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
@@ -38,11 +37,11 @@ func (h *DecisionesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
 		return
 	}
-	if !rolValidoDecisiones(r) {
+	if !helpers.RolValido(r, user.RoleAdmin, user.RoleSupervisor, user.RoleOperario) {
 		response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
 		return
 	}
-	loteID, err := extractLoteID(r.URL.Path, "/decisiones")
+	loteID, err := helpers.ExtractLoteID(r.URL.Path, "/decisiones")
 	if err != nil {
 		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 		return
@@ -57,38 +56,8 @@ func (h *DecisionesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.OK(w, "Decisiones del lote", map[string]interface{}{
-		"lote_id":   loteID,
+		"lote_id":    loteID,
 		"decisiones": items,
-		"total":     len(items),
+		"total":      len(items),
 	})
 }
-
-// nolint:unusedReceiverWordUsage
-func rolValidoDecisiones(r *http.Request) bool {
-	claims := authController.GetClaimsFromContext(r.Context())
-	if claims == nil {
-		return false
-	}
-	switch claims.Role {
-	case user.RoleAdmin, user.RoleSupervisor, user.RoleOperario:
-		return true
-	}
-	return false
-}
-
-// extractLoteID obtiene el {id} de /api/v1/lotes/{id}/<suffix>.
-func extractLoteID(path, suffix string) (string, error) {
-	const prefix = "/api/v1/lotes/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
-		return "", lotesector.ErrNotFound
-	}
-	mid := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	mid = strings.Trim(mid, "/")
-	if mid == "" || strings.Contains(mid, "/") {
-		return "", lotesector.ErrNotFound
-	}
-	return mid, nil
-}
-
-// asegurar que usamos strings aunque no aparezca en el cuerpo
-var _ = strings.HasPrefix

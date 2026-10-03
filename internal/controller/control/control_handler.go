@@ -18,11 +18,11 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/helpers"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
@@ -111,11 +111,11 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 			return
 		}
 		// Sólo Supervisor/Admin pueden iniciar el control.
-		if !rolValido(r, user.RoleSupervisor, user.RoleAdmin) {
+		if !helpers.RolValido(r, user.RoleSupervisor, user.RoleAdmin) {
 			response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
 			return
 		}
-		loteID, err := extractLoteIDFromControlPath(r.URL.Path, "/control/start")
+		loteID, err := helpers.ExtractLoteID(r.URL.Path, "/control/start")
 		if err != nil {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
@@ -181,11 +181,11 @@ func (h *ControlHandler) HandleControlStop() http.HandlerFunc {
 			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
 			return
 		}
-		if !rolValido(r, user.RoleSupervisor, user.RoleAdmin) {
+		if !helpers.RolValido(r, user.RoleSupervisor, user.RoleAdmin) {
 			response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
 			return
 		}
-		loteID, err := extractLoteIDFromControlPath(r.URL.Path, "/control/stop")
+		loteID, err := helpers.ExtractLoteID(r.URL.Path, "/control/stop")
 		if err != nil {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
@@ -224,11 +224,11 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
 			return
 		}
-		if !rolValido(r, user.RoleOperario, user.RoleSupervisor, user.RoleAdmin) {
+		if !helpers.RolValido(r, user.RoleOperario, user.RoleSupervisor, user.RoleAdmin) {
 			response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
 			return
 		}
-		loteID, err := extractLoteIDFromControlPath(r.URL.Path, "/aplicar-consigna")
+		loteID, err := helpers.ExtractLoteID(r.URL.Path, "/aplicar-consigna")
 		if err != nil {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
@@ -268,34 +268,6 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 }
 
 // --- helpers ---
-
-func extractLoteIDFromControlPath(path, suffix string) (string, error) {
-	const prefix = "/api/v1/lotes/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
-		return "", erroresNotFound()
-	}
-	mid := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	mid = strings.Trim(mid, "/")
-	if mid == "" || strings.Contains(mid, "/") {
-		return "", erroresNotFound()
-	}
-	return mid, nil
-}
-
-func erroresNotFound() error { return lotesector.ErrNotFound }
-
-func rolValido(r *http.Request, roles ...string) bool {
-	claims := authController.GetClaimsFromContext(r.Context())
-	if claims == nil {
-		return false
-	}
-	for _, rol := range roles {
-		if claims.Role == rol {
-			return true
-		}
-	}
-	return false
-}
 
 func writeAplicarError(w http.ResponseWriter, err error) {
 	if errors.Is(err, consigna.ErrHorno2NoHabilitado) {
