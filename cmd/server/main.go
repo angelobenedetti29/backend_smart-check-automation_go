@@ -24,6 +24,8 @@ import (
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
 	metricashornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/metricashorno"
+	controlController "github.com/angelobenedetti29/smart-check-automation/internal/controller/control"
+	decisionesController "github.com/angelobenedetti29/smart-check-automation/internal/controller/decisiones_control"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
 	registroController "github.com/angelobenedetti29/smart-check-automation/internal/controller/registro"
 	sectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sector"
@@ -42,6 +44,8 @@ import (
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
+	optimizador "github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
+	"github.com/angelobenedetti29/smart-check-automation/internal/service/predictor"
 	productoService "github.com/angelobenedetti29/smart-check-automation/internal/service/producto"
 	registroService "github.com/angelobenedetti29/smart-check-automation/internal/service/registro"
 	sectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/sector"
@@ -103,6 +107,7 @@ func main() {
 	sectorRepo := repository.NewSectorPostgresRepository(pgPool)
 	loteSectorRepo := repository.NewLoteSectorPostgresRepository(pgPool)
 	metricasHornoRepo := repository.NewMetricasHornoPostgresRepository(pgPool)
+	decisionesRepo := repository.NewDecisionesControlPostgresRepository(pgPool)
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
@@ -161,6 +166,28 @@ func main() {
 	metricasHornoHandler := metricashornoController.NewMetricasHornoHandler(metricasHornoRepo, loteSectorSvc)
 	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
 
+	// Sidecar predictor XGBoost (SCA-400). Si no está, el optimizador entra
+	// en modo degradado (devuelve placeholder en el predictor → decisión
+	// skipped en el audit del MPC).
+	predictorURL := os.Getenv("PREDICTOR_URL")
+	if predictorURL == "" {
+		predictorURL = "http://localhost:8090"
+	}
+	predictorCliente := predictor.NewClientePredictor(predictorURL)
+	optimizer := optimizador.NewOptimizer(predictorCliente)
+
+	// Registry de loops activos por lote y handlers de control.
+	loopRegistry := controlController.NewLoopRegistry()
+	controlHandler := &controlController.ControlHandler{}
+	controlDeps := controlController.ControlDeps{
+		LoteLookup:   loteSectorSvc,
+		ProductoRepo: productoRepo,
+		Optimizer:    optimizer,
+		Consigna:     consignaSvc,
+		LoopCancels:  loopRegistry,
+	}
+	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
+
 	authHandler := authController.NewAuthHandler(authSvc)
 	userHandler := userController.NewUserHandler(userSvc)
 	jwtSecretBytes := []byte(jwtSecret)
@@ -213,6 +240,16 @@ func main() {
 			loteSectorHandler.HandleCierre(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
 			metricasHornoHandler.Handle(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/start"):
+			controlHandler.HandleControlStart(controlDeps)(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
+			controlHandler.HandleControlStop()(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/consigna-propuesta"):
+			controlHandler.HandleConsignaPropuesta()(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/aplicar-consigna"):
+			controlHandler.HandleAplicarConsigna(controlDeps)(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/decisiones"):
+			decisionesHandler.Handle(w, r)
 		default:
 			response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
 		}

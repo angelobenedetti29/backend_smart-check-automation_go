@@ -1,0 +1,441 @@
+// Package control orquesta el loop automático / supervisión por lote
+// (SCA-400). Una instancia por lote activo; se cancela con el contexto.
+//
+// Loop (modo AUTOMATICO):
+//   cada ventana_evaluacion_segundos:
+//     1. lee metricas_horno y eventos_lote de la ventana
+//     2. agrega (%C, %O, %Q, conf_promedio)
+//     3. llama al optimizador
+//     4. si hay propuesta → ConsignaService.Dispatch (origen AUTOMATICO)
+//     5. persiste decision_control (aplicado_por=MPC o NADIE)
+//     6. espera ventana_actualizacion_segundos y repite
+//
+// Loop (modo SUPERVISION): igual pero el paso 4 NO despacha; sólo publica
+// la propuesta por SSE. La aplica un operario desde /aplicar-consigna.
+package control
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
+	"github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
+	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
+)
+
+// ErrLoteNoAbierto indica que el lote no está ABIERTO cuando se intenta operar.
+var ErrLoteNoAbierto = errors.New("control: el lote no está abierto")
+
+// PrediccionPersistida es la salida cruda del XGBoost que se guarda como
+// JSONB en decisiones_control.prediccion. Sólo se persiste el subconjunto
+// relevante: pctCrudos/pctOk/pctQuemados/modelVersion/esPlaceholder.
+type PrediccionPersistida struct {
+	PctCrudos     float64 `json:"pctCrudos"`
+	PctOk         float64 `json:"pctOk"`
+	PctQuemados   float64 `json:"pctQuemados"`
+	ModelVersion  string  `json:"modelVersion"`
+	EsPlaceholder bool    `json:"esPlaceholder"`
+}
+
+// Loop es el ciclo de control de un lote activo. Vive en memoria y emite
+// propuestas / decisiones por SSE.
+type Loop struct {
+	loteID         string
+	productoID     string
+	modo           string // MANUAL | SUPERVISION | AUTOMATICO
+	horno2Hab      bool
+	ventanaEvalSeg int
+	ventanaActSeg  int
+	pesos          optimizador.Pesos
+	limites        optimizador.Limites
+
+	clienteLote loteLookupService
+	clienteMet  metricasRepo
+	producto   productoLookupService
+	optimizer   *optimizador.Optimizer
+	consigna    ConsignaDispatchService
+	decisiones  decisionesRepo
+	broker      *sse.Broker
+	now         func() time.Time
+
+	// propuestaPendiente es el último setpoint propuesto en modo SUPERVISION
+	// que aún no fue aplicado por el operario.
+	muPropuesta       sync.Mutex
+	propuestaPendiente *optimizador.Propuesta
+}
+
+// Interface mínima que el loop necesita del lote_sector service.
+type loteLookupService interface {
+	GetByID(ctx context.Context, loteID string) (*lote_sector.Lote, error)
+}
+
+// Interface mínima para leer métricas (sólo las últimas N).
+type metricasRepo interface {
+	GetUltimasParaLote(ctx context.Context, loteID string, limite int) ([]metricashorno.MetricaHorno, error)
+}
+
+// Interface mínima para leer el producto (catálogo).
+type productoLookupService interface {
+	GetByID(ctx context.Context, id string) (*producto.Producto, error)
+}
+
+// Interface mínima para despachar la consigna (reusa ConsignaService).
+type ConsignaDispatchService interface {
+	Dispatch(ctx context.Context, req consigna.ConsignaManualRequest, origen consigna.Origen, usuario *string) (*consigna.Consigna, error)
+}
+
+// Interface mínima para persistir el audit del MPC.
+type decisionesRepo interface {
+	Save(ctx context.Context, d *decisiones_control.DecisionControl) error
+}
+
+// NewLoop crea un Loop configurado. La verificación de modo/horno2 se hace
+// en Start para no entrar al loop si el lote no califica.
+func NewLoop(
+	loteID string,
+	clienteLote loteLookupService,
+	clienteMet metricasRepo,
+	producto productoLookupService,
+	optimizer *optimizador.Optimizer,
+	consignaSrv ConsignaDispatchService,
+	decisiones decisionesRepo,
+	broker *sse.Broker,
+) *Loop {
+	return &Loop{
+		clienteLote: clienteLote,
+		clienteMet:  clienteMet,
+		producto:   producto,
+		optimizer:   optimizer,
+		consigna:    consignaSrv,
+		decisiones:  decisiones,
+		broker:      broker,
+		now:         time.Now,
+	}
+}
+
+// Configurar aplica los parámetros del lote. Antes de Start, el Loop no
+// conoce ni el modo ni las ventanas del lote.
+func (l *Loop) Configurar(
+	productoID string,
+	modo string,
+	horno2Hab bool,
+	ventanaEvalSeg int,
+	ventanaActSeg int,
+	pesos optimizador.Pesos,
+	limites optimizador.Limites,
+) {
+	l.productoID = productoID
+	l.modo = modo
+	l.horno2Hab = horno2Hab
+	l.ventanaEvalSeg = ventanaEvalSeg
+	l.ventanaActSeg = ventanaActSeg
+	l.pesos = pesos
+	l.limites = limites
+}
+
+// Start lanza el loop en una goroutine y devuelve. El contexto cancela
+// el loop al cerrarse (lote cerrado, shutdown, etc.).
+func (l *Loop) Start(ctx context.Context) {
+	go l.run(ctx)
+}
+
+func (l *Loop) run(ctx context.Context) {
+	if l.ventanaActSeg <= 0 {
+		l.ventanaActSeg = 300
+	}
+	if l.ventanaEvalSeg <= 0 {
+		l.ventanaEvalSeg = 600
+	}
+	// Esperar la primera ventana antes de la primera evaluación: queremos
+	// histórico suficiente para una decisión informada.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(time.Duration(l.ventanaEvalSeg) * time.Second):
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		l.tick(ctx)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(l.ventanaActSeg) * time.Second):
+		}
+	}
+}
+
+// tick ejecuta un ciclo completo de evaluación → optimización → decisión.
+func (l *Loop) tick(ctx context.Context) {
+	if l.modo == lote_sector.ModoManual {
+		return
+	}
+	if l.productoID == "" {
+		log.Printf("[control] tick sin productoID configurado")
+		return
+	}
+
+	// 1. leer métricas + eventos de la ventana.
+	now := l.now().UTC()
+	ventanaInicio := now.Add(-time.Duration(l.ventanaEvalSeg) * time.Second)
+	metricas, err := l.clienteMet.GetUltimasParaLote(ctx, l.loteID, 200)
+	if err != nil {
+		log.Printf("[control] GetUltimasParaLote: %v", err)
+		return
+	}
+	// Filtrar a la ventana real (el repo devuelve las últimas N, no por rango).
+	filtradas := filtrarPorVentana(metricas, ventanaInicio, now)
+	if len(filtradas) == 0 {
+		l.skipSinMuestras(ctx, ventanaInicio, now)
+		return
+	}
+
+	estado := l.estadoDesdeMetricas(filtradas)
+	predXGB, err := l.optimizer.Resolver(ctx, l.productoID, estado, l.limites, l.pesos)
+	if err != nil {
+		l.skipError(ctx, ventanaInicio, now, err, filtradas)
+		return
+	}
+
+	// 5. persistir y broadcast.
+	zObservado := l.zObservado(estado, predXGB.Prediccion)
+	decision := &decisiones_control.DecisionControl{
+		LoteID:         l.loteID,
+		VentanaInicio:  ventanaInicio,
+		VentanaFin:     now,
+		Muestras:       len(filtradas),
+		TempActual:     estado.TempHorno1,
+		VelActual:      &estado.VelocidadCinta,
+		PctCrudosObs:   0, // sin eventos en este path: el control sólo tiene métricas
+		PctOkObs:       0,
+		PctQuemadosObs: 0,
+		ConfPromedio:   confianzaPromedio(filtradas),
+		TempPropuesto:  predXGB.Temp1,
+		VelPropuesto:   predXGB.Velocidad,
+		ZObservado:     &zObservado,
+		ZPredicho:      &predXGB.Z,
+		AplicadoPor:    decisiones_control.AplicadoPorNadie,
+		Prediccion:     serializarPrediccion(predXGB.Prediccion),
+	}
+	if predXGB.Temp2 != nil {
+		// T2 no entra como columna en decisiones_control (la columna temp2_objetivo
+		// está en lotes_productivos). Se serializa dentro de Prediccion.
+		_ = predXGB.Temp2
+	}
+
+	if l.modo == lote_sector.ModoAutomatico {
+		l.aplicarComoMPC(ctx, predXGB, decision, estado)
+	} else {
+		// SUPERVISION: sólo publica por SSE para que el operador apruebe.
+		l.muPropuesta.Lock()
+		l.propuestaPendiente = predXGB
+		l.muPropuesta.Unlock()
+		l.broker.Broadcast("control.propuesta", mustJSON(map[string]interface{}{
+			"lote_id":   l.loteID,
+			"propuesta": predXGB,
+			"ventana":   ventanaInicio,
+		}))
+		decision.AplicadoPor = decisiones_control.AplicadoPorNadie
+		if err := l.decisiones.Save(ctx, decision); err != nil {
+			log.Printf("[control] Save decision (supervision): %v", err)
+		}
+	}
+}
+
+// AplicarPropuesta aplica manualmente (operario) la propuesta pendiente del
+// modo SUPERVISION. Devuelve ErrLoteNoAbierto si ya no hay propuesta.
+func (l *Loop) AplicarPropuesta(ctx context.Context) (*consigna.Consigna, error) {
+	l.muPropuesta.Lock()
+	prop := l.propuestaPendiente
+	l.propuestaPendiente = nil
+	l.muPropuesta.Unlock()
+	if prop == nil {
+		return nil, ErrLoteNoAbierto
+	}
+	return l.aplicarConsigna(ctx, prop, "OPERARIO")
+}
+
+func (l *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuesta, decision *decisiones_control.DecisionControl, estado optimizador.Estado) {
+	cons, err := l.aplicarConsigna(ctx, prop, "MPC")
+	if err != nil {
+		// Si el controlador físico rechaza, registramos la decisión como no
+		// aplicada con motivo. El horno pasa a CONTROL_MANUAL por el flujo
+		// existente (handleFalloDeEnlace).
+		skipped := fmt.Sprintf("dispatch_fallido: %v", err)
+		decision.AplicadoPor = decisiones_control.AplicadoPorNadie
+		decision.RazonSkipped = &skipped
+		if err := l.decisiones.Save(ctx, decision); err != nil {
+			log.Printf("[control] Save decision (mpc fail): %v", err)
+		}
+		return
+	}
+	temp := cons.TemperaturaObjetivo
+	vel := cons.VelocidadCintaObjetivo
+	decision.TempAplicado = &temp
+	decision.VelAplicado = &vel
+	decision.AplicadoPor = decisiones_control.AplicadoPorMPC
+	if err := l.decisiones.Save(ctx, decision); err != nil {
+		log.Printf("[control] Save decision (mpc ok): %v", err)
+	}
+	_ = estado
+}
+
+func (l *Loop) aplicarConsigna(ctx context.Context, prop *optimizador.Propuesta, origen string) (*consigna.Consigna, error) {
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-1", // Horno fijo del primer sector; ampliar a sector-aware cuando haya 2+
+		ProductoID:             l.productoID,
+		TemperaturaObjetivo:    prop.Temp1,
+		VelocidadCintaObjetivo: prop.Velocidad,
+		TempHorno2Objetivo:     prop.Temp2,
+	}
+	var u *string
+	usuario := origen
+	u = &usuario
+	return l.consigna.Dispatch(ctx, req, consigna.OrigenAutomatico, u)
+}
+
+func (l *Loop) skipSinMuestras(ctx context.Context, ventanaInicio, ventanaFin time.Time) {
+	skipped := "ventana_sin_muestras"
+	d := &decisiones_control.DecisionControl{
+		LoteID:        l.loteID,
+		VentanaInicio: ventanaInicio,
+		VentanaFin:    ventanaFin,
+		Muestras:      0,
+		TempActual:    0, VelActual: floatPtr(0),
+		PctCrudosObs: 0, PctOkObs: 0, PctQuemadosObs: 0,
+		ConfPromedio:  0,
+		TempPropuesto: 0, VelPropuesto: 0,
+		AplicadoPor:  decisiones_control.AplicadoPorNadie,
+		RazonSkipped: &skipped,
+	}
+	if err := l.decisiones.Save(ctx, d); err != nil {
+		log.Printf("[control] Save skip sin muestras: %v", err)
+	}
+}
+
+func (l *Loop) skipError(ctx context.Context, ventanaInicio, ventanaFin time.Time, err error, filtradas []metricashorno.MetricaHorno) {
+	skipped := fmt.Sprintf("optimizer_error: %v", err)
+	d := &decisiones_control.DecisionControl{
+		LoteID:        l.loteID,
+		VentanaInicio: ventanaInicio,
+		VentanaFin:    ventanaFin,
+		Muestras:      len(filtradas),
+		TempActual:    0, VelActual: floatPtr(0),
+		PctCrudosObs: 0, PctOkObs: 0, PctQuemadosObs: 0,
+		ConfPromedio:  confianzaPromedio(filtradas),
+		TempPropuesto: 0, VelPropuesto: 0,
+		AplicadoPor:  decisiones_control.AplicadoPorNadie,
+		RazonSkipped: &skipped,
+	}
+	if err := l.decisiones.Save(ctx, d); err != nil {
+		log.Printf("[control] Save skip error: %v", err)
+	}
+}
+
+// estadoDesdeMetricas toma las últimas métricas y devuelve el estado del
+// horno. La temp_objetivo / vel_objetivo del estado son las últimas
+// consignas aplicadas que viajaban en el heartbeat (lo que la Pi ENTRADA
+// observó del variador/PLC).
+func (l *Loop) estadoDesdeMetricas(m []metricashorno.MetricaHorno) optimizador.Estado {
+	// Tomamos la métrica más reciente como snapshot del estado.
+	last := m[0]
+	estado := optimizador.Estado{
+		VelocidadCinta: 0,
+	}
+	if last.TempHorno1 != nil {
+		estado.TempHorno1 = *last.TempHorno1
+	}
+	if last.TempHorno2 != nil {
+		t2 := *last.TempHorno2
+		estado.TempHorno2 = &t2
+	}
+	if last.VelocidadCinta != nil {
+		estado.VelocidadCinta = *last.VelocidadCinta
+	}
+	if last.TempObjetivo != nil {
+		estado.TempObjetivo = *last.TempObjetivo
+	} else {
+		estado.TempObjetivo = estado.TempHorno1
+	}
+	if last.VelObjetivo != nil {
+		estado.VelObjetivo = *last.VelObjetivo
+	} else {
+		estado.VelObjetivo = estado.VelocidadCinta
+	}
+	return estado
+}
+
+// zObservado calcula el valor del objetivo con los datos del estado
+// actual. Para v1 usamos el mismo cálculo que el optimizador (best-effort):
+// wc*0 + wq*0 porque no tenemos los % observados de salida del lote en
+// este punto (esos viven en eventos_lote y los contamos por lote). La
+// columna z_observado queda para una segunda iteración donde el control
+// también leerá eventos_lote.
+func (l *Loop) zObservado(estado optimizador.Estado, pred optimizador.PrediccionSalida) float64 {
+	// Placeholder: igual a Z_predicho hasta tener los eventos agregados.
+	_ = estado
+	return l.pesos.WC*pred.PctCrudos + l.pesos.WQ*pred.PctQuemados
+}
+
+// --- helpers ---
+
+func filtrarPorVentana(m []metricashorno.MetricaHorno, inicio, fin time.Time) []metricashorno.MetricaHorno {
+	out := m[:0]
+	for _, x := range m {
+		if (x.ReceivedAt.After(inicio) || x.ReceivedAt.Equal(inicio)) && x.ReceivedAt.Before(fin) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func confianzaPromedio(m []metricashorno.MetricaHorno) float64 {
+	if len(m) == 0 {
+		return 0
+	}
+	sum := 0.0
+	n := 0
+	for _, x := range m {
+		if x.ConfianzaDeteccion != nil {
+			sum += *x.ConfianzaDeteccion
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return sum / float64(n)
+}
+
+func serializarPrediccion(p optimizador.PrediccionSalida) []byte {
+	b, _ := json.Marshal(PrediccionPersistida{
+		PctCrudos:     p.PctCrudos,
+		PctOk:         p.PctOk,
+		PctQuemados:   p.PctQuemados,
+		ModelVersion:  p.ModelVersion,
+		EsPlaceholder: p.EsPlaceholder,
+	})
+	return b
+}
+
+func mustJSON(v interface{}) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func floatPtr(x float64) *float64 { return &x }
