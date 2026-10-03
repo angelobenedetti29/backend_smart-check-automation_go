@@ -23,6 +23,10 @@ var ErrFueraDeRango = errors.New("consigna: valores fuera de rango seguro")
 // pudo aplicar la consigna.
 var ErrDispatchFallido = errors.New("consigna: el controlador físico rechazó la consigna")
 
+// ErrHorno2NoHabilitado indica que la consigna pidió TempHorno2Objetivo pero
+// el producto del lote no tiene el horno 2 habilitado.
+var ErrHorno2NoHabilitado = errors.New("consigna: el producto no tiene el horno 2 habilitado")
+
 // Origen identifica el mecanismo que disparó la consigna. Hoy conviven:
 //   - MANUAL (SCA-320): envío desde el panel por un operario.
 //   - AUTOMATICO (SCA-142 reactivado por SCA-400): despacho que dispara el

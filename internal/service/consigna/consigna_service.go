@@ -89,7 +89,7 @@ func (s *ConsignaService) Dispatch(ctx context.Context, req consigna.ConsignaMan
 	// Si llega T2, validar también contra el rango del horno 2 cuando está habilitado.
 	if req.TempHorno2Objetivo != nil {
 		if !p.Horno2Habilitado {
-			return nil, consigna.ErrFueraDeRango
+			return nil, consigna.ErrHorno2NoHabilitado
 		}
 		t2 := *req.TempHorno2Objetivo
 		if t2 < *p.Temp2Min || t2 > *p.Temp2Max {
