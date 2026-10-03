@@ -181,6 +181,9 @@ func (l *Loop) run(ctx context.Context) {
 }
 
 // tick ejecuta un ciclo completo de evaluación → optimización → decisión.
+// Antes de cada tick relee el modo del lote: si el operador cambió a MANUAL,
+// el loop se autodesactiva (deja de despachar consignas) para no consumir
+// telemetría innecesariamente.
 func (l *Loop) tick(ctx context.Context) {
 	if l.modo == lote_sector.ModoManual {
 		return
@@ -188,6 +191,16 @@ func (l *Loop) tick(ctx context.Context) {
 	if l.productoID == "" {
 		log.Printf("[control] tick sin productoID configurado")
 		return
+	}
+
+	// Releer el modo vigente: si pasó a MANUAL desde el panel, este loop ya
+	// no aplica y termina la goroutine silenciosamente.
+	if lote, err := l.clienteLote.GetByID(ctx, l.loteID); err == nil && lote != nil {
+		if lote.Modo == lote_sector.ModoManual {
+			l.modo = lote_sector.ModoManual
+			log.Printf("[control] lote %s pasó a MANUAL; loop termina", l.loteID)
+			return
+		}
 	}
 
 	// 1. leer métricas + eventos de la ventana.
@@ -259,7 +272,9 @@ func (l *Loop) tick(ctx context.Context) {
 
 // AplicarPropuesta aplica manualmente (operario) la propuesta pendiente del
 // modo SUPERVISION. Devuelve ErrLoteNoAbierto si ya no hay propuesta.
-func (l *Loop) AplicarPropuesta(ctx context.Context) (*consigna.Consigna, error) {
+// `usuario` es el nombre/identificador del operario que aprobó (se persiste
+// en la auditoría para distinguirlo del despacho automático).
+func (l *Loop) AplicarPropuesta(ctx context.Context, usuario string) (*consigna.Consigna, error) {
 	l.muPropuesta.Lock()
 	prop := l.propuestaPendiente
 	l.propuestaPendiente = nil
@@ -267,11 +282,11 @@ func (l *Loop) AplicarPropuesta(ctx context.Context) (*consigna.Consigna, error)
 	if prop == nil {
 		return nil, ErrLoteNoAbierto
 	}
-	return l.aplicarConsigna(ctx, prop, "OPERARIO")
+	return l.aplicarConsigna(ctx, prop, consigna.OrigenManual, usuario)
 }
 
 func (l *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuesta, decision *decisiones_control.DecisionControl, estado optimizador.Estado) {
-	cons, err := l.aplicarConsigna(ctx, prop, "MPC")
+	cons, err := l.aplicarConsigna(ctx, prop, consigna.OrigenAutomatico, "")
 	if err != nil {
 		// Si el controlador físico rechaza, registramos la decisión como no
 		// aplicada con motivo. El horno pasa a CONTROL_MANUAL por el flujo
@@ -295,7 +310,10 @@ func (l *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuesta, 
 	_ = estado
 }
 
-func (l *Loop) aplicarConsigna(ctx context.Context, prop *optimizador.Propuesta, origen string) (*consigna.Consigna, error) {
+// aplicarConsigna despacha la propuesta con el origen y usuario correctos.
+// `usuario` puede estar vacío cuando el origen es AUTOMATICO (MPC despacha
+// solo); en modo MANUAL el handler lo carga desde el JWT del operario.
+func (l *Loop) aplicarConsigna(ctx context.Context, prop *optimizador.Propuesta, origen consigna.Origen, usuario string) (*consigna.Consigna, error) {
 	req := consigna.ConsignaManualRequest{
 		HornoID:                "horno-1", // Horno fijo del primer sector; ampliar a sector-aware cuando haya 2+
 		ProductoID:             l.productoID,
@@ -304,9 +322,10 @@ func (l *Loop) aplicarConsigna(ctx context.Context, prop *optimizador.Propuesta,
 		TempHorno2Objetivo:     prop.Temp2,
 	}
 	var u *string
-	usuario := origen
-	u = &usuario
-	return l.consigna.Dispatch(ctx, req, consigna.OrigenAutomatico, u)
+	if usuario != "" {
+		u = &usuario
+	}
+	return l.consigna.Dispatch(ctx, req, origen, u)
 }
 
 func (l *Loop) skipSinMuestras(ctx context.Context, ventanaInicio, ventanaFin time.Time) {
