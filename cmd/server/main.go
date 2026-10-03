@@ -243,25 +243,38 @@ func main() {
 	mux.HandleFunc("/api/v1/lotes/abierto", loggingMiddleware(dualauth.DualAuth(deviceVerifier, jwtSecretBytes, loteSectorHandler.HandleAbierto)))
 	mux.HandleFunc("/api/v1/lotes/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteSectorSSEHandler.HandleSSE)))
 	mux.HandleFunc("/api/v1/lotes/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// El subtree `/api/v1/lotes/` mezcla endpoints device-only (Bearer
+		// del nodo, autenticados por el `deviceTokenController.BeforeMux`
+		// global) y endpoints del panel (JWT cookie). Antes todos pasaban
+		// sin JWT y los handlers que validaban rol interno (control/*
+		// decisiones) devolvían 403 permanente. Ahora aplicamos el
+		// middleware JWT sólo a las rutas que lo requieren.
+		jwtWrap := func(h http.HandlerFunc) http.HandlerFunc {
+			return authController.JWTMiddleware(jwtSecretBytes, h)
+		}
 		switch {
+		// --- device-only (Bearer, ya cubierto por BeforeMux) ---
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/eventos"):
 			loteSectorHandler.HandleEventos(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/cierre"):
 			loteSectorHandler.HandleCierre(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
 			metricasHornoHandler.Handle(w, r)
+
+		// --- panel (JWT cookie) ---
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/start"):
-			controlHandler.HandleControlStart(controlDeps)(w, r)
+			jwtWrap(controlHandler.HandleControlStart(controlDeps))(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
-			controlHandler.HandleControlStop()(w, r)
+			jwtWrap(controlHandler.HandleControlStop())(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/consigna-propuesta"):
-			controlHandler.HandleConsignaPropuesta()(w, r)
+			jwtWrap(controlHandler.HandleConsignaPropuesta())(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/events"):
-			authController.JWTMiddleware(jwtSecretBytes, controlSSEHandler.HandleControlEvents)(w, r)
+			jwtWrap(controlSSEHandler.HandleControlEvents)(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/aplicar-consigna"):
-			controlHandler.HandleAplicarConsigna(controlDeps)(w, r)
+			jwtWrap(controlHandler.HandleAplicarConsigna(controlDeps))(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/decisiones"):
-			decisionesHandler.Handle(w, r)
+			jwtWrap(decisionesHandler.Handle)(w, r)
+
 		default:
 			response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
 		}
