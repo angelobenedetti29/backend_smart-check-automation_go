@@ -120,22 +120,63 @@ func (s *Service) SectorDelDispositivo(ctx context.Context, deviceID string) (*S
 // Abrir abre (o se adjunta a) el lote abierto del sector del dispositivo. El
 // producto debe existir en el catálogo, aunque esté inactivo. Emite
 // lote.creado sólo cuando el lote se crea realmente.
-func (s *Service) Abrir(ctx context.Context, deviceID, productoID, idempotencyKey string) (*lotesector.Lote, bool, error) {
+//
+// Desde SCA-400 acepta un params opcional con los datos de operación del
+// control (modo, ventanas, tolerancias, umbrales, pesos, snapshot de horno2
+// y estado inicial). Si params es nil, defaults seguros: MANUAL, ventanas
+// 600/300 s, tolerancia 2 °C, umbrales 5%.
+func (s *Service) Abrir(ctx context.Context, deviceID, productoID, idempotencyKey string, params *lotesector.AbrirParams) (*lotesector.Lote, bool, error) {
 	sectorID, err := s.resolveSectorID(ctx, deviceID)
 	if err != nil {
 		return nil, false, err
 	}
-	if _, err := s.productoRepo.GetByID(ctx, productoID); err != nil {
+	prod, err := s.productoRepo.GetByID(ctx, productoID)
+	if err != nil {
 		return nil, false, err
 	}
 
-	lote, creado, err := s.loteRepo.Abrir(ctx, lotesector.AbrirParams{
-		SectorID:       sectorID,
-		ProductoID:     productoID,
-		AbiertoPor:     deviceID,
-		IdempotencyKey: idempotencyKey,
-		Turno:          lotesector.TurnoDe(s.now()),
-	})
+	if params == nil {
+		params = &lotesector.AbrirParams{}
+	}
+
+	// Snapshot del flag horno2_habilitado del producto. Se persiste en el lote
+	// para que el control sepa si T2 está activo sin tener que reconsultar el
+	// catálogo en cada tick.
+	params.Horno2Habilitado = prod.Horno2Habilitado
+
+	// Saneamiento del modo: el handler ya validó, pero por si llega directo.
+	modo, err := lotesector.ParseModo(params.Modo)
+	if err != nil {
+		return nil, false, err
+	}
+	params.Modo = modo
+
+	// Defaults de ventanas/tolerancias/umbrales (conservadores).
+	if params.VentanaEvaluacionSegundos <= 0 {
+		params.VentanaEvaluacionSegundos = 600
+	}
+	if params.VentanaActualizacionSegundos <= 0 {
+		params.VentanaActualizacionSegundos = 300
+	}
+	if params.ToleranciaTempC <= 0 {
+		params.ToleranciaTempC = 2.0
+	}
+	if params.UmbralAceptacionCrudo <= 0 {
+		params.UmbralAceptacionCrudo = 5.0
+	}
+	if params.UmbralAceptacionQuemado <= 0 {
+		params.UmbralAceptacionQuemado = 5.0
+	}
+
+	params.SectorID = sectorID
+	params.ProductoID = productoID
+	params.AbiertoPor = deviceID
+	params.IdempotencyKey = idempotencyKey
+	if params.Turno == "" {
+		params.Turno = lotesector.TurnoDe(s.now())
+	}
+
+	lote, creado, err := s.loteRepo.Abrir(ctx, *params)
 	if err != nil {
 		return nil, false, err
 	}
@@ -144,6 +185,18 @@ func (s *Service) Abrir(ctx context.Context, deviceID, productoID, idempotencyKe
 		s.broadcast("lote.creado", lote)
 	}
 	return lote, creado, nil
+}
+
+// GetByID devuelve el lote por id, propagando ErrNotFound desde el repo.
+// Aplicado por el control automático (SCA-400) y por el endpoint de
+// telemetría del horno que necesita saber el sector/estado del lote.
+func (s *Service) GetByID(ctx context.Context, loteID string) (*lotesector.Lote, error) {
+	lote, err := s.loteRepo.GetByID(ctx, loteID)
+	if err != nil {
+		return nil, err
+	}
+	s.applyInactividad(lote)
+	return lote, nil
 }
 
 // Abierto devuelve el lote abierto del sector, o nil si no hay ninguno.

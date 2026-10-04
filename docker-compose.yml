@@ -25,6 +25,27 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      predictor-svc:
+        condition: service_started
+
+  # Sidecar predictor XGBoost per-producto (SCA-400). El backend Go lo
+  # llama por HTTP en cada decisión del MPC. Los artefactos entrenados se
+  # persisten en el volumen predictor_models para sobrevivir reinicios.
+  predictor-svc:
+    build:
+      context: .
+      dockerfile: cmd/predictor_svc/Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      # El predictor no toca la BD directamente; el trainer (run fuera del
+      # contenedor) usa DATABASE_URL. Mantener el puerto fijo por
+      # contrato del backend (PREDICTOR_URL=http://predictor-svc:8090).
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - predictor_models:/app/predictor_svc/models_xgb
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  predictor_models:

@@ -7,6 +7,7 @@ package lote_sector
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 	// Embebe la base tzdata para que time.LoadLocation("America/Argentina/
 	// Buenos_Aires") funcione también fuera de la imagen Docker (que ya la trae).
@@ -19,6 +20,35 @@ const (
 	EstadoAbierto = "ABIERTO"
 	EstadoCerrado = "CERRADO"
 )
+
+// Modos de operación del lote (SCA-400). MANUAL = sólo detección; el sistema
+// nunca propone ni aplica cambios. SUPERVISION = el MPC propone por SSE y
+// un operario aprueba desde el panel. AUTOMATICO = el MPC propone y el
+// sistema despacha la consigna.
+const (
+	ModoManual     = "MANUAL"
+	ModoSupervision = "SUPERVISION"
+	ModoAutomatico = "AUTOMATICO"
+)
+
+// ErrModoInvalido se retorna cuando el modo enviado no pertenece al dominio.
+var ErrModoInvalido = errors.New("lote_sector: modo de operación inválido")
+
+// ParseModo normaliza el modo entrante: vacío se considera MANUAL (default
+// seguro para backward compatibility). Devuelve ErrModoInvalido ante cualquier
+// valor fuera del dominio.
+func ParseModo(s string) (string, error) {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "", ModoManual:
+		return ModoManual, nil
+	case ModoSupervision:
+		return ModoSupervision, nil
+	case ModoAutomatico:
+		return ModoAutomatico, nil
+	default:
+		return "", ErrModoInvalido
+	}
+}
 
 // Turnos de producción, coherentes con el CHECK de lotes_productivos.turno.
 const (
@@ -88,23 +118,57 @@ type AbiertoPor struct {
 	Tipo     string `json:"type"`
 }
 
+// PesosObjetivo agrupa los coeficientes de la función objetivo del MPC. Se
+// persiste como JSONB; un valor ausente se completa con defaults al abrir el
+// lote. Coherente con el default de la columna lotes_productivos.pesos_objetivo.
+type PesosObjetivo struct {
+	WC float64 `json:"wc"` // peso de crudos
+	WQ float64 `json:"wq"` // peso de quemados
+	WO float64 `json:"wo"` // peso de OK (negativo en la función objetivo)
+	DT float64 `json:"dt"` // penalización por ΔT
+	DC float64 `json:"dc"` // penalización por ΔV
+}
+
+// PesosObjetivoDefault es el set conservador de partida.
+var PesosObjetivoDefault = PesosObjetivo{
+	WC: 1.0, WQ: 1.0, WO: 1.0, DT: 0.05, DC: 0.5,
+}
+
 // Lote es el objeto de contrato expuesto por GET /lotes/abierto y GET /lotes.
 // InactividadSegundos lo calcula el service a partir del reloj del servidor;
 // el repositorio lo deja en 0.
+//
+// Desde SCA-400 el lote incluye modo de operación, ventanas de decisión del
+// control automático, tolerancias, umbrales de aceptación, pesos de la
+// función objetivo, snapshot de horno2_habilitado y últimos setpoints
+// efectivamente aplicados al horno.
 type Lote struct {
-	ID                  string      `json:"id"`
-	SectorID            string      `json:"sector_id"`
-	Estado              string      `json:"estado"`
-	Turno               *string     `json:"turno"`
-	ProductoID          string      `json:"producto_id"`
-	ProductoNombre      string      `json:"producto_nombre"`
-	AbiertoEn           time.Time   `json:"abierto_en"`
-	AbiertoPor          *AbiertoPor `json:"abierto_por"`
-	Conteos             Conteos     `json:"conteos"`
-	UltimoEventoEn      *time.Time  `json:"ultimo_evento_en"`
-	InactividadSegundos float64     `json:"inactividad_segundos"`
-	CerradoEn           *time.Time  `json:"cerrado_en,omitempty"`
-	MotivoCierre        *string     `json:"motivo_cierre,omitempty"`
+	ID                       string         `json:"id"`
+	SectorID                 string         `json:"sector_id"`
+	Estado                   string         `json:"estado"`
+	Turno                    *string        `json:"turno"`
+	ProductoID               string         `json:"producto_id"`
+	ProductoNombre           string         `json:"producto_nombre"`
+	AbiertoEn                time.Time      `json:"abierto_en"`
+	AbiertoPor               *AbiertoPor    `json:"abierto_por"`
+	Conteos                  Conteos        `json:"conteos"`
+	UltimoEventoEn           *time.Time     `json:"ultimo_evento_en"`
+	InactividadSegundos      float64        `json:"inactividad_segundos"`
+	CerradoEn                *time.Time     `json:"cerrado_en,omitempty"`
+	MotivoCierre             *string        `json:"motivo_cierre,omitempty"`
+	// SCA-400: control automático / supervisión.
+	Modo                     string         `json:"modo"`
+	Horno2Habilitado         bool           `json:"horno2_habilitado"`
+	IniciadoManualmente      bool           `json:"iniciado_manualmente"`
+	VentanaEvaluacionSegundos int           `json:"ventana_evaluacion_segundos"`
+	VentanaActualizacionSegundos int        `json:"ventana_actualizacion_segundos"`
+	ToleranciaTempC          float64        `json:"tolerancia_temp_c"`
+	UmbralAceptacionCrudo    float64        `json:"umbral_aceptacion_crudo"`
+	UmbralAceptacionQuemado  float64        `json:"umbral_aceptacion_quemado"`
+	PesosObjetivo            *PesosObjetivo `json:"pesos_objetivo,omitempty"`
+	Temp1Objetivo            *float64       `json:"temp1_objetivo,omitempty"`
+	Temp2Objetivo            *float64       `json:"temp2_objetivo,omitempty"`
+	VelObjetivo              *float64       `json:"vel_objetivo,omitempty"`
 }
 
 // TurnoDe clasifica el momento de apertura de un lote en el turno de
@@ -140,12 +204,42 @@ type Evento struct {
 }
 
 // AbrirParams son los datos para abrir (o adjuntarse a) un lote de un sector.
+//
+// Desde SCA-400 incluye los parámetros de operación del control: modo,
+// ventanas, tolerancias, umbrales, pesos y flags de horno 2 / inicio manual.
+// Un lote ya abierto con estos valores no se reabre con otros nuevos: la
+// idempotencia del endpoint garantiza estabilidad.
 type AbrirParams struct {
-	SectorID       string
-	ProductoID     string
-	AbiertoPor     string
-	IdempotencyKey string
-	Turno          string
+	SectorID                   string
+	ProductoID                 string
+	AbiertoPor                 string
+	IdempotencyKey             string
+	Turno                      string
+	// SCA-400
+	Modo                       string // MANUAL | SUPERVISION | AUTOMATICO (default MANUAL)
+	Horno2Habilitado           bool   // snapshot del flag del producto al abrir
+	IniciadoManualmente        bool   // true si la Pi ENTRADA arranca enganchándose a un horno ya encendido
+	VentanaEvaluacionSegundos  int    // default 600
+	VentanaActualizacionSegundos int  // default 300
+	ToleranciaTempC            float64 // default 2.0
+	UmbralAceptacionCrudo      float64 // default 5.0
+	UmbralAceptacionQuemado    float64 // default 5.0
+	PesosObjetivo              *PesosObjetivo // nil = PesosObjetivoDefault
+	// EstadoInicial lo envía la Pi cuando IniciadoManualmente=true para sembrar
+	// la primera fila de metricas_horno y arrancar el MPC desde la fase de
+	// adaptación (omite la espera de temperatura del flujo automático).
+	EstadoInicial              *EstadoInicialLote
+}
+
+// EstadoInicialLote es la foto del horno que la Pi ENTRADA envía cuando se
+// engancha a un horno que ya está funcionando (arranque manual por operario).
+type EstadoInicialLote struct {
+	Temp1         float64 `json:"temp_horno_1"`
+	Temp2         *float64 `json:"temp_horno_2,omitempty"`
+	Velocidad     float64 `json:"velocidad_cinta"`
+	TempObjetivo  float64 `json:"temp_objetivo"`
+	VelObjetivo   float64 `json:"vel_objetivo"`
+	Confianza     *float64 `json:"confianza_deteccion,omitempty"`
 }
 
 // CerrarParams son los datos del cierre autoritativo de un lote. Conteos trae
@@ -189,4 +283,10 @@ type Repository interface {
 	// Historial devuelve una página de lotes (más nuevos primero) y el total
 	// que matchea los filtros.
 	Historial(ctx context.Context, params HistorialParams) ([]Lote, int, error)
+	// CountEventosEnVentana cuenta los eventos del lote cuyo timestamp cae
+	// en [desde, hasta], agrupados por estado (ok/crudo/quemado). Los que
+	// tienen estado NULL no se cuentan en ningún bucket. total==0 cuando
+	// no hay eventos en la ventana (se persiste z_observado=NULL en ese
+	// caso para no contaminar el audit con una Z falsa).
+	CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (ok, crudo, quemado int, err error)
 }

@@ -72,6 +72,10 @@ func (f *fakeLoteRepo) Historial(ctx context.Context, params lotesector.Historia
 	return f.historial(ctx, params)
 }
 
+func (f *fakeLoteRepo) CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (int, int, int, error) {
+	return 0, 0, 0, nil
+}
+
 type fakeSectorRepo struct {
 	deviceInfo    *sector.DeviceInfo
 	deviceErr     error
@@ -206,7 +210,7 @@ func TestAbrirEmiteLoteCreadoCuandoCrea(t *testing.T) {
 	}}
 	svc, client := newTestService(repo, sectorConDispositivo(), productoExistente(), 0)
 
-	got, creado, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1")
+	got, creado, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1", nil)
 	require.NoError(t, err)
 	require.True(t, creado)
 	require.Same(t, lote, got)
@@ -224,7 +228,7 @@ func TestAbrirNoEmiteCuandoAdjuntaAExistente(t *testing.T) {
 	}}
 	svc, client := newTestService(repo, sectorConDispositivo(), productoExistente(), 0)
 
-	_, creado, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1")
+	_, creado, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1", nil)
 	require.NoError(t, err)
 	assert.False(t, creado)
 	assertNoEvent(t, client)
@@ -237,7 +241,7 @@ func TestAbrirProductoDesconocido(t *testing.T) {
 	}}
 	svc, _ := newTestService(repo, sectorConDispositivo(), prodRepo, 0)
 
-	_, _, err := svc.Abrir(context.Background(), "dev-1", "no-existe", "key-1")
+	_, _, err := svc.Abrir(context.Background(), "dev-1", "no-existe", "key-1", nil)
 	assert.ErrorIs(t, err, producto.ErrDesconocido)
 }
 
@@ -246,7 +250,7 @@ func TestAbrirSinSector(t *testing.T) {
 	secRepo := &fakeSectorRepo{deviceInfo: &sector.DeviceInfo{DeviceID: "dev-1"}}
 	svc, _ := newTestService(repo, secRepo, productoExistente(), 0)
 
-	_, _, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1")
+	_, _, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1", nil)
 	assert.ErrorIs(t, err, sector.ErrSinSector)
 }
 

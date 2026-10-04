@@ -2,9 +2,11 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -36,12 +38,22 @@ func isInvalidTextRepresentation(err error) bool {
 // loteSectorSelect es el SELECT compartido del read mapping de un lote: trae el
 // nombre del producto vía JOIN y el tipo del dispositivo que lo abrió vía LEFT
 // JOIN. Las columnas nullable se escanean a punteros para preservar los null.
+//
+// Desde SCA-400 también trae modo, ventanas, tolerancias, umbrales, pesos
+// (JSONB), flag de inicio manual, snapshot de horno2_habilitado y últimos
+// setpoints aplicados al horno.
 const loteSectorSelect = `
 	SELECT
 		lp.id, lp.sector_id, lp.estado, lp.turno, lp.producto_id, pr.nombre,
 		lp.inicio_at, lp.abierto_por, d.tipo,
 		lp.correctos, lp.crudas, lp.quemados,
-		lp.ultimo_evento_en, lp.fin_at, lp.motivo_cierre
+		lp.ultimo_evento_en, lp.fin_at, lp.motivo_cierre,
+		lp.modo, lp.horno2_habilitado, lp.iniciado_manualmente,
+		lp.ventana_evaluacion_segundos, lp.ventana_actualizacion_segundos,
+		lp.tolerancia_temp_c,
+		lp.umbral_aceptacion_crudo, lp.umbral_aceptacion_quemado,
+		lp.pesos_objetivo,
+		lp.temp1_objetivo, lp.temp2_objetivo, lp.vel_objetivo
 	FROM lotes_productivos lp
 	JOIN productos pr ON pr.id = lp.producto_id
 	LEFT JOIN dispositivos d ON d.id = lp.abierto_por
@@ -51,19 +63,26 @@ const loteSectorSelect = `
 // InactividadSegundos queda en 0: lo calcula el service con el reloj del server.
 func scanLoteSector(row pgx.Row) (*lotesector.Lote, error) {
 	var (
-		l          lotesector.Lote
-		sectorID   *string
-		abiertoPor *string
-		tipo       *string
-		ok         *int
-		crudo      *int
-		quemado    *int
+		l           lotesector.Lote
+		sectorID    *string
+		abiertoPor  *string
+		tipo        *string
+		ok          *int
+		crudo       *int
+		quemado     *int
+		pesosJSON   []byte
 	)
 	if err := row.Scan(
 		&l.ID, &sectorID, &l.Estado, &l.Turno, &l.ProductoID, &l.ProductoNombre,
 		&l.AbiertoEn, &abiertoPor, &tipo,
 		&ok, &crudo, &quemado,
 		&l.UltimoEventoEn, &l.CerradoEn, &l.MotivoCierre,
+		&l.Modo, &l.Horno2Habilitado, &l.IniciadoManualmente,
+		&l.VentanaEvaluacionSegundos, &l.VentanaActualizacionSegundos,
+		&l.ToleranciaTempC,
+		&l.UmbralAceptacionCrudo, &l.UmbralAceptacionQuemado,
+		&pesosJSON,
+		&l.Temp1Objetivo, &l.Temp2Objetivo, &l.VelObjetivo,
 	); err != nil {
 		return nil, err
 	}
@@ -78,6 +97,12 @@ func scanLoteSector(row pgx.Row) (*lotesector.Lote, error) {
 		l.AbiertoPor = &ap
 	}
 	l.Conteos = buildConteosLote(ok, crudo, quemado)
+	if len(pesosJSON) > 0 {
+		var p lotesector.PesosObjetivo
+		if err := json.Unmarshal(pesosJSON, &p); err == nil {
+			l.PesosObjetivo = &p
+		}
+	}
 	return &l, nil
 }
 
@@ -184,13 +209,62 @@ func (r *LoteSectorPostgresRepository) Abrir(ctx context.Context, params lotesec
 		turno = &params.Turno
 	}
 
+	// Parámetros normalizados para el INSERT. modo default MANUAL si vacío.
+	modo := params.Modo
+	if modo == "" {
+		modo = lotesector.ModoManual
+	}
+
+	// Pesos: si no llegaron, se persiste PesosObjetivoDefault.
+	pesos := params.PesosObjetivo
+	if pesos == nil {
+		def := lotesector.PesosObjetivoDefault
+		pesos = &def
+	}
+	pesosJSON, err := json.Marshal(pesos)
+	if err != nil {
+		return nil, false, fmt.Errorf("abrir lote: marshal pesos_objetivo: %w", err)
+	}
+
+	// Si IniciadoManualmente=true y llega EstadoInicial, sembramos los setpoints
+	// del lote con las lecturas reales para que el loop arranque en fase de
+	// adaptación. Si no, todos NULL hasta el primer despacho.
+	var temp1Seed, velSeed *float64
+	var temp2Seed *float64
+	if params.IniciadoManualmente && params.EstadoInicial != nil {
+		ei := params.EstadoInicial
+		t1 := ei.TempObjetivo
+		temp1Seed = &t1
+		v := ei.VelObjetivo
+		velSeed = &v
+		if params.Horno2Habilitado && ei.Temp2 != nil {
+			t2 := *ei.Temp2
+			temp2Seed = &t2
+		}
+	}
+
 	var newID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO lotes_productivos
-			(producto_id, inicio_at, estado, sector_id, abierto_por, abrir_idempotency_key, turno, updated_at)
-		VALUES ($1, now(), 'ABIERTO', $2, $3, $4, $5, now())
+			(producto_id, inicio_at, estado, sector_id, abierto_por, abrir_idempotency_key, turno, updated_at,
+			 modo, horno2_habilitado, iniciado_manualmente,
+			 ventana_evaluacion_segundos, ventana_actualizacion_segundos,
+			 tolerancia_temp_c, umbral_aceptacion_crudo, umbral_aceptacion_quemado,
+			 pesos_objetivo,
+			 temp1_objetivo, temp2_objetivo, vel_objetivo)
+		VALUES ($1, now(), 'ABIERTO', $2, $3, $4, $5, now(),
+		        $6, $7, $8,
+		        $9, $10,
+		        $11, $12, $13,
+		        $14,
+		        $15, $16, $17)
 		RETURNING id`,
-		params.ProductoID, params.SectorID, abiertoPor, abrirKey, turno).Scan(&newID)
+		params.ProductoID, params.SectorID, abiertoPor, abrirKey, turno,
+		modo, params.Horno2Habilitado, params.IniciadoManualmente,
+		params.VentanaEvaluacionSegundos, params.VentanaActualizacionSegundos,
+		params.ToleranciaTempC, params.UmbralAceptacionCrudo, params.UmbralAceptacionQuemado,
+		pesosJSON,
+		temp1Seed, temp2Seed, velSeed).Scan(&newID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeUniqueViolation {
@@ -486,4 +560,44 @@ func (r *LoteSectorPostgresRepository) Historial(ctx context.Context, params lot
 		return nil, 0, fmt.Errorf("historial lotes: count: %w", err)
 	}
 	return out, total, nil
+}
+
+// CountEventosEnVentana cuenta los eventos del lote cuyo timestamp cae en
+// [desde, hasta] agrupados por estado. Los NULL se omiten de cualquier bucket.
+// total==0 cuando la ventana está vacía; el caller lo traduce a z_observado=NULL.
+func (r *LoteSectorPostgresRepository) CountEventosEnVentana(
+	ctx context.Context, loteID string, desde, hasta time.Time,
+) (okN, crudoN, quemadoN int, err error) {
+	rows, qerr := r.db.Query(ctx, `
+		SELECT estado, COUNT(*)
+		FROM eventos_lote
+		WHERE lote_id = $1 AND momento >= $2 AND momento < $3
+		GROUP BY estado`,
+		loteID, desde, hasta)
+	if qerr != nil {
+		return 0, 0, 0, fmt.Errorf("count eventos en ventana: %w", qerr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var estado *string
+		var n int
+		if scanErr := rows.Scan(&estado, &n); scanErr != nil {
+			return 0, 0, 0, fmt.Errorf("count eventos scan: %w", scanErr)
+		}
+		if estado == nil {
+			continue
+		}
+		switch *estado {
+		case lotesector.EstadoOK:
+			okN = n
+		case lotesector.EstadoCrudo:
+			crudoN = n
+		case lotesector.EstadoQuemado:
+			quemadoN = n
+		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return 0, 0, 0, fmt.Errorf("count eventos rows: %w", rowsErr)
+	}
+	return okN, crudoN, quemadoN, nil
 }

@@ -29,6 +29,8 @@ const selectProductoColumns = `
 	temp_min, temp_max,
 	velocidad_cinta_min, velocidad_cinta_max,
 	temp_setpoint, velocidad_cinta_setpoint,
+	horno2_habilitado, temp2_min, temp2_max, temp2_setpoint,
+	delta_temp1_max_c, delta_temp2_max_c, delta_vel_max,
 	activo, created_at, updated_at`
 
 // scanProducto escanea las columnas de selectProductoColumns en un Producto.
@@ -40,6 +42,8 @@ func scanProducto(row pgx.Row, p *producto.Producto) error {
 		&p.TempMin, &p.TempMax,
 		&p.VelocidadCintaMin, &p.VelocidadCintaMax,
 		&p.TempSetpoint, &p.VelocidadCintaSetpoint,
+		&p.Horno2Habilitado, &p.Temp2Min, &p.Temp2Max, &p.Temp2Setpoint,
+		&p.DeltaTemp1MaxC, &p.DeltaTemp2MaxC, &p.DeltaVelMax,
 		&p.Activo, &p.CreatedAt, &p.UpdatedAt,
 	)
 }
@@ -112,8 +116,13 @@ func (r *ProductoPostgresRepository) Create(ctx context.Context, p *producto.Pro
 			nombre, peso_referencia_kg, tolerancia_peso_pct,
 			dimension_base_cm, tolerancia_dimension_cm,
 			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
-			temp_setpoint, velocidad_cinta_setpoint
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			temp_setpoint, velocidad_cinta_setpoint,
+			horno2_habilitado, temp2_min, temp2_max, temp2_setpoint,
+			delta_temp1_max_c, delta_temp2_max_c, delta_vel_max
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+			$13, $14, $15, $16, $17, $18
+		)
 		RETURNING id, temp_setpoint, velocidad_cinta_setpoint, created_at, updated_at, activo`
 
 	err := r.db.QueryRow(ctx, query,
@@ -128,6 +137,8 @@ func (r *ProductoPostgresRepository) Create(ctx context.Context, p *producto.Pro
 		p.VelocidadCintaMax,
 		p.TempSetpoint,
 		p.VelocidadCintaSetpoint,
+		p.Horno2Habilitado, p.Temp2Min, p.Temp2Max, p.Temp2Setpoint,
+		p.DeltaTemp1MaxC, p.DeltaTemp2MaxC, p.DeltaVelMax,
 	).Scan(&p.ID, &p.TempSetpoint, &p.VelocidadCintaSetpoint, &p.CreatedAt, &p.UpdatedAt, &p.Activo)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -154,15 +165,16 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 			velocidad_cinta_max = $10,
 			temp_setpoint = $11,
 			velocidad_cinta_setpoint = $12,
+			horno2_habilitado = $13,
+			temp2_min = $14,
+			temp2_max = $15,
+			temp2_setpoint = $16,
+			delta_temp1_max_c = $17,
+			delta_temp2_max_c = $18,
+			delta_vel_max = $19,
 			updated_at = now()
 		WHERE id = $1
-		RETURNING id, nombre,
-			peso_referencia_kg, tolerancia_peso_pct,
-			dimension_base_cm, tolerancia_dimension_cm,
-			temp_min, temp_max,
-			velocidad_cinta_min, velocidad_cinta_max,
-			temp_setpoint, velocidad_cinta_setpoint,
-			activo, created_at, updated_at`
+		RETURNING ` + selectProductoColumns
 
 	err := scanProducto(r.db.QueryRow(ctx, query,
 		p.ID,
@@ -177,6 +189,8 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 		p.VelocidadCintaMax,
 		p.TempSetpoint,
 		p.VelocidadCintaSetpoint,
+		p.Horno2Habilitado, p.Temp2Min, p.Temp2Max, p.Temp2Setpoint,
+		p.DeltaTemp1MaxC, p.DeltaTemp2MaxC, p.DeltaVelMax,
 	), p)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, producto.ErrDesconocido

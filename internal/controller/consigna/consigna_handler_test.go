@@ -16,11 +16,16 @@ import (
 // mockConsignaService implements consigna.Service (domain interface) for controlled testing.
 type mockConsignaService struct {
 	dispatchManualFunc func(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error)
+	dispatchFunc       func(ctx context.Context, req consigna.ConsignaManualRequest, origen consigna.Origen, usuario *string) (*consigna.Consigna, error)
 	getHistorialFunc   func(ctx context.Context, loteID string) ([]consigna.Consigna, error)
 }
 
 func (m *mockConsignaService) DispatchManual(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
 	return m.dispatchManualFunc(ctx, req)
+}
+
+func (m *mockConsignaService) Dispatch(ctx context.Context, req consigna.ConsignaManualRequest, origen consigna.Origen, usuario *string) (*consigna.Consigna, error) {
+	return m.dispatchFunc(ctx, req, origen, usuario)
 }
 
 func (m *mockConsignaService) GetHistorialByLote(ctx context.Context, loteID string) ([]consigna.Consigna, error) {

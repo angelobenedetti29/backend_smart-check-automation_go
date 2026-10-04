@@ -951,4 +951,247 @@ COMMENT ON COLUMN eventos_lote.created_at   IS 'Marca temporal en que el backend
 CREATE INDEX IF NOT EXISTS idx_eventos_lote_lote_created
     ON eventos_lote (lote_id, created_at);
 
+-- ============================================================================
+-- SCA-400: MODO DE OPERACIÓN, T1/T2, VENTANAS Y CICLO DE CONTROL
+-- ============================================================================
+-- Esta sección extiende el modelo de datos para soportar tres modos de
+-- operación del lote (MANUAL, SUPERVISION, AUTOMATICO), una segunda zona
+-- térmica opcional (horno 2 en serie con el horno 1), ventanas de decisión,
+-- tolerancias, umbrales de aceptación, telemetría del horno y registro de
+-- decisiones del optimizador.
+--
+-- Todas las extensiones son idempotentes: si una columna ya existe no se
+-- vuelve a crear, y si el CHECK ya está definido no se duplica. Defaults
+-- seguros preservan la semántica actual: el modo default es MANUAL, no se
+-- habilita horno 2 por default, y los defaults de ventana/tolerancia son
+-- razonables para una primera versión.
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- 1) productos: rango T2 opcional + Δmáx por ciclo + flag horno 2 habilitado.
+-- ----------------------------------------------------------------------------
+ALTER TABLE productos
+    ADD COLUMN IF NOT EXISTS temp2_min            NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS temp2_max            NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS temp2_setpoint       NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS delta_temp1_max_c    NUMERIC(5,2) NOT NULL DEFAULT 10.0,
+    ADD COLUMN IF NOT EXISTS delta_temp2_max_c    NUMERIC(5,2),
+    ADD COLUMN IF NOT EXISTS delta_vel_max        NUMERIC(5,3) NOT NULL DEFAULT 0.05,
+    ADD COLUMN IF NOT EXISTS horno2_habilitado    BOOLEAN      NOT NULL DEFAULT FALSE;
+
+-- Consistencia horno 2: o está completamente definido (min/max/Δ + flag=true),
+-- o está completamente apagado (todos NULL + flag=false). No se admiten
+-- estados intermedios.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_temp2_rango') THEN
+        ALTER TABLE productos ADD CONSTRAINT chk_productos_temp2_rango
+            CHECK ((temp2_min IS NULL AND temp2_max IS NULL)
+                OR (temp2_min IS NOT NULL AND temp2_max IS NOT NULL AND temp2_max > temp2_min));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_temp2_setpoint_rango') THEN
+        ALTER TABLE productos ADD CONSTRAINT chk_productos_temp2_setpoint_rango
+            CHECK (temp2_setpoint IS NULL OR (temp2_setpoint >= temp2_min AND temp2_setpoint <= temp2_max));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_horno2_consistente') THEN
+        ALTER TABLE productos ADD CONSTRAINT chk_productos_horno2_consistente
+            CHECK (
+                (horno2_habilitado = FALSE
+                    AND temp2_min IS NULL AND temp2_max IS NULL
+                    AND temp2_setpoint IS NULL AND delta_temp2_max_c IS NULL)
+             OR (horno2_habilitado = TRUE
+                    AND temp2_min IS NOT NULL AND temp2_max IS NOT NULL
+                    AND delta_temp2_max_c IS NOT NULL)
+            );
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_delta_temp1_pos') THEN
+        ALTER TABLE productos ADD CONSTRAINT chk_productos_delta_temp1_pos CHECK (delta_temp1_max_c > 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_delta_vel_pos') THEN
+        ALTER TABLE productos ADD CONSTRAINT chk_productos_delta_vel_pos CHECK (delta_vel_max > 0);
+    END IF;
+END $$;
+
+COMMENT ON COLUMN productos.temp2_min          IS 'Temp. mínima del horno 2 (NULL si no hay horno 2 o no se controla)';
+COMMENT ON COLUMN productos.temp2_max          IS 'Temp. máxima del horno 2 (NULL si no hay horno 2 o no se controla)';
+COMMENT ON COLUMN productos.temp2_setpoint     IS 'Setpoint nominal del horno 2 (NULL si no hay horno 2)';
+COMMENT ON COLUMN productos.delta_temp1_max_c  IS 'Máxima variación permitida de T1 por ciclo del optimizador (°C/cycle)';
+COMMENT ON COLUMN productos.delta_temp2_max_c  IS 'Máxima variación permitida de T2 por ciclo del optimizador (°C/cycle, NULL si no hay horno 2)';
+COMMENT ON COLUMN productos.delta_vel_max      IS 'Máxima variación permitida de velocidad de cinta por ciclo (m/s/cycle)';
+COMMENT ON COLUMN productos.horno2_habilitado  IS 'TRUE = la línea tiene un segundo horno en serie y se controla T2; FALSE = un solo horno';
+
+-- ----------------------------------------------------------------------------
+-- 2) historial_consignas: T2 separado, flag horno 2.
+-- ----------------------------------------------------------------------------
+ALTER TABLE historial_consignas
+    ADD COLUMN IF NOT EXISTS temp_horno2_objetivo NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS temp_horno2_previa   NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS horno2_habilitado    BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- SCA-400 (post-deploy): horno2_habilitado pasa a nullable para distinguir
+-- "no aplica" (NULL, registro histórico) de "explícitamente false" (línea
+-- sin segundo horno). Idempotente: ALTER COLUMN ... DROP NOT NULL es seguro
+-- si la columna ya es nullable.
+ALTER TABLE historial_consignas
+    ALTER COLUMN horno2_habilitado DROP NOT NULL;
+
+COMMENT ON COLUMN historial_consignas.temp_horno2_objetivo IS 'Setpoint despachado al horno 2 (NULL cuando la línea tiene un solo horno)';
+COMMENT ON COLUMN historial_consignas.temp_horno2_previa   IS 'Temperatura activa del horno 2 inmediatamente antes de este despacho';
+COMMENT ON COLUMN historial_consignas.horno2_habilitado    IS 'Snapshot del flag del producto al momento del despacho. NULL en consignas previas a SCA-400';
+
+-- ----------------------------------------------------------------------------
+-- 3) lotes_productivos: modo, ventanas, tolerancias, umbrales, pesos, último
+--    setpoint aplicado, flag de inicio manual y snapshot del flag horno 2.
+-- ----------------------------------------------------------------------------
+ALTER TABLE lotes_productivos
+    ADD COLUMN IF NOT EXISTS modo                       VARCHAR(12) NOT NULL DEFAULT 'MANUAL',
+    ADD COLUMN IF NOT EXISTS ventana_evaluacion_segundos INT         NOT NULL DEFAULT 600,
+    ADD COLUMN IF NOT EXISTS ventana_actualizacion_segundos INT       NOT NULL DEFAULT 300,
+    ADD COLUMN IF NOT EXISTS tolerancia_temp_c          NUMERIC(5,2) NOT NULL DEFAULT 2.0,
+    ADD COLUMN IF NOT EXISTS umbral_aceptacion_crudo    NUMERIC(5,2) NOT NULL DEFAULT 5.0,
+    ADD COLUMN IF NOT EXISTS umbral_aceptacion_quemado  NUMERIC(5,2) NOT NULL DEFAULT 5.0,
+    ADD COLUMN IF NOT EXISTS pesos_objetivo             JSONB        NOT NULL DEFAULT '{"wc":1.0,"wq":1.0,"wo":1.0,"dt":0.05,"dc":0.5}'::jsonb,
+    ADD COLUMN IF NOT EXISTS iniciado_manualmente       BOOLEAN      NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS horno2_habilitado          BOOLEAN      NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS temp1_objetivo             NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS temp2_objetivo             NUMERIC(6,2),
+    ADD COLUMN IF NOT EXISTS vel_objetivo               NUMERIC(6,3);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_modo') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_modo
+            CHECK (modo IN ('MANUAL', 'SUPERVISION', 'AUTOMATICO'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_ventana_evaluacion_pos') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_ventana_evaluacion_pos
+            CHECK (ventana_evaluacion_segundos > 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_ventana_actualizacion_pos') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_ventana_actualizacion_pos
+            CHECK (ventana_actualizacion_segundos > 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_tolerancia_temp_pos') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_tolerancia_temp_pos
+            CHECK (tolerancia_temp_c >= 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_umbrales_aceptacion') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_umbrales_aceptacion
+            CHECK (umbral_aceptacion_crudo >= 0 AND umbral_aceptacion_quemado >= 0
+                AND umbral_aceptacion_crudo <= 100 AND umbral_aceptacion_quemado <= 100);
+    END IF;
+    -- Snapshot de horno2: si está deshabilitado, los setpoints T2 deben ser NULL.
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_temp2_consistente') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_temp2_consistente
+            CHECK ((horno2_habilitado = FALSE AND temp2_objetivo IS NULL)
+                OR (horno2_habilitado = TRUE));
+    END IF;
+END $$;
+
+COMMENT ON COLUMN lotes_productivos.modo                       IS 'Modo de operación: MANUAL/SUPERVISION/AUTOMATICO (default MANUAL para no romper lotes existentes)';
+COMMENT ON COLUMN lotes_productivos.ventana_evaluacion_segundos IS 'Cada cuántos segundos se re-evalúa el estado y se decide un nuevo setpoint';
+COMMENT ON COLUMN lotes_productivos.ventana_actualizacion_segundos IS 'Cada cuántos segundos se aplica un nuevo setpoint (>= ventana_evaluacion)';
+COMMENT ON COLUMN lotes_productivos.tolerancia_temp_c          IS 'Tolerancia sobre la temperatura objetivo al iniciar (°C, default 2.0)';
+COMMENT ON COLUMN lotes_productivos.umbral_aceptacion_crudo    IS 'Porcentaje máximo de crudos aceptado (% del total); alerta si se supera N ventanas';
+COMMENT ON COLUMN lotes_productivos.umbral_aceptacion_quemado  IS 'Porcentaje máximo de quemados aceptado (% del total)';
+COMMENT ON COLUMN lotes_productivos.pesos_objetivo             IS 'Pesos de la función objetivo del MPC: wc, wq, wo, dt, dc';
+COMMENT ON COLUMN lotes_productivos.iniciado_manualmente       IS 'TRUE = el operador arrancó horno+cinta por su cuenta y el sistema se enganchó después';
+COMMENT ON COLUMN lotes_productivos.horno2_habilitado          IS 'Snapshot del flag del producto al abrir el lote (T2 sólo se controla si TRUE)';
+COMMENT ON COLUMN lotes_productivos.temp1_objetivo             IS 'Último setpoint de T1 aplicado por el control (lectura del estado activo)';
+COMMENT ON COLUMN lotes_productivos.temp2_objetivo             IS 'Último setpoint de T2 aplicado por el control (NULL si no hay horno 2)';
+COMMENT ON COLUMN lotes_productivos.vel_objetivo               IS 'Último setpoint de velocidad de cinta aplicado por el control';
+
+-- ----------------------------------------------------------------------------
+-- 4) metricas_horno: telemetría cruda del horno reportada por la Pi ENTRADA.
+--    Una fila por heartbeat (default 5s). Sirve como fuente para la ventana de
+--    evaluación del optimizador.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS metricas_horno (
+    id                   UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    lote_id              UUID         NOT NULL REFERENCES lotes_productivos(id) ON DELETE CASCADE,
+    dispositivo_id       UUID         NOT NULL REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    sector_id            VARCHAR(50)  NOT NULL,
+    temp_horno_1         NUMERIC(6,2),
+    temp_horno_2         NUMERIC(6,2),
+    temp_comb_1          NUMERIC(6,2),
+    temp_comb_2          NUMERIC(6,2),
+    humedad_horno        NUMERIC(5,2),
+    temp_ambiente        NUMERIC(5,2),
+    humedad_ambiente     NUMERIC(5,2),
+    velocidad_cinta      NUMERIC(6,3),
+    temp_objetivo        NUMERIC(6,2),
+    vel_objetivo         NUMERIC(6,3),
+    confianza_deteccion  NUMERIC(4,3) CHECK (confianza_deteccion IS NULL OR (confianza_deteccion BETWEEN 0 AND 1)),
+    received_at          TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  metricas_horno                   IS 'Telemetría cruda del horno (T1/T2/combustión/humedad/ambiente/velocidad) reportada por la Pi ENTRADA';
+COMMENT ON COLUMN metricas_horno.temp_horno_1      IS 'Temperatura leída del horno 1 (°C, NULL permitido si el sensor cae)';
+COMMENT ON COLUMN metricas_horno.temp_horno_2      IS 'Temperatura leída del horno 2 (°C, NULL cuando la línea tiene un solo horno)';
+COMMENT ON COLUMN metricas_horno.temp_comb_1       IS 'Temperatura de la cámara de combustión del horno 1 (°C, opcional)';
+COMMENT ON COLUMN metricas_horno.temp_comb_2       IS 'Temperatura de la cámara de combustión del horno 2 (°C, opcional)';
+COMMENT ON COLUMN metricas_horno.humedad_horno     IS 'Humedad relativa dentro del horno (%, opcional)';
+COMMENT ON COLUMN metricas_horno.temp_ambiente     IS 'Temperatura ambiente (°C, opcional)';
+COMMENT ON COLUMN metricas_horno.humedad_ambiente  IS 'Humedad ambiente (%, opcional)';
+COMMENT ON COLUMN metricas_horno.velocidad_cinta   IS 'Velocidad activa de la cinta (m/s)';
+COMMENT ON COLUMN metricas_horno.temp_objetivo     IS 'Setpoint activo de T1 al momento de la lectura';
+COMMENT ON COLUMN metricas_horno.vel_objetivo      IS 'Setpoint activo de velocidad al momento de la lectura';
+COMMENT ON COLUMN metricas_horno.confianza_deteccion IS 'Promedio de confianza del modelo de visión en la última ventana (0..1)';
+COMMENT ON COLUMN metricas_horno.received_at       IS 'Marca temporal en que el backend recibió la métrica';
+
+CREATE INDEX IF NOT EXISTS idx_metricas_horno_lote_received
+    ON metricas_horno (lote_id, received_at DESC);
+
+-- ----------------------------------------------------------------------------
+-- 5) decisiones_control: audit del MPC. Una fila por decisión tomada (no por
+--    tick si la decisión fue "no cambiar"). Permite auditar qué predijo el
+--    modelo, qué propuso el optimizador y qué terminó aplicándose.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS decisiones_control (
+    id                  UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    lote_id             UUID         NOT NULL REFERENCES lotes_productivos(id) ON DELETE CASCADE,
+    ventana_inicio      TIMESTAMPTZ  NOT NULL,
+    ventana_fin         TIMESTAMPTZ  NOT NULL,
+    muestras            INT          NOT NULL CHECK (muestras >= 0),
+    temp_actual         NUMERIC(6,2) NOT NULL,
+    vel_actual          NUMERIC(6,3) NOT NULL,
+    pct_crudos_obs      NUMERIC(5,2) NOT NULL CHECK (pct_crudos_obs BETWEEN 0 AND 100),
+    pct_ok_obs          NUMERIC(5,2) NOT NULL CHECK (pct_ok_obs BETWEEN 0 AND 100),
+    pct_quemados_obs    NUMERIC(5,2) NOT NULL CHECK (pct_quemados_obs BETWEEN 0 AND 100),
+    conf_promedio       NUMERIC(4,3) NOT NULL CHECK (conf_promedio BETWEEN 0 AND 1),
+    temp_propuesto      NUMERIC(6,2) NOT NULL,
+    vel_propuesto       NUMERIC(6,3) NOT NULL,
+    temp_aplicado       NUMERIC(6,2),
+    vel_aplicado        NUMERIC(6,3),
+    prediccion          JSONB,
+    z_observado         NUMERIC(10,4),
+    z_predicho          NUMERIC(10,4),
+    razon_skipped       TEXT,
+    aplicado_por        VARCHAR(20), -- 'MPC' (automático), 'OPERARIO' (supervisión aprobado), 'NADIE' (no aplicado)
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  decisiones_control                IS 'Audit del MPC: una fila por decisión propuesta (aplicada o no)';
+COMMENT ON COLUMN decisiones_control.ventana_inicio IS 'Inicio de la ventana de evaluación que originó la decisión';
+COMMENT ON COLUMN decisiones_control.ventana_fin    IS 'Fin de la ventana de evaluación';
+COMMENT ON COLUMN decisiones_control.muestras       IS 'Cantidad de detecciones en la ventana';
+COMMENT ON COLUMN decisiones_control.temp_actual    IS 'T1 activa al momento de la decisión';
+COMMENT ON COLUMN decisiones_control.vel_actual     IS 'Velocidad activa al momento de la decisión';
+COMMENT ON COLUMN decisiones_control.pct_crudos_obs IS '% crudo observado en la ventana (crudos/total*100)';
+COMMENT ON COLUMN decisiones_control.pct_ok_obs     IS '% OK observado en la ventana';
+COMMENT ON COLUMN decisiones_control.pct_quemados_obs IS '% quemados observado en la ventana';
+COMMENT ON COLUMN decisiones_control.conf_promedio  IS 'Confianza promedio del detector en la ventana (0..1)';
+COMMENT ON COLUMN decisiones_control.temp_propuesto IS 'T1 que el MPC propuso';
+COMMENT ON COLUMN decisiones_control.vel_propuesto  IS 'Velocidad que el MPC propuso';
+COMMENT ON COLUMN decisiones_control.temp_aplicado  IS 'T1 efectivamente aplicada (NULL en modo SUPERVISION si no se aprobó)';
+COMMENT ON COLUMN decisiones_control.vel_aplicado   IS 'Velocidad efectivamente aplicada (idem)';
+COMMENT ON COLUMN decisiones_control.prediccion     IS 'Salida cruda del XGBoost (JSONB con pctCrudos/pctOk/pctQuemados/modelVersion)';
+COMMENT ON COLUMN decisiones_control.z_observado     IS 'Valor de la función objetivo con datos observados';
+COMMENT ON COLUMN decisiones_control.z_predicho     IS 'Valor de la función objetivo con la predicción del XGBoost';
+COMMENT ON COLUMN decisiones_control.razon_skipped  IS 'Si no se propuso cambio, motivo (confianza_baja, ventana_sin_muestras, sin_convergencia, etc.)';
+COMMENT ON COLUMN decisiones_control.aplicado_por   IS 'MPC = aplicado por el control automático; OPERARIO = aprobado manualmente en SUPERVISION; NADIE = no aplicado';
+
+CREATE INDEX IF NOT EXISTS idx_decisiones_control_lote_created
+    ON decisiones_control (lote_id, created_at DESC);
+
 COMMIT;

@@ -28,7 +28,9 @@ const selectHistorialConsignasColumns = `
 	id, dispositivo_id, horno_id, lote_id, producto_id,
 	temperatura_objetivo, velocidad_cinta_objetivo,
 	origen, usuario, exitosa, motivo_error,
-	temperatura_previa, velocidad_cinta_previa, creada_en`
+	temperatura_previa, velocidad_cinta_previa,
+	temp_horno2_objetivo, temp_horno2_previa, horno2_habilitado,
+	creada_en`
 
 // Save inserta un nuevo registro de auditoría en historial_consignas.
 // Devuelve consigna.ErrParametrosNoExiste si producto_id no existe en el catálogo
@@ -39,9 +41,11 @@ func (r *ConsignaPostgresRepository) Save(ctx context.Context, c *consigna.Consi
 			dispositivo_id, horno_id, lote_id, producto_id,
 			temperatura_objetivo, velocidad_cinta_objetivo,
 			origen, usuario, exitosa, motivo_error,
-			temperatura_previa, velocidad_cinta_previa
+			temperatura_previa, velocidad_cinta_previa,
+			temp_horno2_objetivo, temp_horno2_previa, horno2_habilitado
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+			$13, $14, $15
 		)
 		RETURNING id, creada_en`
 
@@ -58,6 +62,9 @@ func (r *ConsignaPostgresRepository) Save(ctx context.Context, c *consigna.Consi
 		c.MotivoError,
 		c.TemperaturaPrevia,
 		c.VelocidadCintaPrevia,
+		c.TempHorno2Objetivo,
+		c.TempHorno2Previa,
+		c.Horno2Habilitado,
 	).Scan(&c.ID, &c.CreadaEn)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -94,7 +101,9 @@ func scanHistorialConsignas(rows pgx.Rows) ([]consigna.Consigna, error) {
 			&c.ID, &c.DispositivoID, &c.HornoID, &c.LoteID, &c.ProductoID,
 			&c.TemperaturaObjetivo, &c.VelocidadCintaObjetivo,
 			&c.Origen, &c.Usuario, &c.Exitosa, &c.MotivoError,
-			&c.TemperaturaPrevia, &c.VelocidadCintaPrevia, &c.CreadaEn,
+			&c.TemperaturaPrevia, &c.VelocidadCintaPrevia,
+			&c.TempHorno2Objetivo, &c.TempHorno2Previa, &c.Horno2Habilitado,
+			&c.CreadaEn,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan historial_consignas: %w", err)
 		}

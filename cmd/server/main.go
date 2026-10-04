@@ -23,6 +23,9 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/dualauth"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
+	metricashornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/metricashorno"
+	controlController "github.com/angelobenedetti29/smart-check-automation/internal/controller/control"
+	decisionesController "github.com/angelobenedetti29/smart-check-automation/internal/controller/decisiones_control"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
 	registroController "github.com/angelobenedetti29/smart-check-automation/internal/controller/registro"
 	sectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sector"
@@ -41,6 +44,8 @@ import (
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
+	optimizador "github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
+	"github.com/angelobenedetti29/smart-check-automation/internal/service/predictor"
 	productoService "github.com/angelobenedetti29/smart-check-automation/internal/service/producto"
 	registroService "github.com/angelobenedetti29/smart-check-automation/internal/service/registro"
 	sectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/sector"
@@ -101,6 +106,8 @@ func main() {
 	productoRepo := repository.NewProductoPostgresRepository(pgPool)
 	sectorRepo := repository.NewSectorPostgresRepository(pgPool)
 	loteSectorRepo := repository.NewLoteSectorPostgresRepository(pgPool)
+	metricasHornoRepo := repository.NewMetricasHornoPostgresRepository(pgPool)
+	decisionesRepo := repository.NewDecisionesControlPostgresRepository(pgPool)
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
@@ -114,6 +121,11 @@ func main() {
 
 	// Dedicated SSE broker for the sector/lotes stream (GET /api/v1/lotes/events).
 	loteSectorSSEBroker := sse.NewBroker()
+
+	// Dedicated SSE broker for control.propuesta events emitted by the MPC
+	// loop. Aislado del broker de horno/consigna para que el dashboard pueda
+	// suscribirse sólo a lo que le interesa.
+	controlSSEBroker := sse.NewBroker()
 
 	// 3. Instantiate Business Layer
 	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
@@ -156,7 +168,35 @@ func main() {
 	hornoSSEHandler := sseController.NewSSEHandler(hornoSSEBroker)
 	productoHandler := productoController.NewProductoHandler(productoSvc)
 	loteSectorHandler := loteSectorController.NewLoteSectorHandler(loteSectorSvc)
+	metricasHornoHandler := metricashornoController.NewMetricasHornoHandler(metricasHornoRepo, loteSectorSvc)
 	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
+
+	// Sidecar predictor XGBoost (SCA-400). Si no está, el optimizador entra
+	// en modo degradado (devuelve placeholder en el predictor → decisión
+	// skipped en el audit del MPC).
+	predictorURL := os.Getenv("PREDICTOR_URL")
+	if predictorURL == "" {
+		predictorURL = "http://localhost:8090"
+	}
+	predictorCliente := predictor.NewClientePredictor(predictorURL)
+	optimizer := optimizador.NewOptimizer(predictorCliente)
+
+	// Registry de loops activos por lote y handlers de control.
+	loopRegistry := controlController.NewLoopRegistry()
+	controlHandler := &controlController.ControlHandler{}
+	controlDeps := controlController.ControlDeps{
+		LoteLookup:     loteSectorSvc,
+		ProductoRepo:   productoRepo,
+		Optimizer:      optimizer,
+		Consigna:       consignaSvc,
+		LoopCancels:    loopRegistry,
+		MetricasRepo:   metricasHornoRepo,
+		EventosRepo:    loteSectorRepo,
+		DecisionesRepo: decisionesRepo,
+		Broker:         controlSSEBroker,
+	}
+	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
+	controlSSEHandler := controlController.NewControlSSEHandler(controlSSEBroker)
 
 	authHandler := authController.NewAuthHandler(authSvc)
 	userHandler := userController.NewUserHandler(userSvc)
@@ -203,11 +243,38 @@ func main() {
 	mux.HandleFunc("/api/v1/lotes/abierto", loggingMiddleware(dualauth.DualAuth(deviceVerifier, jwtSecretBytes, loteSectorHandler.HandleAbierto)))
 	mux.HandleFunc("/api/v1/lotes/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteSectorSSEHandler.HandleSSE)))
 	mux.HandleFunc("/api/v1/lotes/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// El subtree `/api/v1/lotes/` mezcla endpoints device-only (Bearer
+		// del nodo, autenticados por el `deviceTokenController.BeforeMux`
+		// global) y endpoints del panel (JWT cookie). Antes todos pasaban
+		// sin JWT y los handlers que validaban rol interno (control/*
+		// decisiones) devolvían 403 permanente. Ahora aplicamos el
+		// middleware JWT sólo a las rutas que lo requieren.
+		jwtWrap := func(h http.HandlerFunc) http.HandlerFunc {
+			return authController.JWTMiddleware(jwtSecretBytes, h)
+		}
 		switch {
+		// --- device-only (Bearer, ya cubierto por BeforeMux) ---
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/eventos"):
 			loteSectorHandler.HandleEventos(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/cierre"):
 			loteSectorHandler.HandleCierre(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
+			metricasHornoHandler.Handle(w, r)
+
+		// --- panel (JWT cookie) ---
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/start"):
+			jwtWrap(controlHandler.HandleControlStart(controlDeps))(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
+			jwtWrap(controlHandler.HandleControlStop())(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/consigna-propuesta"):
+			jwtWrap(controlHandler.HandleConsignaPropuesta())(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/events"):
+			jwtWrap(controlSSEHandler.HandleControlEvents)(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/aplicar-consigna"):
+			jwtWrap(controlHandler.HandleAplicarConsigna(controlDeps))(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/decisiones"):
+			jwtWrap(decisionesHandler.Handle)(w, r)
+
 		default:
 			response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
 		}

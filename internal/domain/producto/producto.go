@@ -47,6 +47,12 @@ func (e *ValidationError) Error() string {
 // Producto es una entrada del catálogo maestro. Activo=false indica un producto
 // retirado: no se ofrece para elegir, pero sigue resolviendo lotes históricos.
 // Los campos numéricos son los parámetros de control ideales de horneado.
+//
+// Desde SCA-400 el producto admite dos zonas térmicas: temp_min/temp_max son
+// siempre del horno 1, y temp2_min/temp2_max (nullable) son del horno 2
+// cuando la línea tiene un segundo horno en serie (horno2_habilitado=true).
+// delta_temp1_max_c, delta_temp2_max_c (este último opcional) y delta_vel_max
+// son las variaciones máximas admitidas por ciclo del optimizador MPC.
 type Producto struct {
 	ID                    string  `json:"id"`
 	Nombre                string  `json:"nombre"`
@@ -63,9 +69,18 @@ type Producto struct {
 	// automático de consigna (SCA-142).
 	TempSetpoint           *float64  `json:"tempSetpoint,omitempty"`
 	VelocidadCintaSetpoint *float64  `json:"velocidadCintaSetpoint,omitempty"`
-	Activo                 bool      `json:"activo"`
-	CreatedAt              time.Time `json:"createdAt"`
-	UpdatedAt              time.Time `json:"updatedAt"`
+	// Horno 2 (opcional): si Horno2Habilitado=true, Temp2Min/Temp2Max/DeltaTemp2MaxC
+	// deben estar definidos. Temp2Setpoint es opcional pero, si está, cae en el rango.
+	Horno2Habilitado bool     `json:"horno2Habilitado"`
+	Temp2Min         *float64 `json:"temp2Min,omitempty"`
+	Temp2Max         *float64 `json:"temp2Max,omitempty"`
+	Temp2Setpoint    *float64 `json:"temp2Setpoint,omitempty"`
+	DeltaTemp1MaxC   float64  `json:"deltaTemp1MaxC"`
+	DeltaTemp2MaxC   *float64 `json:"deltaTemp2MaxC,omitempty"`
+	DeltaVelMax      float64  `json:"deltaVelMax"`
+	Activo           bool     `json:"activo"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 // ProductoRequest representa el payload JSON entrante para el alta (POST) y la
@@ -84,6 +99,14 @@ type ProductoRequest struct {
 	// Setpoints opcionales: si se envían, deben caer dentro del rango min/max.
 	TempSetpoint           *float64 `json:"tempSetpoint,omitempty"`
 	VelocidadCintaSetpoint *float64 `json:"velocidadCintaSetpoint,omitempty"`
+	// Horno 2 (opcional). Default false en backend; los nil quedan como NULL en la BD.
+	Horno2Habilitado *bool    `json:"horno2Habilitado,omitempty"`
+	Temp2Min         *float64 `json:"temp2Min,omitempty"`
+	Temp2Max         *float64 `json:"temp2Max,omitempty"`
+	Temp2Setpoint    *float64 `json:"temp2Setpoint,omitempty"`
+	DeltaTemp1MaxC   *float64 `json:"deltaTemp1MaxC,omitempty"` // default 10.0 si nil
+	DeltaTemp2MaxC   *float64 `json:"deltaTemp2MaxC,omitempty"`
+	DeltaVelMax      *float64 `json:"deltaVelMax,omitempty"` // default 0.05 si nil
 }
 
 // Validate verifica todas las reglas de negocio del ProductoRequest, replicando
@@ -123,6 +146,40 @@ func (req ProductoRequest) Validate() error {
 	}
 	if req.VelocidadCintaSetpoint != nil && (*req.VelocidadCintaSetpoint < req.VelocidadCintaMin || *req.VelocidadCintaSetpoint > req.VelocidadCintaMax) {
 		fields["velocidadCintaSetpoint"] = "debe estar entre velocidadCintaMin y velocidadCintaMax"
+	}
+
+	// Horno 2: validar consistencia del trío min/max/flag. Los defaults del
+	// flag se aplican en el service (Create/Update) antes de persistir.
+	if req.Horno2Habilitado != nil && *req.Horno2Habilitado {
+		if req.Temp2Min == nil || req.Temp2Max == nil {
+			fields["horno2Habilitado"] = "habilitar el horno 2 requiere definir temp2Min y temp2Max"
+		} else if *req.Temp2Max <= *req.Temp2Min {
+			fields["temp2Max"] = fmt.Sprintf("debe ser mayor a temp2Min (%.2f)", *req.Temp2Min)
+		}
+		if req.DeltaTemp2MaxC == nil {
+			fields["deltaTemp2MaxC"] = "es requerido cuando horno2Habilitado=true"
+		}
+	} else {
+		// horno2Habilitado=false: temp2_min/max no deben estar definidos.
+		if req.Temp2Min != nil || req.Temp2Max != nil {
+			fields["horno2Habilitado"] = "temp2Min/temp2Max requieren horno2Habilitado=true"
+		}
+	}
+	if req.Temp2Setpoint != nil {
+		if req.Temp2Min == nil || req.Temp2Max == nil {
+			fields["temp2Setpoint"] = "requiere temp2Min y temp2Max"
+		} else if *req.Temp2Setpoint < *req.Temp2Min || *req.Temp2Setpoint > *req.Temp2Max {
+			fields["temp2Setpoint"] = "debe estar entre temp2Min y temp2Max"
+		}
+	}
+	if req.DeltaTemp1MaxC != nil && *req.DeltaTemp1MaxC <= 0 {
+		fields["deltaTemp1MaxC"] = "debe ser mayor a 0"
+	}
+	if req.DeltaTemp2MaxC != nil && *req.DeltaTemp2MaxC <= 0 {
+		fields["deltaTemp2MaxC"] = "debe ser mayor a 0"
+	}
+	if req.DeltaVelMax != nil && *req.DeltaVelMax <= 0 {
+		fields["deltaVelMax"] = "debe ser mayor a 0"
 	}
 
 	if len(fields) > 0 {
