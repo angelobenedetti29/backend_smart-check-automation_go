@@ -46,17 +46,18 @@ type EntradasPredictor struct {
 
 // PrediccionSalida es la triplete que devuelve el XGBoost (o el placeholder).
 type PrediccionSalida struct {
-	PctCrudos    float64 `json:"pctCrudos"`
-	PctOk        float64 `json:"pctOk"`
-	PctQuemados  float64 `json:"pctQuemados"`
-	ModelVersion string  `json:"modelVersion"`
-	EsPlaceholder bool  `json:"esPlaceholder"`
+	PctCrudos     float64 `json:"pctCrudos"`
+	PctOk         float64 `json:"pctOk"`
+	PctQuemados   float64 `json:"pctQuemados"`
+	ModelVersion  string  `json:"modelVersion"`
+	EsPlaceholder bool    `json:"esPlaceholder"`
 }
 
 // Pesos son los coeficientes de la función objetivo. WC = peso de crudos,
-// WQ = peso de quemados, WO = peso de OK (no se usa directamente en la
-// versión actual del spec; conservado para futuro), DT = penalización por
-// ΔT por °C, DC = penalización por ΔV por m/s.
+// WQ = peso de quemados, WO = peso de %OK como recompensa (se suma -wo·predO
+// en Z; defaults WO=1.0 de modo que Z baja cuando el candidato maximiza
+// producto OK), DT = penalización por ΔT por °C, DC = penalización por ΔV por
+// m/s.
 type Pesos struct {
 	WC float64
 	WQ float64
@@ -65,42 +66,51 @@ type Pesos struct {
 	DC float64
 }
 
+// ZCalidad es la parte de Z que depende de los porcentajes observados o
+// predichos (crudos/ok/quemados). Es la única fuente de verdad: objetivo()
+// (predicción) y control.go (observación) deben llamarla con los mismos
+// argumentos para que z_predicho y z_observado sean comparables.
+func ZCalidad(p Pesos, pctCrudos, pctOk, pctQuemados float64) float64 {
+	return p.WC*pctCrudos + p.WQ*pctQuemados - p.WO*pctOk/100
+}
+
 // Estado es la foto del horno al momento de optimizar.
 type Estado struct {
-	TempHorno1    float64
-	TempHorno2    *float64 // nil cuando la línea tiene un solo horno
+	TempHorno1     float64
+	TempHorno2     *float64 // nil cuando la línea tiene un solo horno
 	VelocidadCinta float64
-	TempObjetivo  float64 // setpoint activo de T1 (último aplicado)
-	VelObjetivo   float64 // setpoint activo de V (último aplicado)
+	TempObjetivo   float64 // setpoint activo de T1 (último aplicado)
+	VelObjetivo    float64 // setpoint activo de V (último aplicado)
 }
 
 // Limites del producto: rangos y Δmáx por ciclo.
 type Limites struct {
-	TempMin      float64
-	TempMax      float64
-	Temp2Min     *float64
-	Temp2Max     *float64
-	VelMin       float64
-	VelMax       float64
-	DeltaTemp1   float64 // |ΔT1| máximo por ciclo
-	DeltaTemp2   *float64 // |ΔT2| máximo por ciclo (nil si no hay horno 2)
-	DeltaVel     float64
-	Horno2Hab    bool
-	UmbralCrudo  float64 // % crudo aceptable
-	UmbralQuem   float64 // % quemado aceptable
+	TempMin         float64
+	TempMax         float64
+	Temp2Min        *float64
+	Temp2Max        *float64
+	VelMin          float64
+	VelMax          float64
+	DeltaTemp1      float64  // |ΔT1| máximo por ciclo
+	DeltaTemp2      *float64 // |ΔT2| máximo por ciclo (nil si no hay horno 2)
+	DeltaVel        float64
+	Horno2Hab       bool
+	UmbralCrudo     float64 // % crudo aceptable
+	UmbralQuem      float64 // % quemado aceptable
+	ToleranciaTempC float64 // |ΔT| permitido vs TempObjetivo; candidatos fuera se penalizan
 }
 
 // Propuesta es el resultado del optimizador: los nuevos setpoints y los
 // valores predichos. Aplicado queda en false hasta que el caller
 // confirme el despacho.
 type Propuesta struct {
-	Temp1          float64
-	Temp2          *float64
-	Velocidad      float64
-	Z              float64
-	Prediccion     PrediccionSalida
-	VentanaInicio  string `json:"ventana_inicio,omitempty"`
-	VentanaFin     string `json:"ventana_fin,omitempty"`
+	Temp1         float64
+	Temp2         *float64
+	Velocidad     float64
+	Z             float64
+	Prediccion    PrediccionSalida
+	VentanaInicio string `json:"ventana_inicio,omitempty"`
+	VentanaFin    string `json:"ventana_fin,omitempty"`
 }
 
 // ErrSinPrediccion se retorna cuando el predictor falla de manera
@@ -123,7 +133,7 @@ type Optimizer struct {
 func NewOptimizer(p Predictor) *Optimizer {
 	return &Optimizer{
 		predictor: p,
-		pasoTemp:  2.0, // °C
+		pasoTemp:  2.0,  // °C
 		pasoVel:   0.02, // m/s
 	}
 }
@@ -162,8 +172,8 @@ func (o *Optimizer) Resolver(
 	var mejorZ float64
 	for _, t1 := range t1Inicio {
 		for _, v := range vInicio {
-if t2Habilitado {
-			for _, t2 := range t2Inicio {
+			if t2Habilitado {
+				for _, t2 := range t2Inicio {
 					pred, err := o.predictor.Predict(ctx, EntradasPredictor{
 						ProductoID:     productoID,
 						TempHorno1:     t1,
@@ -269,9 +279,18 @@ func (o *Optimizer) grillaVel(centro, delta, minimo, maximo float64) (valores []
 	return dedupe(out)
 }
 
-// objetivo calcula Z = wc·predC + wq·predQ + dt·(|ΔT1|+|ΔT2|) + dc·|ΔV|.
-// Las predicciones vienen en [0, 100] (porcentajes). El WO no entra en el
-// spec actual; se conserva como peso futuro (sumar -wo·predO si se quiere).
+// objetivo calcula Z = wc·predC + wq·predQ - wo·predO + dt·(|ΔT1|+|ΔT2|) + dc·|ΔV|.
+// Las predicciones vienen en [0, 100] (porcentajes). WO entra como recompensa
+// aditiva sobre %OK (F-B4, opción A): el término -wo·predO baja Z cuando el
+// candidato maximiza producto OK.
+//
+// Sobre la tolerancia de temperatura (F-B3): además de la penalización base
+// |ΔT|·DT, si el candidato excede la tolerancia del lote se agrega una
+// penalización suave max(0, |ΔT|-tol)·DT. Se usa soft (no hard-filter) para no
+// vaciar el dominio de búsqueda cuando el horno está lejos del setpoint: el
+// centro de la grilla siempre queda disponible y el optimizador no se queda sin
+// candidatos. Con ToleranciaTempC<=0 (ej. Limites literales viejos) no se aplica
+// el término extra y el comportamiento es idéntico al anterior.
 func (o *Optimizer) objetivo(
 	estado Estado,
 	lim Limites,
@@ -281,8 +300,15 @@ func (o *Optimizer) objetivo(
 	t2 *float64,
 	v float64,
 ) float64 {
-	z := pesos.WC*pred.PctCrudos + pesos.WQ*pred.PctQuemados
-	dt := math.Abs(t1-estado.TempObjetivo) * pesos.DT
+	z := ZCalidad(pesos, pred.PctCrudos, pred.PctOk, pred.PctQuemados)
+
+	deltaT1 := math.Abs(t1 - estado.TempObjetivo)
+	dt := deltaT1 * pesos.DT
+	if lim.ToleranciaTempC > 0 {
+		if exceso := deltaT1 - lim.ToleranciaTempC; exceso > 0 {
+			dt += exceso * pesos.DT
+		}
+	}
 	if t2 != nil && estado.TempHorno2 != nil {
 		dt += math.Abs(*t2-*estado.TempHorno2) * pesos.DT
 	}
@@ -301,18 +327,32 @@ func PesosDesdeLote(p *lote_sector.PesosObjetivo) Pesos {
 	return Pesos{WC: p.WC, WQ: p.WQ, WO: p.WO, DT: p.DT, DC: p.DC}
 }
 
-// LimitesDesdeProducto deriva los límites del MPC desde el producto.
-func LimitesDesdeProducto(p *producto.Producto) Limites {
+// LimitesDe deriva los límites del MPC desde el producto y el lote. El lote
+// aporta los umbrales de aceptación y la tolerancia de temperatura; si es nil
+// se usan defaults conservadores (umbrales 5.0, tolerancia 2.0 °C).
+//
+// Nota: la spec pedía llamarla Limites(), pero Go no permite que una función y
+// el tipo Limites compartan identificador en el mismo paquete.
+func LimitesDe(p *producto.Producto, l *lote_sector.Lote) Limites {
+	umbralCrudo := 5.0
+	umbralQuem := 5.0
+	tolerancia := 2.0
+	if l != nil {
+		umbralCrudo = l.UmbralAceptacionCrudo
+		umbralQuem = l.UmbralAceptacionQuemado
+		tolerancia = l.ToleranciaTempC
+	}
 	lim := Limites{
-		TempMin:     p.TempMin,
-		TempMax:     p.TempMax,
-		VelMin:      p.VelocidadCintaMin,
-		VelMax:      p.VelocidadCintaMax,
-		DeltaTemp1:  p.DeltaTemp1MaxC,
-		DeltaVel:    p.DeltaVelMax,
-		Horno2Hab:   p.Horno2Habilitado,
-		UmbralCrudo: 5.0,
-		UmbralQuem:  5.0,
+		TempMin:         p.TempMin,
+		TempMax:         p.TempMax,
+		VelMin:          p.VelocidadCintaMin,
+		VelMax:          p.VelocidadCintaMax,
+		DeltaTemp1:      p.DeltaTemp1MaxC,
+		DeltaVel:        p.DeltaVelMax,
+		Horno2Hab:       p.Horno2Habilitado,
+		UmbralCrudo:     umbralCrudo,
+		UmbralQuem:      umbralQuem,
+		ToleranciaTempC: tolerancia,
 	}
 	if p.Horno2Habilitado {
 		lim.Temp2Min = p.Temp2Min

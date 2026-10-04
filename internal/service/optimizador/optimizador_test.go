@@ -83,12 +83,12 @@ func TestResolverEligeMejorCandidato(t *testing.T) {
 		TempObjetivo: 210,
 		VelObjetivo:  0.20,
 	}
-	lim := optimizador.LimitesDesdeProducto(&producto.Producto{
+	lim := optimizador.LimitesDe(&producto.Producto{
 		TempMin: 150, TempMax: 250,
 		VelocidadCintaMin: 0.05, VelocidadCintaMax: 0.50,
 		DeltaTemp1MaxC:    10,
 		DeltaVelMax:       0.05,
-	})
+	}, nil)
 	pesos := optimizador.Pesos{WC: 1.0, WQ: 1.0, WO: 0.0, DT: 0.05, DC: 0.5}
 
 	p, err := opt.Resolver(ctx, "prod-x", estado, lim, pesos)

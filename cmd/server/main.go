@@ -183,7 +183,6 @@ func main() {
 
 	// Registry de loops activos por lote y handlers de control.
 	loopRegistry := controlController.NewLoopRegistry()
-	controlHandler := &controlController.ControlHandler{}
 	controlDeps := controlController.ControlDeps{
 		LoteLookup:     loteSectorSvc,
 		ProductoRepo:   productoRepo,
@@ -195,6 +194,7 @@ func main() {
 		DecisionesRepo: decisionesRepo,
 		Broker:         controlSSEBroker,
 	}
+	controlHandler := controlController.NewControlHandler(controlDeps)
 	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
 	controlSSEHandler := controlController.NewControlSSEHandler(controlSSEBroker)
 
@@ -267,7 +267,7 @@ func main() {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
 			jwtWrap(controlHandler.HandleControlStop())(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/consigna-propuesta"):
-			jwtWrap(controlHandler.HandleConsignaPropuesta())(w, r)
+			jwtWrap(controlHandler.HandleConsignaPropuesta)(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/events"):
 			jwtWrap(controlSSEHandler.HandleControlEvents)(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/aplicar-consigna"):
@@ -436,8 +436,12 @@ func main() {
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("Error durante graceful shutdown: %v", err)
+		log.Printf("Error durante graceful shutdown: %v", err)
 	}
+
+	// Recién ahora, con el HTTP cerrado (no entran nuevos /control/start),
+	// cancelamos los loops de control activos.
+	loopRegistry.StopAll()
 
 	log.Println("Servidor apagado exitosamente.")
 }

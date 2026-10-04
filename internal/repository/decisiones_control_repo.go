@@ -3,8 +3,10 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
@@ -29,7 +31,7 @@ INSERT INTO decisiones_control (
 	temp_propuesto, vel_propuesto,
 	temp_aplicado, vel_aplicado,
 	prediccion, z_observado, z_predicho,
-	razon_skipped, aplicado_por
+	razon_skipped, aplicado_por, decision_origen_id
 ) VALUES (
 	$1, $2, $3, $4,
 	$5, $6,
@@ -38,7 +40,7 @@ INSERT INTO decisiones_control (
 	$11, $12,
 	$13, $14,
 	$15, $16, $17,
-	$18, $19
+	$18, $19, $20
 )
 RETURNING id, created_at`
 
@@ -56,7 +58,7 @@ func (r *DecisionesControlPostgresRepository) Save(ctx context.Context, d *decis
 		d.TempPropuesto, d.VelPropuesto,
 		d.TempAplicado, d.VelAplicado,
 		prediccion, d.ZObservado, d.ZPredicho,
-		d.RazonSkipped, d.AplicadoPor,
+		d.RazonSkipped, d.AplicadoPor, d.DecisionOrigenID,
 	).Scan(&d.ID, &d.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert decisiones_control: %w", err)
@@ -70,8 +72,8 @@ temp_actual, vel_actual,
 pct_crudos_obs, pct_ok_obs, pct_quemados_obs, conf_promedio,
 temp_propuesto, vel_propuesto,
 temp_aplicado, vel_aplicado,
-prediccion, z_observado, z_predicho,
-razon_skipped, aplicado_por, created_at`
+	prediccion, z_observado, z_predicho,
+	razon_skipped, aplicado_por, decision_origen_id, created_at`
 
 // ListByLote devuelve las últimas N decisiones del lote, ordenadas por
 // created_at DESC. Un lote sin decisiones devuelve slice vacío.
@@ -96,22 +98,8 @@ func (r *DecisionesControlPostgresRepository) ListByLote(ctx context.Context, lo
 	out := []decisiones_control.DecisionControl{}
 	for rows.Next() {
 		var d decisiones_control.DecisionControl
-		if err := rows.Scan(
-			&d.ID, &d.LoteID, &d.VentanaInicio, &d.VentanaFin, &d.Muestras,
-			&d.TempActual, &d.VelActual,
-			&d.PctCrudosObs, &d.PctOkObs, &d.PctQuemadosObs, &d.ConfPromedio,
-			&d.TempPropuesto, &d.VelPropuesto,
-			&d.TempAplicado, &d.VelAplicado,
-			&d.Prediccion, &d.ZObservado, &d.ZPredicho,
-			&d.RazonSkipped, &d.AplicadoPor, &d.CreatedAt,
-		); err != nil {
+		if err := scanDecision(rows, &d); err != nil {
 			return nil, fmt.Errorf("scan decisiones_control: %w", err)
-		}
-		if len(d.Prediccion) > 0 {
-			var view decisiones_control.PrediccionResumen
-			if err := json.Unmarshal(d.Prediccion, &view); err == nil {
-				d.PrediccionView = &view
-			}
 		}
 		out = append(out, d)
 	}
@@ -119,4 +107,73 @@ func (r *DecisionesControlPostgresRepository) ListByLote(ctx context.Context, lo
 		return nil, fmt.Errorf("rows iteration decisiones_control: %w", err)
 	}
 	return out, nil
+}
+
+const selectUltimaPendienteSQL = `
+	SELECT ` + selectDecisionesColumns + `
+	FROM decisiones_control
+	WHERE lote_id = $1 AND aplicado_por = $2 AND razon_skipped IS NULL
+	ORDER BY created_at DESC
+	LIMIT 1`
+
+// GetUltimaPendiente devuelve la propuesta de SUPERVISION más reciente que
+// todavía no fue aplicada (aplicado_por='NADIE' y sin razon_skipped). Si el
+// lote no tiene ninguna pendiente, devuelve (nil, nil) sin error.
+func (r *DecisionesControlPostgresRepository) GetUltimaPendiente(ctx context.Context, loteID string) (*decisiones_control.DecisionControl, error) {
+	row := r.db.QueryRow(ctx, selectUltimaPendienteSQL, loteID, decisiones_control.AplicadoPorNadie)
+	var d decisiones_control.DecisionControl
+	if err := scanDecision(row, &d); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query ultima decision pendiente: %w", err)
+	}
+	return &d, nil
+}
+
+const updateMarcarAplicadaSQL = `
+	UPDATE decisiones_control
+	SET aplicado_por = $1, temp_aplicado = $2, vel_aplicado = $3, decision_origen_id = $4
+	WHERE id = $5`
+
+// MarcarAplicada marca una decisión como aplicada con los setpoints
+// efectivamente despachados. Setea decision_origen_id = id (self-ref): en el
+// flujo actual la fila promovida es su propio origen. Idempotente.
+func (r *DecisionesControlPostgresRepository) MarcarAplicada(ctx context.Context, decisionID string, tempAplicada, velAplicada float64, aplicadoPor string) error {
+	tag, err := r.db.Exec(ctx, updateMarcarAplicadaSQL, aplicadoPor, tempAplicada, velAplicada, decisionID, decisionID)
+	if err != nil {
+		return fmt.Errorf("update decision aplicada: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("MarcarAplicada: decisión %s no encontrada", decisionID)
+	}
+	return nil
+}
+
+// rowScanner abstrae el Scan común a pgx.Row y pgx.Rows.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanDecision escanea las columnas canónicas de decisiones_control y decodifica
+// el JSONB de prediccion en PrediccionView.
+func scanDecision(s rowScanner, d *decisiones_control.DecisionControl) error {
+	if err := s.Scan(
+		&d.ID, &d.LoteID, &d.VentanaInicio, &d.VentanaFin, &d.Muestras,
+		&d.TempActual, &d.VelActual,
+		&d.PctCrudosObs, &d.PctOkObs, &d.PctQuemadosObs, &d.ConfPromedio,
+		&d.TempPropuesto, &d.VelPropuesto,
+		&d.TempAplicado, &d.VelAplicado,
+		&d.Prediccion, &d.ZObservado, &d.ZPredicho,
+		&d.RazonSkipped, &d.AplicadoPor, &d.DecisionOrigenID, &d.CreatedAt,
+	); err != nil {
+		return err
+	}
+	if len(d.Prediccion) > 0 {
+		var view decisiones_control.PrediccionResumen
+		if err := json.Unmarshal(d.Prediccion, &view); err == nil {
+			d.PrediccionView = &view
+		}
+	}
+	return nil
 }

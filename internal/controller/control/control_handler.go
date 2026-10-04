@@ -1,11 +1,11 @@
 // Package controller expone los endpoints HTTP del control automático /
 // supervisión del MPC (SCA-400):
 //
-//   POST /api/v1/lotes/{id}/control/start          (Supervisor/Admin)
-//   POST /api/v1/lotes/{id}/control/stop           (Supervisor/Admin)
-//   GET  /api/v1/lotes/{id}/consigna-propuesta      (Bearer dispositivo o JWT)
-//   POST /api/v1/lotes/{id}/aplicar-consigna        (Operario mínimo)
-//   GET  /api/v1/lotes/{id}/decisiones              (JWT cookie)
+//	POST /api/v1/lotes/{id}/control/start          (Supervisor/Admin)
+//	POST /api/v1/lotes/{id}/control/stop           (Supervisor/Admin)
+//	GET  /api/v1/lotes/{id}/consigna-propuesta      (Bearer dispositivo o JWT)
+//	POST /api/v1/lotes/{id}/aplicar-consigna        (Operario mínimo)
+//	GET  /api/v1/lotes/{id}/decisiones              (JWT cookie)
 //
 // El start/stop manipula el Loop del lote en memoria (Registry). El
 // consigna-propuesta lo lee el ControlService de la Pi ENTRADA (que ya
@@ -15,7 +15,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"sync"
@@ -24,11 +26,11 @@ import (
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/helpers"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
@@ -37,7 +39,9 @@ import (
 
 // ControlHandler agrupa los handlers del control.
 type ControlHandler struct {
-	registry *LoopRegistry
+	registry       *LoopRegistry
+	decisionesRepo decisiones_control.Repository
+	loteLookup     LoteLookupService
 }
 
 // LoopRegistry es el mapa en memoria de Loop por lote activo. El Loop se
@@ -47,23 +51,22 @@ type LoopRegistry struct {
 	mu       sync.Mutex
 	loops    map[string]any // referencia al *control.Loop
 	byCancel map[string]context.CancelFunc
+	// gens evita que el watcher de un loop viejo borre la entrada de un loop
+	// más nuevo registrado para el mismo lote.
+	gens map[string]uint64
 }
 
 func NewLoopRegistry() *LoopRegistry {
 	return &LoopRegistry{
 		loops:    map[string]any{},
 		byCancel: map[string]context.CancelFunc{},
+		gens:     map[string]uint64{},
 	}
 }
 
 // MetricasRepo es el mínimo del repo de telemetría para alimentar el Loop.
 type MetricasRepo interface {
 	GetUltimasParaLote(ctx context.Context, loteID string, limite int) ([]metricashorno.MetricaHorno, error)
-}
-
-// DecisionesRepo es el mínimo del repo de decisiones para persistir el audit del MPC.
-type DecisionesRepo interface {
-	Save(ctx context.Context, d *decisiones_control.DecisionControl) error
 }
 
 // EventosRepo es el mínimo del repo de lote para contar eventos en la ventana.
@@ -76,15 +79,15 @@ type EventosRepo interface {
 // Broker) son OBLIGATORIAS: el Loop las invoca dentro del tick y un nil ahí
 // produce nil pointer dereference.
 type ControlDeps struct {
-	LoteLookup    LoteLookupService
-	ProductoRepo  ProductoRepo
-	Optimizer     *optimizador.Optimizer
-	Consigna      control.ConsignaDispatchService
-	LoopCancels   *LoopRegistry
-	MetricasRepo  MetricasRepo
-	EventosRepo   EventosRepo
-	DecisionesRepo DecisionesRepo
-	Broker        *sse.Broker
+	LoteLookup     LoteLookupService
+	ProductoRepo   ProductoRepo
+	Optimizer      *optimizador.Optimizer
+	Consigna       control.ConsignaDispatchService
+	LoopCancels    *LoopRegistry
+	MetricasRepo   MetricasRepo
+	EventosRepo    EventosRepo
+	DecisionesRepo decisiones_control.Repository
+	Broker         *sse.Broker
 }
 
 // ProductoRepo es el mínimo del repo de productos para el handler.
@@ -98,8 +101,34 @@ type LoteLookupService interface {
 }
 
 // NewControlHandler construye el handler a partir de sus dependencias.
+// Valida que todas las deps requeridas estén presentes: un nil se descubriría
+// recién dentro de la goroutine del Loop como nil pointer dereference, así que
+// fallamos temprano y ruidosamente.
 func NewControlHandler(deps ControlDeps) *ControlHandler {
-	return &ControlHandler{registry: deps.LoopCancels}
+	required := []struct {
+		name  string
+		isNil bool
+	}{
+		{"LoteLookup", deps.LoteLookup == nil},
+		{"ProductoRepo", deps.ProductoRepo == nil},
+		{"Optimizer", deps.Optimizer == nil},
+		{"Consigna", deps.Consigna == nil},
+		{"LoopCancels", deps.LoopCancels == nil},
+		{"MetricasRepo", deps.MetricasRepo == nil},
+		{"EventosRepo", deps.EventosRepo == nil},
+		{"DecisionesRepo", deps.DecisionesRepo == nil},
+		{"Broker", deps.Broker == nil},
+	}
+	for _, r := range required {
+		if r.isNil {
+			panic(fmt.Errorf("NewControlHandler: required dep %s is nil", r.name))
+		}
+	}
+	return &ControlHandler{
+		registry:       deps.LoopCancels,
+		decisionesRepo: deps.DecisionesRepo,
+		loteLookup:     deps.LoteLookup,
+	}
 }
 
 // HandleControlStart maneja POST /api/v1/lotes/{id}/control/start.
@@ -139,12 +168,15 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 			return
 		}
 		pesos := optimizador.PesosDesdeLote(lote.PesosObjetivo)
-		limites := optimizador.LimitesDesdeProducto(prod)
+		limites := optimizador.LimitesDe(prod, lote)
 		hornoID := os.Getenv("MPC_HORNO_ID")
 		if hornoID == "" {
 			hornoID = "horno-1"
 		}
-		ctx, cancel := context.WithCancel(r.Context())
+		// El loop debe sobrevivir al cierre de la request HTTP: si se atara a
+		// r.Context(), el servidor lo cancelaría al responder 200 y mataría el
+		// control. Se desacopla con un contexto raíz propio.
+		ctx, cancel := context.WithCancel(context.Background())
 		loop := control.NewLoop(
 			lote.ID, deps.LoteLookup,
 			deps.MetricasRepo,
@@ -160,13 +192,13 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 			lote.VentanaEvaluacionSegundos, lote.VentanaActualizacionSegundos,
 			pesos, limites,
 		)
-		h.registry.Register(lote.ID, cancel)
+		h.registry.Register(lote.ID, ctx, cancel)
 		h.registry.SetLoop(lote.ID, loop)
-		loop.Start(ctx)
+		loop.Start(ctx, cancel)
 		response.OK(w, "Control iniciado", map[string]interface{}{
-			"lote_id":   lote.ID,
-			"modo":      lote.Modo,
-			"ventana_evaluacion_segundos":   lote.VentanaEvaluacionSegundos,
+			"lote_id":                        lote.ID,
+			"modo":                           lote.Modo,
+			"ventana_evaluacion_segundos":    lote.VentanaEvaluacionSegundos,
 			"ventana_actualizacion_segundos": lote.VentanaActualizacionSegundos,
 		})
 	}
@@ -201,19 +233,130 @@ func (h *ControlHandler) HandleControlStop() http.HandlerFunc {
 	}
 }
 
+// consignaPropuestaResponse es el payload de GET /lotes/{id}/consigna-propuesta.
+type consignaPropuestaResponse struct {
+	DecisionID      string    `json:"decision_id"`
+	Temp1Objetivo   float64   `json:"temp1_objetivo"`
+	Temp2Objetivo   float64   `json:"temp2_objetivo"`
+	VelObjetivo     float64   `json:"vel_objetivo"`
+	GeneratedAt     time.Time `json:"generated_at"`
+	TTLSegundos     int       `json:"ttl_segundos"`
+	VentanaInicio   time.Time `json:"ventana_inicio"`
+	VentanaFin      time.Time `json:"ventana_fin"`
+	Temp2Disponible bool      `json:"temp2_disponible"`
+}
+
+// propuestaProvider es la vista mínima del loop que expone la propuesta
+// pendiente sin consumirla.
+type propuestaProvider interface {
+	PropuestaPendiente(ttlSegundos int) *control.PropuestaSnapshot
+}
+
+// prediccionPersistidaTemp2 lee el T2 propuesto del JSONB persistido en
+// decisiones_control.prediccion.
+type prediccionPersistidaTemp2 struct {
+	Temp2 *float64 `json:"temp2_pred"`
+}
+
 // HandleConsignaPropuesta expone GET /api/v1/lotes/{id}/consigna-propuesta.
-// Por ahora devuelve 204 cuando no hay propuesta pendiente. La Pi ENTRADA
-// polea este endpoint y aplica lo que encuentre.
-func (h *ControlHandler) HandleConsignaPropuesta() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
-			return
-		}
-		// 204 No Content por ahora: el loop ya emite por SSE; el endpoint
-		// es para sincronización pull-based en redes poco confiables.
-		w.WriteHeader(http.StatusNoContent)
+// Devuelve la propuesta pendiente del loop en memoria si existe; si no,
+// reintenta contra la última decisión pendiente persistida (pull-based para
+// redes poco confiables). Responde 204 cuando no hay nada pendiente.
+func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
 	}
+	loteID, err := helpers.ExtractLoteID(r.URL.Path, "/consigna-propuesta")
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	// El TTL coincide con la ventana de actualización del lote. Si no se puede
+	// resolver, se sirve la propuesta con TTL 0 sin bloquear el endpoint.
+	ttl := 0
+	if h.loteLookup != nil {
+		if lote, err := h.loteLookup.GetByID(r.Context(), loteID); err == nil && lote != nil {
+			ttl = lote.VentanaActualizacionSegundos
+		}
+	}
+
+	// 1. Propuesta en memoria del loop activo (lectura no destructiva).
+	if h.registry != nil {
+		if loopAny, ok := h.registry.GetLoop(loteID); ok {
+			if loop, ok := loopAny.(propuestaProvider); ok {
+				if snap := loop.PropuestaPendiente(ttl); snap != nil {
+					disponible := snap.Temp2 != nil
+					t2 := 0.0
+					if disponible {
+						t2 = *snap.Temp2
+					}
+					response.OK(w, "Consigna propuesta", consignaPropuestaResponse{
+						DecisionID:      snap.DecisionID,
+						Temp1Objetivo:   snap.Temp1,
+						Temp2Objetivo:   t2,
+						VelObjetivo:     snap.Velocidad,
+						GeneratedAt:     snap.CreatedAt,
+						TTLSegundos:     snap.TTLSegundos,
+						VentanaInicio:   snap.VentanaInicio,
+						VentanaFin:      snap.VentanaFin,
+						Temp2Disponible: disponible,
+					})
+					return
+				}
+			}
+		}
+	}
+
+	// 2. Fallback: última decisión pendiente persistida (SUPERVISION no aprobada).
+	if h.decisionesRepo == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	d, err := h.decisionesRepo.GetUltimaPendiente(r.Context(), loteID)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
+		return
+	}
+	if d == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// Chequear que el lote está vivo y en modo compatible, y que la propuesta
+	// no esté vencida. Si no, respondemos 204 (mismo caso que sin propuesta):
+	// no se sirve una decisión NADIE de un lote cerrado, en MANUAL o vieja.
+	if h.loteLookup != nil {
+		if l, lerr := h.loteLookup.GetByID(r.Context(), loteID); lerr == nil && l != nil {
+			if l.Estado != lotesector.EstadoAbierto || l.Modo != lotesector.ModoSupervision {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+	}
+	if ttl > 0 && time.Since(d.CreatedAt) > time.Duration(ttl)*time.Second {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var pred prediccionPersistidaTemp2
+	if len(d.Prediccion) > 0 {
+		_ = json.Unmarshal(d.Prediccion, &pred)
+	}
+	disponible := pred.Temp2 != nil
+	t2 := 0.0
+	if disponible {
+		t2 = *pred.Temp2
+	}
+	response.OK(w, "Consigna propuesta", consignaPropuestaResponse{
+		DecisionID:      d.ID,
+		Temp1Objetivo:   d.TempPropuesto,
+		Temp2Objetivo:   t2,
+		VelObjetivo:     d.VelPropuesto,
+		GeneratedAt:     d.CreatedAt,
+		TTLSegundos:     ttl,
+		VentanaInicio:   d.VentanaInicio,
+		VentanaFin:      d.VentanaFin,
+		Temp2Disponible: disponible,
+	})
 }
 
 // HandleAplicarConsigna maneja POST /api/v1/lotes/{id}/aplicar-consigna.
@@ -260,9 +403,9 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 			return
 		}
 		response.OK(w, "Consigna aplicada", map[string]interface{}{
-			"lote_id":    loteID,
-			"aplicado":   true,
-			"consigna":   cons,
+			"lote_id":  loteID,
+			"aplicado": true,
+			"consigna": cons,
 		})
 	}
 }
@@ -287,11 +430,11 @@ func writeAplicarError(w http.ResponseWriter, err error) {
 
 // --- Registry ---
 
-// Register guarda el cancel del loop de un lote. Si ya existía, cancela
-// el anterior (evita loops duplicados).
-func (r *LoopRegistry) Register(loteID string, cancel context.CancelFunc) {
+// Register guarda el cancel del loop de un lote y arranca un watcher que
+// limpia la entrada cuando el contexto del loop se cancela. Si ya existía un
+// loop para el lote, cancela el anterior (evita loops duplicados).
+func (r *LoopRegistry) Register(loteID string, ctx context.Context, cancel context.CancelFunc) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if viejo, ok := r.byCancel[loteID]; ok {
 		// Mejor esfuerzo: cancelamos el viejo.
 		go func() {
@@ -299,7 +442,45 @@ func (r *LoopRegistry) Register(loteID string, cancel context.CancelFunc) {
 			viejo()
 		}()
 	}
+	r.gens[loteID]++
+	gen := r.gens[loteID]
 	r.byCancel[loteID] = cancel
+	r.mu.Unlock()
+
+	// Watcher: al cancelarse el contexto, elimina la entrada si sigue siendo
+	// la vigente (el gen protege ante re-registro del mismo lote).
+	go func() {
+		<-ctx.Done()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.gens[loteID] != gen {
+			return
+		}
+		delete(r.byCancel, loteID)
+		delete(r.loops, loteID)
+		delete(r.gens, loteID)
+	}()
+}
+
+// StopAll cancela todos los loops activos y limpia la registry. Pensado para
+// el shutdown graceful del servidor.
+func (r *LoopRegistry) StopAll() {
+	r.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(r.byCancel))
+	for _, c := range r.byCancel {
+		cancels = append(cancels, c)
+	}
+	r.byCancel = map[string]context.CancelFunc{}
+	r.loops = map[string]any{}
+	r.gens = map[string]uint64{}
+	r.mu.Unlock()
+
+	for _, c := range cancels {
+		func() {
+			defer func() { _ = recover() }()
+			c()
+		}()
+	}
 }
 
 // Get devuelve el cancel del loop (para stop explícito).

@@ -15,6 +15,13 @@
 
 BEGIN;
 
+-- Defensas de la migración: si otra sesión retiene un lock o el DDL se cuelga,
+-- abortamos en vez de bloquear el arranque indefinidamente. El advisory lock de
+-- abajo queda acotado por lock_timeout; el resto de la migración por
+-- statement_timeout.
+SET lock_timeout = '3s';
+SET statement_timeout = '60s';
+
 -- Serialize the complete migration before any extension, table or seed DDL.
 SELECT pg_advisory_xact_lock(hashtextextended('smart-check:schema', 0));
 
@@ -1168,7 +1175,11 @@ CREATE TABLE IF NOT EXISTS decisiones_control (
     z_predicho          NUMERIC(10,4),
     razon_skipped       TEXT,
     aplicado_por        VARCHAR(20), -- 'MPC' (automático), 'OPERARIO' (supervisión aprobado), 'NADIE' (no aplicado)
-    created_at          TIMESTAMPTZ  NOT NULL DEFAULT now()
+    decision_origen_id  UUID,
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT fk_decisiones_control_origen
+        FOREIGN KEY (decision_origen_id) REFERENCES decisiones_control(id)
+        ON DELETE SET NULL
 );
 
 COMMENT ON TABLE  decisiones_control                IS 'Audit del MPC: una fila por decisión propuesta (aplicada o no)';
@@ -1191,7 +1202,26 @@ COMMENT ON COLUMN decisiones_control.z_predicho     IS 'Valor de la función obj
 COMMENT ON COLUMN decisiones_control.razon_skipped  IS 'Si no se propuso cambio, motivo (confianza_baja, ventana_sin_muestras, sin_convergencia, etc.)';
 COMMENT ON COLUMN decisiones_control.aplicado_por   IS 'MPC = aplicado por el control automático; OPERARIO = aprobado manualmente en SUPERVISION; NADIE = no aplicado';
 
+-- F-B12: migración idempotente para bases creadas antes de decision_origen_id.
+ALTER TABLE decisiones_control ADD COLUMN IF NOT EXISTS decision_origen_id UUID;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_decisiones_control_origen') THEN
+        ALTER TABLE decisiones_control
+            ADD CONSTRAINT fk_decisiones_control_origen
+            FOREIGN KEY (decision_origen_id) REFERENCES decisiones_control(id)
+            ON DELETE SET NULL;
+    END IF;
+END $$;
+
+COMMENT ON COLUMN decisiones_control.decision_origen_id IS 'Cuando esta decisión fue promovida (NADIE→OPERARIO o AUTO→...), apunta a la decisión origen. Self-ref cuando se promueve la misma fila.';
+
 CREATE INDEX IF NOT EXISTS idx_decisiones_control_lote_created
     ON decisiones_control (lote_id, created_at DESC);
+
+-- Soporte del lookup del origen de una decisión promovida, sin indexar las
+-- filas raíz (NULL). Acota el fan-out del ON DELETE SET NULL.
+CREATE INDEX IF NOT EXISTS idx_decisiones_control_origen
+    ON decisiones_control (decision_origen_id) WHERE decision_origen_id IS NOT NULL;
 
 COMMIT;
