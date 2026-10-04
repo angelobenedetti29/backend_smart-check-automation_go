@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,9 +53,15 @@ func (f *fakeProductoRepo) GetByID(_ context.Context, _ string) (*producto.Produ
 type fakeDecisionesRepo struct {
 	pendiente *decisiones_control.DecisionControl
 	pendErr   error
+	saveErr   error
+	saved     []*decisiones_control.DecisionControl
 }
 
-func (f *fakeDecisionesRepo) Save(_ context.Context, _ *decisiones_control.DecisionControl) error {
+func (f *fakeDecisionesRepo) Save(_ context.Context, d *decisiones_control.DecisionControl) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+	f.saved = append(f.saved, d)
 	return nil
 }
 
@@ -76,18 +84,80 @@ func (f *fakeConsignaDispatch) Dispatch(_ context.Context, _ consigna.ConsignaMa
 	return nil, nil
 }
 
-// fakeMetricasRepo implementa MetricasRepo.
-type fakeMetricasRepo struct{}
+// fakeMetricasRepo implementa MetricasRepo. metricasFn permite generar métricas
+// con timestamp relativo a cada llamada (útil para el loop con reloj real).
+type fakeMetricasRepo struct {
+	metricas   []metricashorno.MetricaHorno
+	metricasFn func() []metricashorno.MetricaHorno
+}
 
 func (f *fakeMetricasRepo) GetUltimasParaLote(_ context.Context, _ string, _ int) ([]metricashorno.MetricaHorno, error) {
-	return nil, nil
+	if f.metricasFn != nil {
+		return f.metricasFn(), nil
+	}
+	return f.metricas, nil
 }
+
+// fakePredictorHandler es un optimizador.Predictor determinista para el loop.
+type fakePredictorHandler struct {
+	out optimizador.PrediccionSalida
+}
+
+func (f fakePredictorHandler) Predict(_ context.Context, _ optimizador.EntradasPredictor) (optimizador.PrediccionSalida, error) {
+	return f.out, nil
+}
+
+// ptrF64 devuelve un puntero a una copia del valor.
+func ptrF64(v float64) *float64 { return &v }
 
 // fakeEventosRepoHandler implementa EventosRepo.
 type fakeEventosRepoHandler struct{}
 
 func (f *fakeEventosRepoHandler) CountEventosEnVentana(_ context.Context, _ string, _, _ time.Time) (int, int, int, error) {
 	return 0, 0, 0, nil
+}
+
+// fakeLoteRepoHandler implementa lotesector.Repository para los tests del
+// handler. Sólo UpdateModo es configurable; el resto son stubs no usados por
+// los handlers de control.
+type fakeLoteRepoHandler struct {
+	updateErr   error
+	updatedModo string
+	updateCalls int
+}
+
+func (f *fakeLoteRepoHandler) GetAbiertoBySector(_ context.Context, _ string) (*lotesector.Lote, error) {
+	return nil, nil
+}
+
+func (f *fakeLoteRepoHandler) GetByID(_ context.Context, _ string) (*lotesector.Lote, error) {
+	return nil, lotesector.ErrNotFound
+}
+
+func (f *fakeLoteRepoHandler) Abrir(_ context.Context, _ lotesector.AbrirParams) (*lotesector.Lote, bool, error) {
+	return nil, false, nil
+}
+
+func (f *fakeLoteRepoHandler) RegistrarEventos(_ context.Context, _, _, _ string, _ []lotesector.Evento) (int, int, *lotesector.Lote, error) {
+	return 0, 0, nil, nil
+}
+
+func (f *fakeLoteRepoHandler) Cerrar(_ context.Context, _ lotesector.CerrarParams) (*lotesector.Lote, bool, error) {
+	return nil, false, nil
+}
+
+func (f *fakeLoteRepoHandler) Historial(_ context.Context, _ lotesector.HistorialParams) ([]lotesector.Lote, int, error) {
+	return nil, 0, nil
+}
+
+func (f *fakeLoteRepoHandler) CountEventosEnVentana(_ context.Context, _ string, _, _ time.Time) (int, int, int, error) {
+	return 0, 0, 0, nil
+}
+
+func (f *fakeLoteRepoHandler) UpdateModo(_ context.Context, _ string, modo string) error {
+	f.updateCalls++
+	f.updatedModo = modo
+	return f.updateErr
 }
 
 // validControlDeps arma un set completo (todas no-nil) de deps del handler.
@@ -102,6 +172,7 @@ func validControlDeps() ControlDeps {
 		EventosRepo:    &fakeEventosRepoHandler{},
 		DecisionesRepo: &fakeDecisionesRepo{},
 		Broker:         sse.NewBroker(),
+		LoteRepo:       &fakeLoteRepoHandler{},
 	}
 }
 
@@ -121,6 +192,7 @@ func TestNewControlHandlerPanicConDepNil(t *testing.T) {
 		{"EventosRepo", func(d *ControlDeps) { d.EventosRepo = nil }},
 		{"DecisionesRepo", func(d *ControlDeps) { d.DecisionesRepo = nil }},
 		{"Broker", func(d *ControlDeps) { d.Broker = nil }},
+		{"LoteRepo", func(d *ControlDeps) { d.LoteRepo = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -440,6 +512,356 @@ func TestHandleControlStartLoopSobreviveCierreRequest(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	if _, ok := reg.GetLoop(loteID); !ok {
 		t.Fatalf("REGRESIÓN F-B2: el loop murió al cerrarse la request HTTP")
+	}
+}
+
+// --- F-B5: PATCH /lotes/{id}/modo ---
+
+// modoChangeEnvelope modela el envelope del endpoint de cambio de modo.
+type modoChangeEnvelope struct {
+	Success bool           `json:"success"`
+	Data    modoCambioData `json:"data"`
+}
+
+// newModeChangeHandler arma el handler con deps controlables y un server con
+// JWT middleware (para ejercitar el chequeo de rol real).
+func newModeChangeHandler(t *testing.T, lote *lotesector.Lote, loteRepo *fakeLoteRepoHandler, decisiones *fakeDecisionesRepo) (*ControlHandler, *httptest.Server, []byte) {
+	t.Helper()
+	deps := validControlDeps()
+	deps.LoteLookup = &fakeLoteLookup{lote: lote}
+	deps.LoteRepo = loteRepo
+	deps.DecisionesRepo = decisiones
+	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: lote.ProductoID}}
+	h := NewControlHandler(deps)
+
+	secret := []byte("mode-change-test-secret-1234567890")
+	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleModeChange))
+	t.Cleanup(srv.Close)
+	t.Cleanup(h.registry.StopAll)
+	return h, srv, secret
+}
+
+// patchModo dispara PATCH /api/v1/lotes/lote-1/modo y devuelve el status + data.
+func patchModo(t *testing.T, srv *httptest.Server, secret []byte, role, body string) (int, modoChangeEnvelope) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPatch, srv.URL+"/api/v1/lotes/lote-1/modo", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("crear request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "session_token", Value: signedTestToken(t, secret, role)})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH modo: %v", err)
+	}
+	defer resp.Body.Close()
+	var env modoChangeEnvelope
+	_ = json.NewDecoder(resp.Body).Decode(&env)
+	return resp.StatusCode, env
+}
+
+// TestHandleModeChangeNoopDevuelve200 verifica que fijar el modo vigente no
+// audita, no toca el loop ni persiste.
+func TestHandleModeChangeNoopDevuelve200(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision,
+		ProductoID: "prod-1", VentanaEvaluacionSegundos: 600,
+	}
+	repo := &fakeLoteRepoHandler{}
+	dec := &fakeDecisionesRepo{}
+	h, srv, secret := newModeChangeHandler(t, lote, repo, dec)
+
+	status, env := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"SUPERVISION"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !env.Success || env.Data.Cambiado {
+		t.Fatalf("se esperaba cambiado=false; data=%+v", env.Data)
+	}
+	if env.Data.Modo != lotesector.ModoSupervision {
+		t.Fatalf("modo = %q, want SUPERVISION", env.Data.Modo)
+	}
+	if repo.updateCalls != 0 {
+		t.Fatalf("no debe llamar UpdateModo; calls=%d", repo.updateCalls)
+	}
+	if len(dec.saved) != 0 {
+		t.Fatalf("no debe auditar un no-op; saved=%d", len(dec.saved))
+	}
+	if _, ok := h.registry.GetLoop("lote-1"); ok {
+		t.Fatalf("el no-op no debe registrar loop")
+	}
+}
+
+// TestHandleModeChangeAMANUALCancelaLoop verifica que pasar a MANUAL cancela el
+// loop vigente, persiste el modo y deja la auditoría.
+func TestHandleModeChangeAMANUALCancelaLoop(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision,
+		ProductoID: "prod-1", VentanaEvaluacionSegundos: 600,
+	}
+	repo := &fakeLoteRepoHandler{}
+	dec := &fakeDecisionesRepo{}
+	h, srv, secret := newModeChangeHandler(t, lote, repo, dec)
+
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	h.registry.Register("lote-1", loopCtx, loopCancel)
+	h.registry.SetLoop("lote-1", &fakeLoop{})
+
+	status, env := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"MANUAL"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !env.Data.Cambiado || env.Data.ModoAnterior != lotesector.ModoSupervision || env.Data.ModoNuevo != lotesector.ModoManual {
+		t.Fatalf("data de cambio incorrecta: %+v", env.Data)
+	}
+	if env.Data.LoopActivo {
+		t.Fatalf("MANUAL no debe dejar loop activo")
+	}
+	if _, ok := h.registry.GetLoop("lote-1"); ok {
+		t.Fatalf("el loop viejo debe quedar desregistrado")
+	}
+	select {
+	case <-loopCtx.Done():
+	default:
+		t.Fatalf("el loop viejo debe quedar cancelado")
+	}
+	if repo.updateCalls != 1 || repo.updatedModo != lotesector.ModoManual {
+		t.Fatalf("UpdateModo mal llamado: calls=%d modo=%q", repo.updateCalls, repo.updatedModo)
+	}
+	if len(dec.saved) != 1 {
+		t.Fatalf("debe auditar el cambio; saved=%d", len(dec.saved))
+	}
+	got := dec.saved[0]
+	if got.AplicadoPor != decisiones_control.AplicadoPorNadie {
+		t.Fatalf("aplicado_por = %q, want NADIE", got.AplicadoPor)
+	}
+	if got.RazonSkipped == nil || *got.RazonSkipped != "cambio_modo_SUPERVISION_MANUAL" {
+		t.Fatalf("razon_skipped = %v, want cambio_modo_SUPERVISION_MANUAL", got.RazonSkipped)
+	}
+	if got.TempPropuesto != 0 || got.VelPropuesto != 0 {
+		t.Fatalf("setpoints del audit deben ser 0: temp=%v vel=%v", got.TempPropuesto, got.VelPropuesto)
+	}
+}
+
+// TestHandleModeChangeASupervisionArrancaLoop verifica que pasar a SUPERVISION
+// registra un loop nuevo, persiste el modo y audita.
+func TestHandleModeChangeASupervisionArrancaLoop(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+		ProductoID: "prod-1", VentanaEvaluacionSegundos: 600,
+	}
+	repo := &fakeLoteRepoHandler{}
+	dec := &fakeDecisionesRepo{}
+	h, srv, secret := newModeChangeHandler(t, lote, repo, dec)
+
+	status, env := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"SUPERVISION"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !env.Data.Cambiado || env.Data.ModoAnterior != lotesector.ModoManual || env.Data.ModoNuevo != lotesector.ModoSupervision {
+		t.Fatalf("data de cambio incorrecta: %+v", env.Data)
+	}
+	if !env.Data.LoopActivo {
+		t.Fatalf("SUPERVISION debe dejar loop activo")
+	}
+	if _, ok := h.registry.GetLoop("lote-1"); !ok {
+		t.Fatalf("debe quedar un loop registrado")
+	}
+	if repo.updateCalls != 1 || repo.updatedModo != lotesector.ModoSupervision {
+		t.Fatalf("UpdateModo mal llamado: calls=%d modo=%q", repo.updateCalls, repo.updatedModo)
+	}
+	if len(dec.saved) != 1 {
+		t.Fatalf("debe auditar el cambio; saved=%d", len(dec.saved))
+	}
+	if got := dec.saved[0]; got.RazonSkipped == nil || *got.RazonSkipped != "cambio_modo_MANUAL_SUPERVISION" {
+		t.Fatalf("razon_skipped = %v, want cambio_modo_MANUAL_SUPERVISION", got.RazonSkipped)
+	}
+}
+
+// TestHandleModeChangeLoteCerrado409 verifica que un lote no ABIERTO se rechaza
+// sin tocar DB ni auditar.
+func TestHandleModeChangeLoteCerrado409(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoCerrado, Modo: lotesector.ModoSupervision,
+		ProductoID: "prod-1",
+	}
+	repo := &fakeLoteRepoHandler{}
+	dec := &fakeDecisionesRepo{}
+	_, srv, secret := newModeChangeHandler(t, lote, repo, dec)
+
+	status, _ := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"AUTOMATICO"}`)
+	if status != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", status)
+	}
+	if repo.updateCalls != 0 || len(dec.saved) != 0 {
+		t.Fatalf("no debe tocar DB ni auditar con lote cerrado")
+	}
+}
+
+// TestHandleModeChangeRolInsuficiente403 verifica que un Operario no puede
+// cambiar el modo.
+func TestHandleModeChangeRolInsuficiente403(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+		ProductoID: "prod-1",
+	}
+	repo := &fakeLoteRepoHandler{}
+	dec := &fakeDecisionesRepo{}
+	_, srv, secret := newModeChangeHandler(t, lote, repo, dec)
+
+	status, _ := patchModo(t, srv, secret, user.RoleOperario, `{"modo":"AUTOMATICO"}`)
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", status)
+	}
+	if repo.updateCalls != 0 || len(dec.saved) != 0 {
+		t.Fatalf("un rol insuficiente no debe tocar DB ni auditar")
+	}
+}
+
+// TestHandleModeChangeModoInvalido400 verifica que un modo fuera del dominio
+// se rechaza con 400.
+func TestHandleModeChangeModoInvalido400(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+		ProductoID: "prod-1",
+	}
+	repo := &fakeLoteRepoHandler{}
+	dec := &fakeDecisionesRepo{}
+	_, srv, secret := newModeChangeHandler(t, lote, repo, dec)
+
+	status, _ := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"INVALIDO"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	if repo.updateCalls != 0 || len(dec.saved) != 0 {
+		t.Fatalf("modo inválido no debe tocar DB ni auditar")
+	}
+}
+
+// TestHandleModeChangeAuditSaveFallaNoBloquea verifica que un fallo del audit
+// no impide el cambio de modo ni el arranque del loop.
+func TestHandleModeChangeAuditSaveFallaNoBloquea(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+		ProductoID: "prod-1", VentanaEvaluacionSegundos: 600,
+	}
+	repo := &fakeLoteRepoHandler{}
+	dec := &fakeDecisionesRepo{saveErr: errors.New("db down")}
+	h, srv, secret := newModeChangeHandler(t, lote, repo, dec)
+
+	status, env := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"SUPERVISION"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 pese al fallo de audit", status)
+	}
+	if !env.Data.Cambiado || !env.Data.LoopActivo {
+		t.Fatalf("el cambio debe completarse: %+v", env.Data)
+	}
+	if repo.updateCalls != 1 || repo.updatedModo != lotesector.ModoSupervision {
+		t.Fatalf("UpdateModo mal llamado: calls=%d modo=%q", repo.updateCalls, repo.updatedModo)
+	}
+	if _, ok := h.registry.GetLoop("lote-1"); !ok {
+		t.Fatalf("el loop debe arrancar pese al fallo de audit")
+	}
+}
+
+// --- F-B10: E2E del endpoint SSE con un Loop real ---
+
+// TestControlSSEReceivePropuestaEnModoSupervision monta un Loop real en
+// SUPERVISION sobre el broker real, arranca el endpoint SSE y verifica que el
+// cliente recibe al menos un evento `control.propuesta` con payload JSON válido
+// para el lote.
+func TestControlSSEReceivePropuestaEnModoSupervision(t *testing.T) {
+	const loteID = "lote-sse"
+
+	broker := sse.NewBroker()
+	reg := NewLoopRegistry()
+
+	metricas := &fakeMetricasRepo{metricasFn: func() []metricashorno.MetricaHorno {
+		ts := time.Now().UTC().Add(-10 * time.Millisecond)
+		return []metricashorno.MetricaHorno{{
+			ReceivedAt:     ts,
+			TempHorno1:     ptrF64(120),
+			VelocidadCinta: ptrF64(0.2),
+			TempObjetivo:   ptrF64(120),
+			VelObjetivo:    ptrF64(0.2),
+		}}
+	}}
+
+	loop := control.NewLoop(
+		loteID,
+		&fakeLoteLookup{lote: &lotesector.Lote{
+			ID: loteID, Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision,
+		}},
+		metricas,
+		&fakeEventosRepoHandler{},
+		&fakeProductoRepo{prod: &producto.Producto{ID: "prod-1"}},
+		optimizador.NewOptimizer(fakePredictorHandler{out: optimizador.PrediccionSalida{
+			PctCrudos: 10, PctOk: 80, PctQuemados: 10, ModelVersion: "test",
+		}}),
+		&fakeConsignaDispatch{},
+		&fakeDecisionesRepo{},
+		broker,
+	)
+	loop.Configurar(
+		"prod-1", lotesector.ModoSupervision, false, "horno-1", 1, 1,
+		optimizador.Pesos{WC: 1, WQ: 1, WO: 1, DT: 0.05, DC: 0.5},
+		optimizador.Limites{
+			TempMin: 100, TempMax: 300,
+			VelMin: 0.05, VelMax: 0.5,
+			DeltaTemp1: 10, DeltaVel: 0.05,
+			ToleranciaTempC: 2.0,
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	reg.Register(loteID, ctx, cancel)
+	reg.SetLoop(loteID, loop)
+	loop.Start(ctx, cancel)
+	defer reg.StopAll()
+
+	sseH := NewControlSSEHandler(broker)
+	srv := httptest.NewServer(http.HandlerFunc(sseH.HandleControlEvents))
+	defer srv.Close()
+
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer reqCancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, srv.URL+"/api/v1/lotes/"+loteID+"/control/events", nil)
+	if err != nil {
+		t.Fatalf("crear request SSE: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET control/events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	var gotEvent bool
+	var dataLine string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "event: control.propuesta" {
+			gotEvent = true
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLine = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+		if gotEvent && dataLine != "" {
+			break
+		}
+	}
+	if !gotEvent {
+		t.Fatalf("no se recibió 'event: control.propuesta' en el stream SSE")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(dataLine), &payload); err != nil {
+		t.Fatalf("payload SSE no es JSON válido: %v (data=%q)", err, dataLine)
+	}
+	if got, _ := payload["lote_id"].(string); got != loteID {
+		t.Fatalf("lote_id del payload = %q, want %q", got, loteID)
+	}
+	if _, ok := payload["propuesta"]; !ok {
+		t.Fatalf("payload SSE sin 'propuesta': %+v", payload)
 	}
 }
 

@@ -76,6 +76,10 @@ func (f *fakeLoteRepo) CountEventosEnVentana(ctx context.Context, loteID string,
 	return 0, 0, 0, nil
 }
 
+func (f *fakeLoteRepo) UpdateModo(ctx context.Context, loteID, modo string) error {
+	return nil
+}
+
 type fakeSectorRepo struct {
 	deviceInfo    *sector.DeviceInfo
 	deviceErr     error

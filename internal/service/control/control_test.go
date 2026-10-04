@@ -238,11 +238,13 @@ func (f *fakeDecisionesRepo) MarcarAplicada(_ context.Context, id string, t, v f
 // fakeConsignaSrv implementa ConsignaDispatchService y devuelve una consigna
 // de éxito con los setpoints configurados.
 type fakeConsignaSrv struct {
-	cons *consigna.Consigna
-	err  error
+	cons  *consigna.Consigna
+	err   error
+	calls int
 }
 
 func (f *fakeConsignaSrv) Dispatch(_ context.Context, _ consigna.ConsignaManualRequest, _ consigna.Origen, _ *string) (*consigna.Consigna, error) {
+	f.calls++
 	return f.cons, f.err
 }
 
@@ -576,5 +578,141 @@ func TestStartInvocaCancelAlSalirRun(t *testing.T) {
 		// OK: defer cancel() se ejecutó al salir run.
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancel no fue invocado al salir run")
+	}
+}
+
+// --- F-B10: E2E del control loop (multi-tick) ---
+
+// drainBroadcasts cuenta, sin bloquear, los eventos encolados para un
+// subscriber del broker.
+func drainBroadcasts(client *sse.Client) int {
+	n := 0
+	for {
+		select {
+		case <-client.Events:
+			n++
+			continue
+		default:
+		}
+		return n
+	}
+}
+
+// propuestaOK es la salida fija del predictor para los tests multi-tick.
+func propuestaOK() fakePredictorControl {
+	return fakePredictorControl{out: optimizador.PrediccionSalida{
+		PctCrudos: 10, PctOk: 80, PctQuemados: 10, ModelVersion: "test",
+	}}
+}
+
+// TestRunTresTicksModoAutomaticoDespacha corre el loop real en modo AUTOMATICO
+// con ventanas de 1s y verifica que cada tick despacha al PLC, persiste la
+// decisión y NO publica por SSE.
+func TestRunTresTicksModoAutomaticoDespacha(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	loop := newSupervisionLoop(now, repo, broker, propuestaOK())
+	loop.modo = lote_sector.ModoAutomatico
+	loop.ventanaEvalSeg = 1
+	loop.ventanaActSeg = 1
+	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
+	loop.consigna = cons
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loop.Start(ctx, cancel)
+
+	time.Sleep(3500 * time.Millisecond)
+	cancel()
+	time.Sleep(150 * time.Millisecond) // deja terminar el tick en vuelo
+
+	if cons.calls < 3 {
+		t.Fatalf("dispatchCalls = %d, want >= 3", cons.calls)
+	}
+	if repo.saveCalled < 3 {
+		t.Fatalf("saveCalls = %d, want >= 3", repo.saveCalled)
+	}
+	if got := drainBroadcasts(client); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 (AUTOMATICO no publica SSE)", got)
+	}
+	if loop.propuestaPendiente != nil {
+		t.Fatalf("AUTOMATICO no debe dejar propuesta pendiente")
+	}
+}
+
+// TestRunModoManualNoTicKea verifica que un loop arrancado en modo MANUAL sale
+// sin ejecutar ningún tick (ni dispatch ni persistencia).
+func TestRunModoManualNoTicKea(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	loop := newSupervisionLoop(now, repo, broker, propuestaOK())
+	loop.modo = lote_sector.ModoManual
+	loop.ventanaEvalSeg = 1
+	loop.ventanaActSeg = 1
+	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
+	loop.consigna = cons
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loop.Start(ctx, cancel)
+
+	time.Sleep(1500 * time.Millisecond)
+	cancel()
+	time.Sleep(150 * time.Millisecond)
+
+	if cons.calls != 0 {
+		t.Fatalf("dispatchCalls = %d, want 0 en MANUAL", cons.calls)
+	}
+	if repo.saveCalled != 0 {
+		t.Fatalf("saveCalls = %d, want 0 en MANUAL", repo.saveCalled)
+	}
+	if got := drainBroadcasts(client); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 en MANUAL", got)
+	}
+}
+
+// TestRunTresTicksModoSupervisionPublicaPropuesta corre el loop real en modo
+// SUPERVISION y verifica que NO despacha pero publica propuesta por SSE y deja
+// el snapshot en memoria.
+func TestRunTresTicksModoSupervisionPublicaPropuesta(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	loop := newSupervisionLoop(now, repo, broker, propuestaOK())
+	loop.ventanaEvalSeg = 1
+	loop.ventanaActSeg = 1
+	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
+	loop.consigna = cons
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loop.Start(ctx, cancel)
+
+	time.Sleep(3500 * time.Millisecond)
+	cancel()
+	time.Sleep(150 * time.Millisecond)
+
+	if cons.calls != 0 {
+		t.Fatalf("dispatchCalls = %d, want 0 (SUPERVISION no despacha)", cons.calls)
+	}
+	if repo.saveCalled < 3 {
+		t.Fatalf("saveCalls = %d, want >= 3", repo.saveCalled)
+	}
+	if got := drainBroadcasts(client); got < 3 {
+		t.Fatalf("broadcasts = %d, want >= 3", got)
+	}
+	if loop.propuestaPendiente == nil {
+		t.Fatalf("SUPERVISION debe dejar propuesta pendiente en memoria")
 	}
 }

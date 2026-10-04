@@ -1,11 +1,12 @@
 // Package controller expone los endpoints HTTP del control automático /
 // supervisión del MPC (SCA-400):
 //
-//	POST /api/v1/lotes/{id}/control/start          (Supervisor/Admin)
-//	POST /api/v1/lotes/{id}/control/stop           (Supervisor/Admin)
-//	GET  /api/v1/lotes/{id}/consigna-propuesta      (Bearer dispositivo o JWT)
-//	POST /api/v1/lotes/{id}/aplicar-consigna        (Operario mínimo)
-//	GET  /api/v1/lotes/{id}/decisiones              (JWT cookie)
+//	POST  /api/v1/lotes/{id}/control/start         (Supervisor/Admin)
+//	POST  /api/v1/lotes/{id}/control/stop          (Supervisor/Admin)
+//	PATCH /api/v1/lotes/{id}/modo                  (Supervisor/Admin)
+//	GET   /api/v1/lotes/{id}/consigna-propuesta     (Bearer dispositivo o JWT)
+//	POST  /api/v1/lotes/{id}/aplicar-consigna       (Operario mínimo)
+//	GET   /api/v1/lotes/{id}/decisiones             (JWT cookie)
 //
 // El start/stop manipula el Loop del lote en memoria (Registry). El
 // consigna-propuesta lo lee el ControlService de la Pi ENTRADA (que ya
@@ -18,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -42,6 +44,9 @@ type ControlHandler struct {
 	registry       *LoopRegistry
 	decisionesRepo decisiones_control.Repository
 	loteLookup     LoteLookupService
+	// deps conserva el set completo de dependencias para los handlers que no
+	// reciben deps por parámetro (p.ej. HandleModeChange, que arranca un Loop).
+	deps ControlDeps
 }
 
 // LoopRegistry es el mapa en memoria de Loop por lote activo. El Loop se
@@ -88,6 +93,8 @@ type ControlDeps struct {
 	EventosRepo    EventosRepo
 	DecisionesRepo decisiones_control.Repository
 	Broker         *sse.Broker
+	// LoteRepo persiste cambios de estado/modo del lote (PATCH /lotes/{id}/modo).
+	LoteRepo lotesector.Repository
 }
 
 // ProductoRepo es el mínimo del repo de productos para el handler.
@@ -118,6 +125,7 @@ func NewControlHandler(deps ControlDeps) *ControlHandler {
 		{"EventosRepo", deps.EventosRepo == nil},
 		{"DecisionesRepo", deps.DecisionesRepo == nil},
 		{"Broker", deps.Broker == nil},
+		{"LoteRepo", deps.LoteRepo == nil},
 	}
 	for _, r := range required {
 		if r.isNil {
@@ -128,6 +136,7 @@ func NewControlHandler(deps ControlDeps) *ControlHandler {
 		registry:       deps.LoopCancels,
 		decisionesRepo: deps.DecisionesRepo,
 		loteLookup:     deps.LoteLookup,
+		deps:           deps,
 	}
 }
 
@@ -162,39 +171,10 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 			response.Error(w, http.StatusConflict, "El lote está en modo MANUAL", nil)
 			return
 		}
-		prod, err := deps.ProductoRepo.GetByID(r.Context(), lote.ProductoID)
-		if err != nil {
+		if err := h.startLoopForLote(r.Context(), deps, lote); err != nil {
 			response.Error(w, http.StatusUnprocessableEntity, "Producto desconocido", nil)
 			return
 		}
-		pesos := optimizador.PesosDesdeLote(lote.PesosObjetivo)
-		limites := optimizador.LimitesDe(prod, lote)
-		hornoID := os.Getenv("MPC_HORNO_ID")
-		if hornoID == "" {
-			hornoID = "horno-1"
-		}
-		// El loop debe sobrevivir al cierre de la request HTTP: si se atara a
-		// r.Context(), el servidor lo cancelaría al responder 200 y mataría el
-		// control. Se desacopla con un contexto raíz propio.
-		ctx, cancel := context.WithCancel(context.Background())
-		loop := control.NewLoop(
-			lote.ID, deps.LoteLookup,
-			deps.MetricasRepo,
-			deps.EventosRepo,
-			deps.ProductoRepo,
-			deps.Optimizer,
-			deps.Consigna,
-			deps.DecisionesRepo,
-			deps.Broker,
-		)
-		loop.Configurar(
-			prod.ID, lote.Modo, lote.Horno2Habilitado, hornoID,
-			lote.VentanaEvaluacionSegundos, lote.VentanaActualizacionSegundos,
-			pesos, limites,
-		)
-		h.registry.Register(lote.ID, ctx, cancel)
-		h.registry.SetLoop(lote.ID, loop)
-		loop.Start(ctx, cancel)
 		response.OK(w, "Control iniciado", map[string]interface{}{
 			"lote_id":                        lote.ID,
 			"modo":                           lote.Modo,
@@ -202,6 +182,44 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 			"ventana_actualizacion_segundos": lote.VentanaActualizacionSegundos,
 		})
 	}
+}
+
+// startLoopForLote arranca un Loop de control para el lote con la configuración
+// vigente (ventanas, pesos, horno 2, modo). El registro cancela cualquier loop
+// previo del mismo lote. El contexto del loop es propio (no el de la request):
+// si se atara a r.Context(), el servidor lo cancelaría al responder y mataría
+// el control (regresión F-B2). Devuelve error si el producto del lote no existe.
+func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps, lote *lotesector.Lote) error {
+	prod, err := deps.ProductoRepo.GetByID(ctx, lote.ProductoID)
+	if err != nil {
+		return err
+	}
+	hornoID := os.Getenv("MPC_HORNO_ID")
+	if hornoID == "" {
+		hornoID = "horno-1"
+	}
+	pesos := optimizador.PesosDesdeLote(lote.PesosObjetivo)
+	limites := optimizador.LimitesDe(prod, lote)
+	loopCtx, cancel := context.WithCancel(context.Background())
+	loop := control.NewLoop(
+		lote.ID, deps.LoteLookup,
+		deps.MetricasRepo,
+		deps.EventosRepo,
+		deps.ProductoRepo,
+		deps.Optimizer,
+		deps.Consigna,
+		deps.DecisionesRepo,
+		deps.Broker,
+	)
+	loop.Configurar(
+		prod.ID, lote.Modo, lote.Horno2Habilitado, hornoID,
+		lote.VentanaEvaluacionSegundos, lote.VentanaActualizacionSegundos,
+		pesos, limites,
+	)
+	deps.LoopCancels.Register(lote.ID, loopCtx, cancel)
+	deps.LoopCancels.SetLoop(lote.ID, loop)
+	loop.Start(loopCtx, cancel)
+	return nil
 }
 
 // HandleControlStop maneja POST /api/v1/lotes/{id}/control/stop.
@@ -222,14 +240,138 @@ func (h *ControlHandler) HandleControlStop() http.HandlerFunc {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
 		}
-		cancel, ok := h.registry.Get(loteID)
-		if !ok {
+		if !h.registry.StopLoop(loteID) {
 			response.OK(w, "Sin loop activo", map[string]interface{}{"lote_id": loteID, "stopped": false, "motivo": "no_loop_activo"})
 			return
 		}
-		cancel()
-		h.registry.Unregister(loteID)
 		response.OK(w, "Control detenido", map[string]interface{}{"lote_id": loteID, "stopped": true})
+	}
+}
+
+// modoRequest es el body de PATCH /api/v1/lotes/{id}/modo.
+type modoRequest struct {
+	Modo string `json:"modo"`
+}
+
+// modoCambioData es el payload de respuesta del cambio de modo. En el no-op
+// viaja `modo`; en el cambio real, `modo_anterior`/`modo_nuevo`/`loop_activo`.
+type modoCambioData struct {
+	LoteID       string `json:"lote_id"`
+	Modo         string `json:"modo,omitempty"`
+	ModoAnterior string `json:"modo_anterior,omitempty"`
+	ModoNuevo    string `json:"modo_nuevo,omitempty"`
+	Cambiado     bool   `json:"cambiado"`
+	LoopActivo   bool   `json:"loop_activo"`
+}
+
+// HandleModeChange maneja PATCH /api/v1/lotes/{id}/modo. Cambia el modo de
+// operación de un lote ABIERTO (MANUAL/SUPERVISION/AUTOMATICO): cancela el loop
+// vigente, persiste el modo, re-arranca el loop si corresponde y deja traza en
+// decisiones_control. Sólo Supervisor/Administrador.
+func (h *ControlHandler) HandleModeChange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+	if !helpers.RolValido(r, user.RoleSupervisor, user.RoleAdmin) {
+		response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
+		return
+	}
+	loteID, err := helpers.ExtractLoteID(r.URL.Path, "/modo")
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	var body modoRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.Error(w, http.StatusBadRequest, "Body inválido", nil)
+		return
+	}
+	nuevo, err := lotesector.ParseModo(body.Modo)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Modo inválido", nil)
+		return
+	}
+	lote, err := h.loteLookup.GetByID(r.Context(), loteID)
+	if err != nil || lote == nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	if lote.Estado != lotesector.EstadoAbierto {
+		response.Error(w, http.StatusConflict, "Lote no está abierto", nil)
+		return
+	}
+	anterior := lote.Modo
+	if anterior == nuevo {
+		response.OK(w, "Modo sin cambios", modoCambioData{
+			LoteID:   loteID,
+			Modo:     nuevo,
+			Cambiado: false,
+		})
+		return
+	}
+	// Validar el producto antes de tocar la DB sólo cuando el modo nuevo
+	// requiere loop (SUPERVISION/AUTOMATICO). Un producto inexistente se
+	// rechaza sin cambiar el modo, igual que HandleControlStart.
+	if nuevo != lotesector.ModoManual {
+		if _, perr := h.deps.ProductoRepo.GetByID(r.Context(), lote.ProductoID); perr != nil {
+			response.Error(w, http.StatusUnprocessableEntity, "Producto desconocido", nil)
+			return
+		}
+	}
+	// Persistir primero: si falla, no tocamos el loop en memoria.
+	if err := h.deps.LoteRepo.UpdateModo(r.Context(), loteID, nuevo); err != nil {
+		if errors.Is(err, lotesector.ErrNotFound) {
+			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
+		return
+	}
+	lote.Modo = nuevo
+	// Cancelar el loop viejo si existe, en todos los casos: MANUAL no levanta
+	// loop nuevo y SUPERVISION/AUTOMATICO lo levantan a continuación.
+	h.registry.StopLoop(loteID)
+	// Auditoría secundaria: un fallo de Save no bloquea el cambio de modo.
+	h.auditarCambioModo(r.Context(), lote, anterior, nuevo)
+	loopActivo := false
+	if nuevo != lotesector.ModoManual {
+		if err := h.startLoopForLote(r.Context(), h.deps, lote); err != nil {
+			log.Printf("[control] arrancando loop tras cambio de modo lote %s: %v", loteID, err)
+		} else {
+			loopActivo = true
+		}
+	}
+	response.OK(w, "Modo actualizado", modoCambioData{
+		LoteID:       loteID,
+		ModoAnterior: anterior,
+		ModoNuevo:    nuevo,
+		Cambiado:     true,
+		LoopActivo:   loopActivo,
+	})
+}
+
+// auditarCambioModo inserta una fila de auditoría en decisiones_control para el
+// cambio de modo. Si el Save falla, sólo se loggea: el cambio de modo es lo
+// importante y el audit es secundario.
+func (h *ControlHandler) auditarCambioModo(ctx context.Context, lote *lotesector.Lote, anterior, nuevo string) {
+	skipped := fmt.Sprintf("cambio_modo_%s_%s", anterior, nuevo)
+	cero := 0.0
+	now := time.Now().UTC()
+	decision := &decisiones_control.DecisionControl{
+		LoteID:        lote.ID,
+		VentanaInicio: now.Add(-time.Duration(lote.VentanaEvaluacionSegundos) * time.Second),
+		VentanaFin:    now,
+		TempActual:    0,
+		VelActual:     &cero,
+		TempPropuesto: 0,
+		VelPropuesto:  0,
+		Prediccion:    []byte("{}"),
+		AplicadoPor:   decisiones_control.AplicadoPorNadie,
+		RazonSkipped:  &skipped,
+	}
+	if err := h.decisionesRepo.Save(ctx, decision); err != nil {
+		log.Printf("[control] audit cambio de modo lote %s (%s→%s): %v", lote.ID, anterior, nuevo, err)
 	}
 }
 
@@ -481,6 +623,27 @@ func (r *LoopRegistry) StopAll() {
 			c()
 		}()
 	}
+}
+
+// StopLoop cancela el loop del lote si existe y limpia su entrada de la
+// registry. Devuelve true si había un loop activo. El cancel se invoca fuera
+// del lock para no bloquear al watcher que reacciona a ctx.Done().
+func (r *LoopRegistry) StopLoop(loteID string) bool {
+	r.mu.Lock()
+	cancel, ok := r.byCancel[loteID]
+	if ok {
+		delete(r.byCancel, loteID)
+		delete(r.loops, loteID)
+	}
+	r.mu.Unlock()
+	if !ok {
+		return false
+	}
+	func() {
+		defer func() { _ = recover() }()
+		cancel()
+	}()
+	return true
 }
 
 // Get devuelve el cancel del loop (para stop explícito).

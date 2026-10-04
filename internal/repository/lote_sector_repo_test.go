@@ -80,6 +80,26 @@ func TestBuildConteosLote(t *testing.T) {
 	require.Equal(t, 0, empty.Total)
 }
 
+// TestLoteSectorRepository_UpdateModo verifica que UpdateModo persista el modo
+// y devuelva ErrNotFound tanto para un id inexistente como para un no-UUID.
+func TestLoteSectorRepository_UpdateModo(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := setupLoteSectorRepo(t)
+	lote := abrirLote(t, ctx, repo)
+
+	require.NoError(t, repo.UpdateModo(ctx, lote.ID, lotesector.ModoAutomatico))
+	got, err := repo.GetByID(ctx, lote.ID)
+	require.NoError(t, err)
+	require.Equal(t, lotesector.ModoAutomatico, got.Modo)
+
+	require.ErrorIs(t,
+		repo.UpdateModo(ctx, "00000000-0000-0000-0000-000000000000", lotesector.ModoManual),
+		lotesector.ErrNotFound)
+	require.ErrorIs(t,
+		repo.UpdateModo(ctx, "no-es-uuid", lotesector.ModoManual),
+		lotesector.ErrNotFound)
+}
+
 // TestLoteSectorRepository_AbrirConcurrente verifica que dos aperturas
 // concurrentes del mismo sector resuelvan un único lote ABIERTO.
 func TestLoteSectorRepository_AbrirConcurrente(t *testing.T) {

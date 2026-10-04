@@ -63,14 +63,14 @@ const loteSectorSelect = `
 // InactividadSegundos queda en 0: lo calcula el service con el reloj del server.
 func scanLoteSector(row pgx.Row) (*lotesector.Lote, error) {
 	var (
-		l           lotesector.Lote
-		sectorID    *string
-		abiertoPor  *string
-		tipo        *string
-		ok          *int
-		crudo       *int
-		quemado     *int
-		pesosJSON   []byte
+		l          lotesector.Lote
+		sectorID   *string
+		abiertoPor *string
+		tipo       *string
+		ok         *int
+		crudo      *int
+		quemado    *int
+		pesosJSON  []byte
 	)
 	if err := row.Scan(
 		&l.ID, &sectorID, &l.Estado, &l.Turno, &l.ProductoID, &l.ProductoNombre,
@@ -144,6 +144,27 @@ func (r *LoteSectorPostgresRepository) GetByID(ctx context.Context, loteID strin
 		return nil, fmt.Errorf("get lote by id: %w", err)
 	}
 	return l, nil
+}
+
+// updateModoSQL persiste el modo vigente del lote. El caller ya validó el modo
+// y la transición.
+const updateModoSQL = `UPDATE lotes_productivos SET modo = $2 WHERE id = $1`
+
+// UpdateModo persiste el modo vigente del lote. No valida transiciones — el
+// caller lo hace. Devuelve ErrNotFound si el lote no existe (o el id no es un
+// UUID válido).
+func (r *LoteSectorPostgresRepository) UpdateModo(ctx context.Context, loteID, modo string) error {
+	tag, err := r.db.Exec(ctx, updateModoSQL, loteID, modo)
+	if err != nil {
+		if isInvalidTextRepresentation(err) {
+			return lotesector.ErrNotFound
+		}
+		return fmt.Errorf("update lote modo: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return lotesector.ErrNotFound
+	}
+	return nil
 }
 
 // Abrir es get-or-create por sector. Toma un advisory lock transaccional por

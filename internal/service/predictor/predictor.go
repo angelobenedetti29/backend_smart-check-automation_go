@@ -4,6 +4,12 @@
 // El sidecar puede estar caído (por ejemplo durante un deploy). En ese caso
 // el optimizador recibe error y la decisión se marca como "skipped" en
 // decisiones_control.razon_skipped para no proponer cambios sin base.
+//
+// Auth opcional (F-B7): el sidecar puede correr detrás de un proxy que exija
+// Authorization. Si se construye con NewClientePredictorWithAuth (main.go lo
+// hace cuando PREDICTOR_AUTH_TOKEN está seteado), se envía
+// "Authorization: Bearer <token>" en /predict y /health. Sin token no se envía
+// header, así que los setups sin auth siguen funcionando.
 package predictor
 
 import (
@@ -20,17 +26,37 @@ import (
 
 // ClientePredictor satisface optimizador.Predictor hablando HTTP al sidecar.
 type ClientePredictor struct {
-	baseURL string
-	http    *http.Client
+	baseURL   string
+	authToken string // vacío = sin Authorization
+	http      *http.Client
 }
 
-// NewClientePredictor construye un cliente con timeout acotado.
+// NewClientePredictor construye un cliente con timeout acotado y sin auth.
 func NewClientePredictor(baseURL string) *ClientePredictor {
+	return newClientePredictor(baseURL, "")
+}
+
+// NewClientePredictorWithAuth construye un cliente que envía
+// "Authorization: Bearer <authToken>" en cada request. Con authToken vacío se
+// comporta como NewClientePredictor.
+func NewClientePredictorWithAuth(baseURL, authToken string) *ClientePredictor {
+	return newClientePredictor(baseURL, authToken)
+}
+
+func newClientePredictor(baseURL, authToken string) *ClientePredictor {
 	return &ClientePredictor{
-		baseURL: baseURL,
+		baseURL:   baseURL,
+		authToken: authToken,
 		http: &http.Client{
 			Timeout: 2 * time.Second,
 		},
+	}
+}
+
+// setAuth agrega el header Bearer cuando hay token configurado.
+func (c *ClientePredictor) setAuth(req *http.Request) {
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 }
 
@@ -55,6 +81,7 @@ func (c *ClientePredictor) Predict(ctx context.Context, in optimizador.EntradasP
 		return optimizador.PrediccionSalida{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -83,6 +110,7 @@ func (c *ClientePredictor) Health(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
+	c.setAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return false

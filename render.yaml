@@ -21,6 +21,14 @@ services:
       - key: FRONTEND_ORIGINS
         # Orígenes explícitos del panel (CORS), separados por coma.
         sync: false
+      - key: PREDICTOR_URL
+        sync: false
+      - key: PREDICTOR_AUTH_TOKEN
+        sync: false
+      - key: OVEN_DRIVER
+        sync: false
+      - key: OVEN_MODBUS_ADDRESS
+        sync: false
       - key: PORT
         value: "8080"
 
@@ -42,6 +50,14 @@ services:
         sync: false
       - key: FRONTEND_ORIGINS
         # Orígenes explícitos del panel (CORS), separados por coma.
+        sync: false
+      - key: PREDICTOR_URL
+        sync: false
+      - key: PREDICTOR_AUTH_TOKEN
+        sync: false
+      - key: OVEN_DRIVER
+        sync: false
+      - key: OVEN_MODBUS_ADDRESS
         sync: false
       - key: PORT
         value: "8080"

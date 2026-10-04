@@ -16,10 +16,11 @@ import (
 )
 
 // OvenController abstrae el cliente que despacha setpoints al controlador
-// físico del horno. *oven_controller.OvenControllerClient (simulado) la
-// satisface hoy; el día que exista un driver real (Modbus/MQTT/API local)
-// basta con inyectar una implementación distinta con la misma firma — y
-// permite inyectar dobles de prueba deterministas en los tests.
+// físico del horno. *oven_controller.SimulatedOvenController y
+// *oven_controller.ModbusOvenController la satisfacen hoy; el día que aparezca
+// otro driver (MQTT/API local) basta con inyectar una implementación distinta
+// con la misma firma — y permite inyectar dobles de prueba deterministas en los
+// tests.
 type OvenController interface {
 	SendSetpoint(hornoID string, temperatura, velocidad float64) oven_controller.DispatchResult
 }

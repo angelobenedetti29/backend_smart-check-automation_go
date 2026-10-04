@@ -129,7 +129,7 @@ func (f *fakeConsignaRepo) count() int {
 func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *database.PostgresRepository, *fakeConsignaRepo) {
 	hornoRepo := database.NewPostgresRepository()
 	consignaRepo := &fakeConsignaRepo{}
-	ctrl := oven_controller.NewOvenControllerClient("http://localhost:8600/plc/horno")
+	ctrl := oven_controller.NewSimulatedOvenController("http://localhost:8600/plc/horno")
 	broker := sse.NewBroker()
 	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
 	return svc, hornoRepo, consignaRepo

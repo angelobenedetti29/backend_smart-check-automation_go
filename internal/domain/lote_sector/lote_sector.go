@@ -289,4 +289,7 @@ type Repository interface {
 	// no hay eventos en la ventana (se persiste z_observado=NULL en ese
 	// caso para no contaminar el audit con una Z falsa).
 	CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (ok, crudo, quemado int, err error)
+	// UpdateModo persiste el modo vigente del lote. No valida transiciones — el
+	// caller lo hace. Devuelve ErrNotFound si el lote no existe.
+	UpdateModo(ctx context.Context, loteID, modo string) error
 }

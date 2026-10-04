@@ -6,15 +6,8 @@ import (
 	"time"
 )
 
-// OvenControllerClient simulates a client interface for the oven's physical
-// controller (PLC/microcontroller). In a full implementation, this would send
-// the setpoint to the real hardware via Modbus/MQTT/HTTP.
-type OvenControllerClient struct {
-	endpoint string
-}
-
-// DispatchResult holds the simulated outcome of applying a setpoint on the
-// physical oven controller.
+// DispatchResult holds the outcome of applying a setpoint on the physical oven
+// controller (or its simulated stand-in).
 type DispatchResult struct {
 	Aplicada        bool    `json:"aplicada"`
 	TemperaturaReal float64 `json:"temperatura_real"`
@@ -23,16 +16,24 @@ type DispatchResult struct {
 	Motivo          string  `json:"motivo,omitempty"`
 }
 
-// NewOvenControllerClient initializes a new OvenControllerClient.
-func NewOvenControllerClient(endpoint string) *OvenControllerClient {
-	return &OvenControllerClient{
+// SimulatedOvenController implementa la firma de despacho de setpoints contra
+// un controlador simulado (sleep + 5% de fallo aleatorio). Es la implementación
+// para dev/CI/tests; el driver real es `ModbusOvenController`. El endpoint se
+// recibe por parámetro (no lee variables de entorno).
+type SimulatedOvenController struct {
+	endpoint string
+}
+
+// NewSimulatedOvenController inicializa un SimulatedOvenController.
+func NewSimulatedOvenController(endpoint string) *SimulatedOvenController {
+	return &SimulatedOvenController{
 		endpoint: endpoint,
 	}
 }
 
-// SendSetpoint simulates dispatching a temperature/conveyor-speed setpoint to
-// the physical oven controller.
-func (c *OvenControllerClient) SendSetpoint(hornoID string, temperatura, velocidadCinta float64) DispatchResult {
+// SendSetpoint simula el despacho de una consigna (temperatura/velocidad) al
+// controlador físico del horno.
+func (c *SimulatedOvenController) SendSetpoint(hornoID string, temperatura, velocidadCinta float64) DispatchResult {
 	log.Printf("[OvenController] Despachando consigna a horno=%s temp=%.2f velocidad=%.2f (endpoint=%s)", hornoID, temperatura, velocidadCinta, c.endpoint)
 
 	// Simulate physical controller round-trip latency (30-60ms)

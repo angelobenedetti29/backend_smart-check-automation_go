@@ -18,14 +18,14 @@ import (
 	schema "github.com/angelobenedetti29/smart-check-automation/database"
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	consignaController "github.com/angelobenedetti29/smart-check-automation/internal/controller/consigna"
+	controlController "github.com/angelobenedetti29/smart-check-automation/internal/controller/control"
+	decisionesController "github.com/angelobenedetti29/smart-check-automation/internal/controller/decisiones_control"
 	deviceTokenController "github.com/angelobenedetti29/smart-check-automation/internal/controller/devicetoken"
 	dispositivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/dualauth"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
 	metricashornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/metricashorno"
-	controlController "github.com/angelobenedetti29/smart-check-automation/internal/controller/control"
-	decisionesController "github.com/angelobenedetti29/smart-check-automation/internal/controller/decisiones_control"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
 	registroController "github.com/angelobenedetti29/smart-check-automation/internal/controller/registro"
 	sectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sector"
@@ -95,7 +95,19 @@ func main() {
 	// 2. Instantiate Infrastructure Adapters (Providers Layer)
 	dbRepo := database.NewPostgresRepository()
 	yolo := yolo_client.NewYOLOClient("http://localhost:8500/yolo/conveyor")
-	ovenController := oven_controller.NewOvenControllerClient("http://localhost:8600/plc/horno")
+	// Driver del controlador físico del horno: simulated (default) o modbus,
+	// seleccionado por OVEN_DRIVER. El Modbus exige Connect exitoso al arrancar.
+	ovenController, ovenCloser, err := oven_controller.NewOvenControllerFromEnv()
+	if err != nil {
+		log.Fatalf("[ovenController] %v", err)
+	}
+	if ovenCloser != nil {
+		defer func() {
+			if cerr := ovenCloser.Close(); cerr != nil {
+				log.Printf("[ovenController] cerrando driver: %v", cerr)
+			}
+		}()
+	}
 
 	// Real PostgreSQL repositories
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
@@ -171,14 +183,21 @@ func main() {
 	metricasHornoHandler := metricashornoController.NewMetricasHornoHandler(metricasHornoRepo, loteSectorSvc)
 	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
 
-	// Sidecar predictor XGBoost (SCA-400). Si no está, el optimizador entra
-	// en modo degradado (devuelve placeholder en el predictor → decisión
-	// skipped en el audit del MPC).
+	// Sidecar predictor XGBoost (SCA-400). PREDICTOR_URL default localhost:8090;
+	// PREDICTOR_AUTH_TOKEN (opcional, F-B7) agrega Authorization Bearer en
+	// /predict y /health. Si el sidecar no responde, el optimizador entra en
+	// modo degradado (error → decisión skipped en el audit del MPC).
 	predictorURL := os.Getenv("PREDICTOR_URL")
 	if predictorURL == "" {
 		predictorURL = "http://localhost:8090"
 	}
-	predictorCliente := predictor.NewClientePredictor(predictorURL)
+	predictorToken := os.Getenv("PREDICTOR_AUTH_TOKEN")
+	var predictorCliente optimizador.Predictor
+	if predictorToken != "" {
+		predictorCliente = predictor.NewClientePredictorWithAuth(predictorURL, predictorToken)
+	} else {
+		predictorCliente = predictor.NewClientePredictor(predictorURL)
+	}
 	optimizer := optimizador.NewOptimizer(predictorCliente)
 
 	// Registry de loops activos por lote y handlers de control.
@@ -193,6 +212,7 @@ func main() {
 		EventosRepo:    loteSectorRepo,
 		DecisionesRepo: decisionesRepo,
 		Broker:         controlSSEBroker,
+		LoteRepo:       loteSectorRepo,
 	}
 	controlHandler := controlController.NewControlHandler(controlDeps)
 	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
@@ -266,6 +286,8 @@ func main() {
 			jwtWrap(controlHandler.HandleControlStart(controlDeps))(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
 			jwtWrap(controlHandler.HandleControlStop())(w, r)
+		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/modo"):
+			jwtWrap(controlHandler.HandleModeChange)(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/consigna-propuesta"):
 			jwtWrap(controlHandler.HandleConsignaPropuesta)(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/events"):
