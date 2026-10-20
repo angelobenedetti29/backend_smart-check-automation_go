@@ -8,7 +8,6 @@ package decisiones_control
 
 import (
 	"context"
-	"errors"
 	"time"
 )
 
@@ -61,9 +60,6 @@ type DecisionControl struct {
 	DecisionOrigenID *string          `json:"decision_origen_id,omitempty"`
 	CreatedAt      time.Time          `json:"created_at"`
 }
-
-// ErrNoHayDecision indica que se intentó cargar una decisión que no existe.
-var ErrNoHayDecision = errors.New("decisiones_control: la decisión no existe")
 
 // Repository define el contrato de persistencia del audit del MPC.
 type Repository interface {

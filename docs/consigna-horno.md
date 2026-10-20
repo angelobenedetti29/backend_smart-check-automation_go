@@ -62,7 +62,7 @@ productos                     oven_controller              horno.Repository
 | Capa | Archivo | Qué hace |
 |---|---|---|
 | Dominio | `internal/domain/consigna/consigna.go` | `Consigna` (registro de auditoría), `ConsignaManualRequest` + `Validate()`, sentinels de error, interfaces `Repository`/`Service` |
-| Provider | `internal/provider/oven_controller/client.go` | Cliente simulado del controlador físico (análogo a `yolo_client`): ~40ms de latencia, ~5% de fallo aleatorio |
+| Provider | `internal/provider/oven_controller/client.go` | Cliente simulado del controlador físico: ~40ms de latencia, ~5% de fallo aleatorio |
 | Service | `internal/service/consigna/consigna_service.go` | `dispatch()` centraliza: buscar horno → despachar → actualizar estado → auditar → broadcast SSE. `DispatchAutomatico` y `DispatchManual` son las dos entradas |
 | Repository | `internal/repository/consigna_repo.go` | Persiste el historial en PostgreSQL real (`historial_consignas`) |
 | Controller (SCA-142) | `internal/controller/lote/lote_handler.go` (archivo eliminado — ver banner) | `POST /api/v1/lotes/inicio` (ya no dispara consigna) |
@@ -122,7 +122,7 @@ Fallo de enlace (Aplicada: false)
 - **El setpoint automático es un valor puntual explícito**, no el punto medio del rango. Si `temp_setpoint`/`velocidad_cinta_setpoint` no están cargados para un producto, `DispatchAutomatico` devuelve error — no se infiere nada.
 - **`POST /api/v1/lotes/inicio` ≠ `POST /api/v1/lotes`**: el segundo sigue siendo un resumen que llega con el lote ya terminado (`inicioAt` y `finAt` juntos). El primero es el trigger real de "la IA identificó el producto", antes de que exista una fila en `lotes_productivos` — por eso genera un UUID de correlación propio (`crypto/rand`, sin dependencia nueva) en vez de esperar un ID real.
 - **`historial_consignas.lote_id` no tiene FK** a propósito: en el despacho automático el lote todavía no está persistido en ese momento. `producto_id` sí tiene FK real.
-- **El controlador físico es 100% simulado**, mismo patrón que `yolo_client`: no hay red, PLC ni hardware de por medio. El día que exista hardware real, se reemplaza `OvenControllerClient.SendSetpoint(...)` por un cliente real con la misma firma — nada más en el flujo cambia.
+- **El controlador físico es 100% simulado**: no hay red, PLC ni hardware de por medio. El día que exista hardware real, se reemplaza `OvenControllerClient.SendSetpoint(...)` por un cliente real con la misma firma — nada más en el flujo cambia.
 - **`ConsignaManualRequest.ProductoID` es obligatorio** en el envío manual: siempre se valida contra el rango real cargado en el producto unificado (`productos.temp_min`/`temp_max`, `velocidad_cinta_min`/`max`), para no tener una segunda fuente de verdad de "qué es seguro" (límites hardcodeados).
 - **`ConsignaManualRequest.LoteID` es opcional**: si el panel conoce el `loteId` del lote en curso (por ejemplo, el que devolvió `POST /api/v1/lotes/inicio`), puede mandarlo en el request manual para que ese ajuste quede correlacionado en el mismo historial de auditoría del lote. Si se omite, la consigna manual queda auditada igual, solo que sin lote asociado.
 - **Auditoría incluso en fallos**: si el controlador simulado rechaza la consigna (~5% de las veces), igual se guarda la fila en `historial_consignas` con `exitosa=false` y `motivo_error`.

@@ -8,15 +8,13 @@ import (
 	"testing"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 )
 
 func TestHornoHandler_GetHornoStatus(t *testing.T) {
 	// Initialize core database providers and service layers
 	dbRepo := database.NewPostgresRepository()
-	yolo := yolo_client.NewYOLOClient("http://localhost:8500")
-	svc := service.NewHornoService(dbRepo, dbRepo, yolo)
+	svc := service.NewHornoService(dbRepo, dbRepo)
 	handler := NewHornoHandler(svc, dbRepo)
 
 	// Create simulated GET request
@@ -52,8 +50,7 @@ func TestHornoHandler_GetHornoStatus(t *testing.T) {
 
 func TestHornoHandler_UpdateTemperature(t *testing.T) {
 	dbRepo := database.NewPostgresRepository()
-	yolo := yolo_client.NewYOLOClient("http://localhost:8500")
-	svc := service.NewHornoService(dbRepo, dbRepo, yolo)
+	svc := service.NewHornoService(dbRepo, dbRepo)
 	handler := NewHornoHandler(svc, dbRepo)
 
 	// Valid input JSON body

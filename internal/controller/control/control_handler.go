@@ -7,6 +7,8 @@
 //	GET   /api/v1/lotes/{id}/consigna-propuesta     (Bearer dispositivo o JWT)
 //	POST  /api/v1/lotes/{id}/aplicar-consigna       (Operario mínimo)
 //	GET   /api/v1/lotes/{id}/decisiones             (JWT cookie)
+//	GET   /api/v1/lotes/{id}/control/estado         (JWT cookie)
+//	GET   /api/v1/lotes/{id}/confianza-clases       (JWT cookie)
 //
 // El start/stop manipula el Loop del lote en memoria (Registry). El
 // consigna-propuesta lo lee el ControlService de la Pi ENTRADA (que ya
@@ -22,11 +24,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/helpers"
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
@@ -34,6 +38,7 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/control"
+	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
@@ -59,13 +64,16 @@ type LoopRegistry struct {
 	// gens evita que el watcher de un loop viejo borre la entrada de un loop
 	// más nuevo registrado para el mismo lote.
 	gens map[string]uint64
+	// startedAt guarda cuándo se registró el loop vigente de cada lote.
+	startedAt map[string]time.Time
 }
 
 func NewLoopRegistry() *LoopRegistry {
 	return &LoopRegistry{
-		loops:    map[string]any{},
-		byCancel: map[string]context.CancelFunc{},
-		gens:     map[string]uint64{},
+		loops:     map[string]any{},
+		byCancel:  map[string]context.CancelFunc{},
+		gens:      map[string]uint64{},
+		startedAt: map[string]time.Time{},
 	}
 }
 
@@ -79,10 +87,16 @@ type EventosRepo interface {
 	CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (ok, crudo, quemado int, err error)
 }
 
+// ConfianzaRepo es el mínimo del repo de lote para agregar la confianza del
+// modelo por clase sobre las últimas detecciones de un lote.
+type ConfianzaRepo interface {
+	ConfianzaPorClase(ctx context.Context, loteID string, limite int) ([]lotesector.ConfianzaClase, error)
+}
+
 // Deps que el handler necesita del lote_sector para configurar el loop.
-// Las cuatro dependencias siguientes (MetricasRepo, EventosRepo, DecisionesRepo,
-// Broker) son OBLIGATORIAS: el Loop las invoca dentro del tick y un nil ahí
-// produce nil pointer dereference.
+// Las dependencias MetricasRepo, EventosRepo, ConfianzaRepo, DecisionesRepo y
+// Broker son OBLIGATORIAS: el Loop las invoca dentro del tick o los handlers
+// de lectura las consultan, y un nil ahí produce nil pointer dereference.
 type ControlDeps struct {
 	LoteLookup     LoteLookupService
 	ProductoRepo   ProductoRepo
@@ -91,10 +105,18 @@ type ControlDeps struct {
 	LoopCancels    *LoopRegistry
 	MetricasRepo   MetricasRepo
 	EventosRepo    EventosRepo
+	ConfianzaRepo  ConfianzaRepo
 	DecisionesRepo decisiones_control.Repository
 	Broker         *sse.Broker
-	// LoteRepo persiste cambios de estado/modo del lote (PATCH /lotes/{id}/modo).
+	// LoteRepo persiste cambios de estado/modo del lote (PATCH/PUT /lotes/{id}/modo).
 	LoteRepo lotesector.Repository
+	// DeviceSector valida que el PUT de la Pi afecte sólo lotes de su sector.
+	DeviceSector DeviceSectorLookup
+}
+
+// DeviceSectorLookup resuelve el sector de la Pi autenticada.
+type DeviceSectorLookup interface {
+	SectorDelDispositivo(ctx context.Context, deviceID string) (*loteSectorService.SectorInfo, error)
 }
 
 // ProductoRepo es el mínimo del repo de productos para el handler.
@@ -123,9 +145,11 @@ func NewControlHandler(deps ControlDeps) *ControlHandler {
 		{"LoopCancels", deps.LoopCancels == nil},
 		{"MetricasRepo", deps.MetricasRepo == nil},
 		{"EventosRepo", deps.EventosRepo == nil},
+		{"ConfianzaRepo", deps.ConfianzaRepo == nil},
 		{"DecisionesRepo", deps.DecisionesRepo == nil},
 		{"Broker", deps.Broker == nil},
 		{"LoteRepo", deps.LoteRepo == nil},
+		{"DeviceSector", deps.DeviceSector == nil},
 	}
 	for _, r := range required {
 		if r.isNil {
@@ -248,6 +272,107 @@ func (h *ControlHandler) HandleControlStop() http.HandlerFunc {
 	}
 }
 
+// HandleControlEstado expone GET /api/v1/lotes/{id}/control/estado. Devuelve el
+// modo persistido del lote y el estado runtime del loop en memoria: si está
+// activo y desde cuándo. started_at viaja null cuando no hay loop.
+func (h *ControlHandler) HandleControlEstado(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+	if !helpers.RolValido(r, user.RoleAdmin, user.RoleSupervisor, user.RoleOperario) {
+		response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
+		return
+	}
+	loteID, err := helpers.ExtractLoteID(r.URL.Path, "/control/estado")
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	lote, err := h.loteLookup.GetByID(r.Context(), loteID)
+	if err != nil || lote == nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	var startedAt *time.Time
+	if t, ok := h.registry.StartedAt(loteID); ok {
+		startedAt = &t
+	}
+	response.OK(w, "Estado del control", controlEstadoData{
+		LoteID:     loteID,
+		Modo:       lote.Modo,
+		LoopActivo: startedAt != nil,
+		StartedAt:  startedAt,
+	})
+}
+
+// controlEstadoData es el payload de GET /lotes/{id}/control/estado.
+type controlEstadoData struct {
+	LoteID     string     `json:"lote_id"`
+	Modo       string     `json:"modo"`
+	LoopActivo bool       `json:"loop_activo"`
+	StartedAt  *time.Time `json:"started_at"`
+}
+
+// Límites del parámetro `limite` de GET /lotes/{id}/confianza-clases.
+const (
+	confianzaClasesLimiteDefault = 200
+	confianzaClasesLimiteMax     = 2000
+)
+
+// limiteConfianzaClases normaliza ?limite=. Ausente o no numérico cae al
+// default; fuera de rango se clampa (el panel no debe recibir un 400 por pedir
+// una página grande).
+func limiteConfianzaClases(raw string) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return confianzaClasesLimiteDefault
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > confianzaClasesLimiteMax {
+		return confianzaClasesLimiteMax
+	}
+	return n
+}
+
+// HandleConfianzaClases expone GET /api/v1/lotes/{id}/confianza-clases: la
+// confianza media y el desvío por clase sobre las últimas N detecciones del
+// lote. Sirve para detectar un modelo degradado por clase.
+func (h *ControlHandler) HandleConfianzaClases(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+	if !helpers.RolValido(r, user.RoleAdmin, user.RoleSupervisor, user.RoleOperario) {
+		response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
+		return
+	}
+	loteID, err := helpers.ExtractLoteID(r.URL.Path, "/confianza-clases")
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	if lote, lerr := h.loteLookup.GetByID(r.Context(), loteID); lerr != nil || lote == nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	clases, err := h.deps.ConfianzaRepo.ConfianzaPorClase(r.Context(), loteID, limiteConfianzaClases(r.URL.Query().Get("limite")))
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
+		return
+	}
+	if clases == nil {
+		clases = []lotesector.ConfianzaClase{}
+	}
+	response.OK(w, "Confianza por clase", map[string]interface{}{
+		"lote_id": loteID,
+		"clases":  clases,
+		"total":   len(clases),
+	})
+}
+
 // modoRequest es el body de PATCH /api/v1/lotes/{id}/modo.
 type modoRequest struct {
 	Modo string `json:"modo"`
@@ -264,16 +389,20 @@ type modoCambioData struct {
 	LoopActivo   bool   `json:"loop_activo"`
 }
 
-// HandleModeChange maneja PATCH /api/v1/lotes/{id}/modo. Cambia el modo de
-// operación de un lote ABIERTO (MANUAL/SUPERVISION/AUTOMATICO): cancela el loop
-// vigente, persiste el modo, re-arranca el loop si corresponde y deja traza en
-// decisiones_control. Sólo Supervisor/Administrador.
+// HandleModeChange maneja PATCH (panel) y PUT (Pi) /api/v1/lotes/{id}/modo.
+// Cambia el modo de operación de un lote ABIERTO (MANUAL/SUPERVISION/AUTOMATICO):
+// cancela el loop vigente, persiste el modo, re-arranca el loop si corresponde
+// y deja traza en decisiones_control.
+//
+// PATCH exige cookie JWT de Supervisor/Administrador. PUT es el push de la Pi
+// (Bearer de dispositivo) y sólo puede afectar lotes de su propio sector.
 func (h *ControlHandler) HandleModeChange(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
+	if r.Method != http.MethodPatch && r.Method != http.MethodPut {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
 		return
 	}
-	if !helpers.RolValido(r, user.RoleSupervisor, user.RoleAdmin) {
+	principal, isDevice := deviceauth.PrincipalFromContext(r.Context())
+	if !isDevice && !helpers.RolValido(r, user.RoleSupervisor, user.RoleAdmin) {
 		response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
 		return
 	}
@@ -300,6 +429,17 @@ func (h *ControlHandler) HandleModeChange(w http.ResponseWriter, r *http.Request
 	if lote.Estado != lotesector.EstadoAbierto {
 		response.Error(w, http.StatusConflict, "Lote no está abierto", nil)
 		return
+	}
+	if isDevice {
+		info, err := h.deps.DeviceSector.SectorDelDispositivo(r.Context(), principal.DeviceID)
+		if err != nil || info == nil {
+			response.Error(w, http.StatusForbidden, "El dispositivo no tiene sector asignado", nil)
+			return
+		}
+		if info.SectorID != lote.SectorID {
+			response.Error(w, http.StatusForbidden, "El dispositivo no pertenece al sector del lote", nil)
+			return
+		}
 	}
 	anterior := lote.Modo
 	if anterior == nuevo {
@@ -587,6 +727,7 @@ func (r *LoopRegistry) Register(loteID string, ctx context.Context, cancel conte
 	r.gens[loteID]++
 	gen := r.gens[loteID]
 	r.byCancel[loteID] = cancel
+	r.startedAt[loteID] = time.Now().UTC()
 	r.mu.Unlock()
 
 	// Watcher: al cancelarse el contexto, elimina la entrada si sigue siendo
@@ -601,6 +742,7 @@ func (r *LoopRegistry) Register(loteID string, ctx context.Context, cancel conte
 		delete(r.byCancel, loteID)
 		delete(r.loops, loteID)
 		delete(r.gens, loteID)
+		delete(r.startedAt, loteID)
 	}()
 }
 
@@ -615,6 +757,7 @@ func (r *LoopRegistry) StopAll() {
 	r.byCancel = map[string]context.CancelFunc{}
 	r.loops = map[string]any{}
 	r.gens = map[string]uint64{}
+	r.startedAt = map[string]time.Time{}
 	r.mu.Unlock()
 
 	for _, c := range cancels {
@@ -634,6 +777,7 @@ func (r *LoopRegistry) StopLoop(loteID string) bool {
 	if ok {
 		delete(r.byCancel, loteID)
 		delete(r.loops, loteID)
+		delete(r.startedAt, loteID)
 	}
 	r.mu.Unlock()
 	if !ok {
@@ -662,13 +806,13 @@ func (r *LoopRegistry) GetLoop(loteID string) (any, bool) {
 	return l, ok
 }
 
-// Unregister elimina el loop de la registry. Se invoca desde el caller's
-// defer tras cancelar.
-func (r *LoopRegistry) Unregister(loteID string) {
+// StartedAt devuelve cuándo se registró el loop vigente del lote. ok=false si
+// no hay loop activo (nunca registrado o ya cancelado).
+func (r *LoopRegistry) StartedAt(loteID string) (time.Time, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.byCancel, loteID)
-	delete(r.loops, loteID)
+	t, ok := r.startedAt[loteID]
+	return t, ok
 }
 
 // SetLoop guarda la referencia al Loop en la registry. Complemento de

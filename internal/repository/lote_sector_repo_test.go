@@ -486,6 +486,63 @@ func TestLoteSectorRepository_Historial(t *testing.T) {
 	require.Equal(t, 0, filtered)
 }
 
+// TestLoteSectorRepository_ConfianzaPorClase verifica la agregación por clase
+// sobre las últimas detecciones: avg/stddev/muestras, exclusión de NULL y que
+// el límite tome sólo las más recientes.
+func TestLoteSectorRepository_ConfianzaPorClase(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := setupLoteSectorRepo(t)
+	lote := abrirLote(t, ctx, repo)
+
+	_, _, _, err := repo.RegistrarEventos(ctx, lote.ID, testSectorID, testSalidaDevID, []lotesector.Evento{
+		{EventoID: "21212121-0000-0000-0000-000000000001", ProductoID: testProductoID, Estado: ptr("ok"), Confianza: ptr(0.8)},
+		{EventoID: "21212121-0000-0000-0000-000000000002", ProductoID: testProductoID, Estado: ptr("ok"), Confianza: ptr(1.0)},
+		{EventoID: "21212121-0000-0000-0000-000000000003", ProductoID: testProductoID, Estado: ptr("crudo"), Confianza: ptr(0.5)},
+		{EventoID: "21212121-0000-0000-0000-000000000004", ProductoID: testProductoID, Estado: nil, Confianza: ptr(0.9)},
+		{EventoID: "21212121-0000-0000-0000-000000000005", ProductoID: testProductoID, Estado: ptr("quemado")},
+	})
+	require.NoError(t, err)
+
+	clases, err := repo.ConfianzaPorClase(ctx, lote.ID, 200)
+	require.NoError(t, err)
+	require.Len(t, clases, 2, "las filas sin estado o sin confianza no cuentan")
+
+	require.Equal(t, lotesector.EstadoCrudo, clases[0].Clase)
+	require.InDelta(t, 0.5, clases[0].ConfianzaMedia, 1e-9)
+	require.Equal(t, 1, clases[0].Muestras)
+	require.Nil(t, clases[0].ConfianzaStddev, "stddev muestral es null con una sola muestra")
+
+	require.Equal(t, lotesector.EstadoOK, clases[1].Clase)
+	require.InDelta(t, 0.9, clases[1].ConfianzaMedia, 1e-9)
+	require.Equal(t, 2, clases[1].Muestras)
+	require.NotNil(t, clases[1].ConfianzaStddev)
+	require.InDelta(t, 0.1414213562373095, *clases[1].ConfianzaStddev, 1e-9)
+
+	// now() es el inicio de la transacción: espaciar asegura que el segundo
+	// batch quede estrictamente más nuevo que el primero.
+	time.Sleep(5 * time.Millisecond)
+	_, _, _, err = repo.RegistrarEventos(ctx, lote.ID, testSectorID, testSalidaDevID, []lotesector.Evento{
+		{EventoID: "21212121-0000-0000-0000-000000000006", ProductoID: testProductoID, Estado: ptr("quemado"), Confianza: ptr(0.3)},
+	})
+	require.NoError(t, err)
+
+	ultimas, err := repo.ConfianzaPorClase(ctx, lote.ID, 1)
+	require.NoError(t, err)
+	require.Len(t, ultimas, 1, "limite=1 debe tomar sólo la detección más reciente")
+	require.Equal(t, lotesector.EstadoQuemado, ultimas[0].Clase)
+	require.InDelta(t, 0.3, ultimas[0].ConfianzaMedia, 1e-9)
+
+	// Un lote sin detecciones devuelve una slice vacía, nunca nil.
+	vacio, err := repo.ConfianzaPorClase(ctx, "00000000-0000-0000-0000-000000000000", 10)
+	require.NoError(t, err)
+	require.NotNil(t, vacio)
+	require.Empty(t, vacio)
+
+	// Un id no-UUID se traduce a ErrNotFound en vez de escapar como 500.
+	_, err = repo.ConfianzaPorClase(ctx, "no-es-uuid", 10)
+	require.ErrorIs(t, err, lotesector.ErrNotFound)
+}
+
 // TestLoteSectorRepository_22P02Mapping verifica que los ids no-UUID no
 // escapen como 500: los lookups/updates de lote se traducen a ErrNotFound y el
 // filtro producto_id del historial a ErrPayloadInvalido.

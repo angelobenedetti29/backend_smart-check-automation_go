@@ -36,7 +36,7 @@ func (h *HornoHandler) GetHornoStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Trigger service logic (which triggers YOLO checks under the hood)
+	// 1. Fetch the oven through the service layer
 	hEntity, err := h.service.CheckStatus(id)
 	if err != nil {
 		response.Error(w, http.StatusNotFound, "Horno no encontrado", err.Error())
@@ -50,7 +50,6 @@ func (h *HornoHandler) GetHornoStatus(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{
 		"horno":             hEntity,
 		"alertas_recientes": alerts,
-		"conveyor_checked":  true,
 		"saludo":            "Hola Mundo desde el controlador de Horno en Arquitectura de Capas Go!",
 	}
 

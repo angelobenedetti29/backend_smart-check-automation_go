@@ -17,9 +17,7 @@ package optimizador
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"math"
 
@@ -362,13 +360,6 @@ func LimitesDe(p *producto.Producto, l *lote_sector.Lote) Limites {
 	return lim
 }
 
-// PropuestaToJSON serializa la propuesta para guardarla como JSONB en
-// decisiones_control.prediccion (campo crudo con la salida XGBoost).
-func PropuestaToJSON(p *Propuesta) []byte {
-	b, _ := json.Marshal(p)
-	return b
-}
-
 // --- helpers ---
 
 func (l Limites) consistente() bool {
@@ -423,13 +414,3 @@ func dedupe(xs []float64) []float64 {
 	return out
 }
 
-// FormatResumen es un helper para logging/tests.
-func FormatResumen(p *Propuesta) string {
-	if p == nil {
-		return "<nil>"
-	}
-	return fmt.Sprintf("T1=%.2f V=%.3f Z=%.4f predC=%.2f predO=%.2f predQ=%.2f",
-		p.Temp1, p.Velocidad, p.Z,
-		p.Prediccion.PctCrudos, p.Prediccion.PctOk, p.Prediccion.PctQuemados,
-	)
-}

@@ -6,7 +6,6 @@ import (
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 )
 
 // HornoService implements horno.Service contract.
@@ -14,45 +13,19 @@ import (
 type HornoService struct {
 	hornoRepo  horno.Repository
 	alertaRepo alerta.Repository
-	yoloClient *yolo_client.YOLOClient
 }
 
 // NewHornoService instantiates a new HornoService injecting needed adapters/repositories.
-func NewHornoService(hRepo horno.Repository, aRepo alerta.Repository, yolo *yolo_client.YOLOClient) *HornoService {
+func NewHornoService(hRepo horno.Repository, aRepo alerta.Repository) *HornoService {
 	return &HornoService{
 		hornoRepo:  hRepo,
 		alertaRepo: aRepo,
-		yoloClient: yolo,
 	}
 }
 
-// CheckStatus retrieves the status of a specific oven, orchestrating a computer vision check via YOLO.
+// CheckStatus retrieves the status of a specific oven.
 func (s *HornoService) CheckStatus(id string) (*horno.Horno, error) {
-	// 1. Fetch from repository
-	h, err := s.hornoRepo.GetByID(id)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. Perform real-time machine vision inspection of pieces via YOLO adapter
-	detection := s.yoloClient.InspectConveyorLine()
-	if detection.DefectFound {
-		// Log and raise transactional alert
-		alt := &alerta.Alerta{
-			ID:       fmt.Sprintf("alt-yolo-%d", time.Now().UnixNano()),
-			HornoID:  h.ID,
-			Nivel:    "CRITICAL",
-			Mensaje:  fmt.Sprintf("Defecto visual detectado en cinta transportadora por YOLO (Confianza: %.2f%%)", detection.Confidence*100),
-			CreadaEn: time.Now(),
-		}
-		_ = s.alertaRepo.Save(alt)
-
-		// Transition Horno to maintenance status due to failure detection
-		h.Estado = "MANTENIMIENTO"
-		_ = s.hornoRepo.Update(h)
-	}
-
-	return h, nil
+	return s.hornoRepo.GetByID(id)
 }
 
 // UpdateTemperature updates the oven's temperature and handles threshold logic, generating database alerts.

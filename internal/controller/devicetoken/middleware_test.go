@@ -149,7 +149,7 @@ func TestBeforeMuxProtectsRenameEndpoint(t *testing.T) {
 
 // TestBeforeMuxProtectsSectorAndLoteEventEndpoints cubre los objetivos
 // device-only incorporados: GET /dispositivos/sector y los POST
-// /lotes/{id}/eventos y /lotes/{id}/cierre.
+// /lotes/{id}/eventos, /lotes/{id}/cierre y /lotes/{id}/metricas-horno.
 func TestBeforeMuxProtectsSectorAndLoteEventEndpoints(t *testing.T) {
 	const loteID = "6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c"
 	cases := []struct {
@@ -159,6 +159,7 @@ func TestBeforeMuxProtectsSectorAndLoteEventEndpoints(t *testing.T) {
 		{http.MethodGet, "/api/v1/dispositivos/sector"},
 		{http.MethodPost, "/api/v1/lotes/" + loteID + "/eventos"},
 		{http.MethodPost, "/api/v1/lotes/" + loteID + "/cierre"},
+		{http.MethodPost, "/api/v1/lotes/" + loteID + "/metricas-horno"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -210,6 +211,7 @@ func TestBeforeMuxIsProtectedTarget(t *testing.T) {
 		{"POST", "/api/v1/lotes/inicio"},
 		{"POST", "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/eventos"},
 		{"POST", "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/cierre"},
+		{"POST", "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/metricas-horno"},
 	}
 	for _, tc := range protected {
 		assert.True(t, isProtectedTarget(tc.method, tc.path, tc.path), "%s %s", tc.method, tc.path)
@@ -227,6 +229,7 @@ func TestBeforeMuxIsProtectedTarget(t *testing.T) {
 		{"POST", "/api/v1/lotes//eventos"},
 		{"POST", "/api/v1/lotes/a/b/eventos"},
 		{"POST", "/api/v1/lotes/x/otro"},
+		{"GET", "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/metricas-horno"},
 	}
 	for _, tc := range notProtected {
 		assert.False(t, isProtectedTarget(tc.method, tc.path, tc.path), "%s %s", tc.method, tc.path)

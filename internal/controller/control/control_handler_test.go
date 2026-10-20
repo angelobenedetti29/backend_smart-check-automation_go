@@ -16,6 +16,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
@@ -24,6 +25,7 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
 	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/control"
+	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
@@ -117,6 +119,31 @@ func (f *fakeEventosRepoHandler) CountEventosEnVentana(_ context.Context, _ stri
 	return 0, 0, 0, nil
 }
 
+// fakeConfianzaRepo implementa ConfianzaRepo y registra los argumentos
+// recibidos para verificar el passthrough del límite.
+type fakeConfianzaRepo struct {
+	clases     []lotesector.ConfianzaClase
+	err        error
+	lastLoteID string
+	lastLimite int
+}
+
+func (f *fakeConfianzaRepo) ConfianzaPorClase(_ context.Context, loteID string, limite int) ([]lotesector.ConfianzaClase, error) {
+	f.lastLoteID = loteID
+	f.lastLimite = limite
+	return f.clases, f.err
+}
+
+// fakeDeviceSector implementa DeviceSectorLookup para el PUT de la Pi.
+type fakeDeviceSector struct {
+	info *loteSectorService.SectorInfo
+	err  error
+}
+
+func (f *fakeDeviceSector) SectorDelDispositivo(_ context.Context, _ string) (*loteSectorService.SectorInfo, error) {
+	return f.info, f.err
+}
+
 // fakeLoteRepoHandler implementa lotesector.Repository para los tests del
 // handler. Sólo UpdateModo es configurable; el resto son stubs no usados por
 // los handlers de control.
@@ -170,9 +197,11 @@ func validControlDeps() ControlDeps {
 		LoopCancels:    NewLoopRegistry(),
 		MetricasRepo:   &fakeMetricasRepo{},
 		EventosRepo:    &fakeEventosRepoHandler{},
+		ConfianzaRepo:  &fakeConfianzaRepo{},
 		DecisionesRepo: &fakeDecisionesRepo{},
 		Broker:         sse.NewBroker(),
 		LoteRepo:       &fakeLoteRepoHandler{},
+		DeviceSector:   &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-1"}},
 	}
 }
 
@@ -190,9 +219,11 @@ func TestNewControlHandlerPanicConDepNil(t *testing.T) {
 		{"LoopCancels", func(d *ControlDeps) { d.LoopCancels = nil }},
 		{"MetricasRepo", func(d *ControlDeps) { d.MetricasRepo = nil }},
 		{"EventosRepo", func(d *ControlDeps) { d.EventosRepo = nil }},
+		{"ConfianzaRepo", func(d *ControlDeps) { d.ConfianzaRepo = nil }},
 		{"DecisionesRepo", func(d *ControlDeps) { d.DecisionesRepo = nil }},
 		{"Broker", func(d *ControlDeps) { d.Broker = nil }},
 		{"LoteRepo", func(d *ControlDeps) { d.LoteRepo = nil }},
+		{"DeviceSector", func(d *ControlDeps) { d.DeviceSector = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -738,6 +769,66 @@ func TestHandleModeChangeModoInvalido400(t *testing.T) {
 	}
 }
 
+// TestHandleModeChangeDevicePutActualizaModo verifica que la Pi pueda empujar
+// el modo con PUT + Bearer, validando que pertenezca al sector del lote.
+func TestHandleModeChangeDevicePutActualizaModo(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+		ProductoID: "prod-1", VentanaEvaluacionSegundos: 600,
+	}
+	deps := validControlDeps()
+	deps.LoteLookup = &fakeLoteLookup{lote: lote}
+	repo := &fakeLoteRepoHandler{}
+	deps.LoteRepo = repo
+	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: lote.ProductoID}}
+	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-1"}}
+	h := NewControlHandler(deps)
+	t.Cleanup(h.registry.StopAll)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/lotes/lote-1/modo", strings.NewReader(`{"modo":"AUTOMATICO"}`))
+	req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "dev-1"}))
+	rec := httptest.NewRecorder()
+	h.HandleModeChange(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.updateCalls != 1 || repo.updatedModo != lotesector.ModoAutomatico {
+		t.Fatalf("UpdateModo mal llamado: calls=%d modo=%q", repo.updateCalls, repo.updatedModo)
+	}
+	if _, ok := h.registry.GetLoop("lote-1"); !ok {
+		t.Fatalf("AUTOMATICO debe dejar loop registrado")
+	}
+}
+
+// TestHandleModeChangeDevicePutOtroSector verifica que la Pi no pueda cambiar
+// el modo de un lote de otro sector.
+func TestHandleModeChangeDevicePutOtroSector(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+		ProductoID: "prod-1",
+	}
+	deps := validControlDeps()
+	deps.LoteLookup = &fakeLoteLookup{lote: lote}
+	repo := &fakeLoteRepoHandler{}
+	deps.LoteRepo = repo
+	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-2"}}
+	h := NewControlHandler(deps)
+	t.Cleanup(h.registry.StopAll)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/lotes/lote-1/modo", strings.NewReader(`{"modo":"AUTOMATICO"}`))
+	req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "dev-1"}))
+	rec := httptest.NewRecorder()
+	h.HandleModeChange(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if repo.updateCalls != 0 {
+		t.Fatalf("no debe persistir un modo de otro sector; calls=%d", repo.updateCalls)
+	}
+}
+
 // TestHandleModeChangeAuditSaveFallaNoBloquea verifica que un fallo del audit
 // no impide el cambio de modo ni el arranque del loop.
 func TestHandleModeChangeAuditSaveFallaNoBloquea(t *testing.T) {
@@ -862,6 +953,227 @@ func TestControlSSEReceivePropuestaEnModoSupervision(t *testing.T) {
 	}
 	if _, ok := payload["propuesta"]; !ok {
 		t.Fatalf("payload SSE sin 'propuesta': %+v", payload)
+	}
+}
+
+// --- control/estado y confianza-clases ---
+
+// doPanelRequest dispara una request al server de prueba con cookie JWT y
+// devuelve el status y el body crudo (para poder assertar `null` explícito).
+func doPanelRequest(t *testing.T, srv *httptest.Server, secret []byte, role, method, path string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(method, srv.URL+path, nil)
+	if err != nil {
+		t.Fatalf("crear request: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: "session_token", Value: signedTestToken(t, secret, role)})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("leer body: %v", err)
+	}
+	return resp.StatusCode, body
+}
+
+// newControlEstadoServer monta HandleControlEstado con el JWT middleware real.
+func newControlEstadoServer(t *testing.T, lookup LoteLookupService, reg *LoopRegistry) (*httptest.Server, []byte) {
+	t.Helper()
+	deps := validControlDeps()
+	deps.LoteLookup = lookup
+	deps.LoopCancels = reg
+	h := NewControlHandler(deps)
+	secret := []byte("control-estado-test-secret-1234567890")
+	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleControlEstado))
+	t.Cleanup(srv.Close)
+	t.Cleanup(reg.StopAll)
+	return srv, secret
+}
+
+// controlEstadoEnvelope modela el envelope de GET /lotes/{id}/control/estado.
+type controlEstadoEnvelope struct {
+	Success bool              `json:"success"`
+	Data    controlEstadoData `json:"data"`
+}
+
+// TestHandleControlEstadoSinLoop verifica que sin loop activo el modo venga del
+// lote y started_at sea null explícito.
+func TestHandleControlEstadoSinLoop(t *testing.T) {
+	reg := NewLoopRegistry()
+	srv, secret := newControlEstadoServer(t,
+		&fakeLoteLookup{lote: &lotesector.Lote{ID: "lote-1", Modo: lotesector.ModoSupervision}}, reg)
+
+	status, body := doPanelRequest(t, srv, secret, user.RoleOperario, http.MethodGet, "/api/v1/lotes/lote-1/control/estado")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", status, body)
+	}
+	var env controlEstadoEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !env.Success || env.Data.LoteID != "lote-1" || env.Data.Modo != lotesector.ModoSupervision {
+		t.Fatalf("data inesperada: %+v", env.Data)
+	}
+	if env.Data.LoopActivo || env.Data.StartedAt != nil {
+		t.Fatalf("sin loop: loop_activo=%v started_at=%v", env.Data.LoopActivo, env.Data.StartedAt)
+	}
+	if !strings.Contains(string(body), `"started_at":null`) {
+		t.Fatalf("started_at debe serializarse null; body=%s", body)
+	}
+}
+
+// TestHandleControlEstadoConLoopActivo verifica que un loop registrado reporte
+// loop_activo=true y un started_at no nulo.
+func TestHandleControlEstadoConLoopActivo(t *testing.T) {
+	reg := NewLoopRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	reg.Register("lote-1", ctx, cancel)
+	desde := time.Now().UTC().Add(-time.Second)
+
+	srv, secret := newControlEstadoServer(t,
+		&fakeLoteLookup{lote: &lotesector.Lote{ID: "lote-1", Modo: lotesector.ModoAutomatico}}, reg)
+
+	status, body := doPanelRequest(t, srv, secret, user.RoleSupervisor, http.MethodGet, "/api/v1/lotes/lote-1/control/estado")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", status, body)
+	}
+	var env controlEstadoEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !env.Data.LoopActivo {
+		t.Fatalf("se esperaba loop_activo=true; body=%s", body)
+	}
+	if env.Data.StartedAt == nil {
+		t.Fatalf("se esperaba started_at no nulo; body=%s", body)
+	}
+	if env.Data.StartedAt.Before(desde) || env.Data.StartedAt.After(time.Now().UTC()) {
+		t.Fatalf("started_at fuera de rango: %v", env.Data.StartedAt)
+	}
+	if env.Data.Modo != lotesector.ModoAutomatico {
+		t.Fatalf("modo = %q, want AUTOMATICO", env.Data.Modo)
+	}
+}
+
+// TestHandleControlEstadoLoteDesconocido verifica el 404.
+func TestHandleControlEstadoLoteDesconocido(t *testing.T) {
+	srv, secret := newControlEstadoServer(t, &fakeLoteLookup{err: lotesector.ErrNotFound}, NewLoopRegistry())
+	if status, body := doPanelRequest(t, srv, secret, user.RoleAdmin, http.MethodGet, "/api/v1/lotes/lote-x/control/estado"); status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", status, body)
+	}
+}
+
+// TestHandleControlEstadoMetodoNoPermitido verifica el 405.
+func TestHandleControlEstadoMetodoNoPermitido(t *testing.T) {
+	srv, secret := newControlEstadoServer(t, &fakeLoteLookup{lote: &lotesector.Lote{ID: "lote-1"}}, NewLoopRegistry())
+	if status, body := doPanelRequest(t, srv, secret, user.RoleAdmin, http.MethodPost, "/api/v1/lotes/lote-1/control/estado"); status != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405; body=%s", status, body)
+	}
+}
+
+// confianzaEnvelope modela el envelope de GET /lotes/{id}/confianza-clases.
+type confianzaEnvelope struct {
+	Success bool `json:"success"`
+	Data    struct {
+		LoteID string                      `json:"lote_id"`
+		Clases []lotesector.ConfianzaClase `json:"clases"`
+		Total  int                         `json:"total"`
+	} `json:"data"`
+}
+
+// newConfianzaClasesServer monta HandleConfianzaClases con el JWT middleware.
+func newConfianzaClasesServer(t *testing.T, lookup LoteLookupService, repo *fakeConfianzaRepo) (*httptest.Server, []byte) {
+	t.Helper()
+	deps := validControlDeps()
+	deps.LoteLookup = lookup
+	deps.ConfianzaRepo = repo
+	h := NewControlHandler(deps)
+	secret := []byte("confianza-clases-test-secret-1234567890")
+	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleConfianzaClases))
+	t.Cleanup(srv.Close)
+	return srv, secret
+}
+
+// TestHandleConfianzaClasesPassthrough verifica que las clases se devuelvan en
+// el orden del repo, con el null de stddev preservado y el límite propagado.
+func TestHandleConfianzaClasesPassthrough(t *testing.T) {
+	stddev := 0.07
+	repo := &fakeConfianzaRepo{clases: []lotesector.ConfianzaClase{
+		{Clase: lotesector.EstadoCrudo, ConfianzaMedia: 0.71, ConfianzaStddev: &stddev, Muestras: 3},
+		{Clase: lotesector.EstadoOK, ConfianzaMedia: 0.93, Muestras: 1},
+	}}
+	srv, secret := newConfianzaClasesServer(t, &fakeLoteLookup{lote: &lotesector.Lote{ID: "lote-1"}}, repo)
+
+	status, body := doPanelRequest(t, srv, secret, user.RoleSupervisor, http.MethodGet, "/api/v1/lotes/lote-1/confianza-clases?limite=50")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", status, body)
+	}
+	var env confianzaEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if env.Data.LoteID != "lote-1" || env.Data.Total != 2 || len(env.Data.Clases) != 2 {
+		t.Fatalf("data inesperada: %+v", env.Data)
+	}
+	if env.Data.Clases[0].Clase != lotesector.EstadoCrudo || env.Data.Clases[1].Clase != lotesector.EstadoOK {
+		t.Fatalf("orden de clases incorrecto: %+v", env.Data.Clases)
+	}
+	if env.Data.Clases[0].ConfianzaStddev == nil || *env.Data.Clases[0].ConfianzaStddev != stddev {
+		t.Fatalf("stddev mal propagado: %+v", env.Data.Clases[0])
+	}
+	if env.Data.Clases[1].ConfianzaStddev != nil {
+		t.Fatalf("stddev de una muestra debe ser null: %+v", env.Data.Clases[1])
+	}
+	if repo.lastLoteID != "lote-1" || repo.lastLimite != 50 {
+		t.Fatalf("repo recibió lote=%q limite=%d", repo.lastLoteID, repo.lastLimite)
+	}
+}
+
+// TestHandleConfianzaClasesLimite verifica el default, el clamp y que sin
+// muestras el JSON sea [] y no null.
+func TestHandleConfianzaClasesLimite(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{"sin query usa default", "", 200},
+		{"no numérico usa default", "?limite=abc", 200},
+		{"cero se clampa a 1", "?limite=0", 1},
+		{"negativo se clampa a 1", "?limite=-5", 1},
+		{"arriba del máximo se clampa", "?limite=5000", 2000},
+		{"dentro de rango se respeta", "?limite=7", 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeConfianzaRepo{}
+			srv, secret := newConfianzaClasesServer(t, &fakeLoteLookup{lote: &lotesector.Lote{ID: "lote-1"}}, repo)
+			status, body := doPanelRequest(t, srv, secret, user.RoleAdmin, http.MethodGet, "/api/v1/lotes/lote-1/confianza-clases"+tc.query)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", status, body)
+			}
+			if repo.lastLimite != tc.want {
+				t.Fatalf("limite = %d, want %d", repo.lastLimite, tc.want)
+			}
+			if !strings.Contains(string(body), `"clases":[]`) {
+				t.Fatalf("clases vacías deben serializarse []; body=%s", body)
+			}
+		})
+	}
+}
+
+// TestHandleConfianzaClasesLoteDesconocido verifica el 404 sin consultar el repo.
+func TestHandleConfianzaClasesLoteDesconocido(t *testing.T) {
+	repo := &fakeConfianzaRepo{}
+	srv, secret := newConfianzaClasesServer(t, &fakeLoteLookup{err: lotesector.ErrNotFound}, repo)
+	if status, body := doPanelRequest(t, srv, secret, user.RoleOperario, http.MethodGet, "/api/v1/lotes/lote-x/confianza-clases"); status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", status, body)
+	}
+	if repo.lastLimite != 0 {
+		t.Fatalf("no debe consultar el repo con lote desconocido")
 	}
 }
 

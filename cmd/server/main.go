@@ -37,7 +37,6 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	googleProvider "github.com/angelobenedetti29/smart-check-automation/internal/provider/google"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
 	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	consignaService "github.com/angelobenedetti29/smart-check-automation/internal/service/consigna"
@@ -94,7 +93,6 @@ func main() {
 
 	// 2. Instantiate Infrastructure Adapters (Providers Layer)
 	dbRepo := database.NewPostgresRepository()
-	yolo := yolo_client.NewYOLOClient("http://localhost:8500/yolo/conveyor")
 	// Driver del controlador físico del horno: simulated (default) o modbus,
 	// seleccionado por OVEN_DRIVER. El Modbus exige Connect exitoso al arrancar.
 	ovenController, ovenCloser, err := oven_controller.NewOvenControllerFromEnv()
@@ -140,7 +138,7 @@ func main() {
 	controlSSEBroker := sse.NewBroker()
 
 	// 3. Instantiate Business Layer
-	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
+	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	renamePushTimeout := getEnvDuration("DISPOSITIVO_RENAME_PUSH_TIMEOUT", 10*time.Second)
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker, renamePushTimeout)
@@ -210,9 +208,11 @@ func main() {
 		LoopCancels:    loopRegistry,
 		MetricasRepo:   metricasHornoRepo,
 		EventosRepo:    loteSectorRepo,
+		ConfianzaRepo:  loteSectorRepo,
 		DecisionesRepo: decisionesRepo,
 		Broker:         controlSSEBroker,
 		LoteRepo:       loteSectorRepo,
+		DeviceSector:   loteSectorSvc,
 	}
 	controlHandler := controlController.NewControlHandler(controlDeps)
 	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
@@ -286,12 +286,19 @@ func main() {
 			jwtWrap(controlHandler.HandleControlStart(controlDeps))(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
 			jwtWrap(controlHandler.HandleControlStop())(w, r)
-		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/modo"):
-			jwtWrap(controlHandler.HandleModeChange)(w, r)
+		case (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.HasSuffix(r.URL.Path, "/modo"):
+			// PATCH = panel (cookie JWT), PUT = Pi (Bearer). DualAuth elige la
+			// credencial correcta y el handler valida rol o sector según sea.
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, controlHandler.HandleModeChange)(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/consigna-propuesta"):
-			jwtWrap(controlHandler.HandleConsignaPropuesta)(w, r)
+			// Bearer de la Pi o cookie del panel (contrato documentado del handler).
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, controlHandler.HandleConsignaPropuesta)(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/events"):
 			jwtWrap(controlSSEHandler.HandleControlEvents)(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/estado"):
+			jwtWrap(controlHandler.HandleControlEstado)(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/confianza-clases"):
+			jwtWrap(controlHandler.HandleConfianzaClases)(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/aplicar-consigna"):
 			jwtWrap(controlHandler.HandleAplicarConsigna(controlDeps))(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/decisiones"):

@@ -88,7 +88,6 @@ backend_smart-check-automation_go/
 │   │   ├── database/                                # NewPostgresPool, repos en memoria, StateStore
 │   │   ├── google/                                  # Implementa user.GoogleVerifier vía google/api/idtoken
 │   │   ├── oven_controller/                         # Cliente simulado del controlador del horno (PLC)
-│   │   └── yolo_client/                             # Cliente HTTP para servicio YOLO de inspección visual
 │   ├── repository/
 │   │   ├── lote_sector_repo.go                      # PostgreSQL — ciclo de lote por sector
 │   │   ├── sector_repo.go                           # PostgreSQL — sectores y relación con dispositivos

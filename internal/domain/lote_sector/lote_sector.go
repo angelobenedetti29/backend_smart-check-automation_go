@@ -203,6 +203,16 @@ type Evento struct {
 	Momento    *time.Time `json:"momento"`
 }
 
+// ConfianzaClase agrega la confianza del modelo de visión para una clase
+// (ok/crudo/quemado) sobre las últimas detecciones de un lote. ConfianzaStddev
+// es null con menos de dos muestras (stddev muestral indefinido).
+type ConfianzaClase struct {
+	Clase           string   `json:"clase"`
+	ConfianzaMedia  float64  `json:"confianza_media"`
+	ConfianzaStddev *float64 `json:"confianza_stddev"`
+	Muestras        int      `json:"muestras"`
+}
+
 // AbrirParams son los datos para abrir (o adjuntarse a) un lote de un sector.
 //
 // Desde SCA-400 incluye los parámetros de operación del control: modo,

@@ -509,6 +509,54 @@ func (r *LoteSectorPostgresRepository) Cerrar(ctx context.Context, params lotese
 	return lote, false, nil
 }
 
+// confianzaPorClaseSQL agrega la confianza de las últimas detecciones del lote,
+// agrupada por clase. El subquery se queda con las N más recientes (orden de
+// llegada al backend) y el agregado ignora las filas sin estado o sin confianza.
+const confianzaPorClaseSQL = `
+	SELECT estado, AVG(confianza), STDDEV_SAMP(confianza), COUNT(*)
+	FROM (
+		SELECT estado, confianza
+		FROM eventos_lote
+		WHERE lote_id = $1 AND estado IS NOT NULL AND confianza IS NOT NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2
+	) ultimas
+	GROUP BY estado
+	ORDER BY estado`
+
+// ConfianzaPorClase agrega la confianza del modelo por clase sobre las últimas
+// `limite` detecciones del lote. Devuelve una slice vacía (nunca nil) cuando no
+// hay muestras. Un lote_id no-UUID se traduce a ErrNotFound.
+func (r *LoteSectorPostgresRepository) ConfianzaPorClase(ctx context.Context, loteID string, limite int) ([]lotesector.ConfianzaClase, error) {
+	rows, err := r.db.Query(ctx, confianzaPorClaseSQL, loteID, limite)
+	if err != nil {
+		if isInvalidTextRepresentation(err) {
+			return nil, lotesector.ErrNotFound
+		}
+		return nil, fmt.Errorf("confianza por clase: query: %w", err)
+	}
+	defer rows.Close()
+
+	out := []lotesector.ConfianzaClase{}
+	for rows.Next() {
+		var c lotesector.ConfianzaClase
+		if serr := rows.Scan(&c.Clase, &c.ConfianzaMedia, &c.ConfianzaStddev, &c.Muestras); serr != nil {
+			if isInvalidTextRepresentation(serr) {
+				return nil, lotesector.ErrNotFound
+			}
+			return nil, fmt.Errorf("confianza por clase: scan: %w", serr)
+		}
+		out = append(out, c)
+	}
+	if rerr := rows.Err(); rerr != nil {
+		if isInvalidTextRepresentation(rerr) {
+			return nil, lotesector.ErrNotFound
+		}
+		return nil, fmt.Errorf("confianza por clase: rows iteration: %w", rerr)
+	}
+	return out, nil
+}
+
 // Historial devuelve una página de lotes del sector más nuevos primero, con un
 // cursor opaco (inicio_at, id) y filtro opcional por producto, junto con el
 // total que matchea los filtros (sin cursor).
