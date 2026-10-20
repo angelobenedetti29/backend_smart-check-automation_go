@@ -220,7 +220,7 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps,
 	}
 	hornoID := os.Getenv("MPC_HORNO_ID")
 	if hornoID == "" {
-		hornoID = "horno-1"
+		hornoID = "horno-01"
 	}
 	pesos := optimizador.PesosDesdeLote(lote.PesosObjetivo)
 	limites := optimizador.LimitesDe(prod, lote)

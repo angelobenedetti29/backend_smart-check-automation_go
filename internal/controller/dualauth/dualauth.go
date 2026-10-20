@@ -9,10 +9,6 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 )
 
-// invalidDeviceTokenBody es la respuesta plana (sin envelope) exigida para un
-// token de dispositivo inválido. Es idéntica a la usada por devicetoken.
-const invalidDeviceTokenBody = `{"error":"Token de dispositivo inválido","code":"invalid_device_token"}`
-
 // DualAuth protege endpoints consumidos tanto por dispositivos como por usuarios
 // humanos. Si la petición trae CUALQUIER header Authorization se resuelve
 // exclusivamente como intento de dispositivo: ante fallo responde 401 plano sin
@@ -36,18 +32,10 @@ func DualAuth(verifier *deviceauth.Verifier, jwtSecret []byte, next http.Handler
 			principal, err = verifier.Authenticate(r.Context(), r)
 		}
 		if err != nil {
-			writeInvalidDeviceToken(w)
+			deviceauth.WriteInvalidToken(w)
 			return
 		}
 
 		next(w, r.WithContext(deviceauth.WithPrincipal(r.Context(), principal)))
 	}
-}
-
-// writeInvalidDeviceToken escribe el error plano 401 con Cache-Control: no-store.
-func writeInvalidDeviceToken(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = w.Write([]byte(invalidDeviceTokenBody))
 }

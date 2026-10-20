@@ -42,10 +42,6 @@ func isProtectedTarget(method, path, escapedPath string) bool {
 	return method == http.MethodPost && loteEventPattern.MatchString(escapedPath)
 }
 
-// invalidTokenBody es la respuesta plana (sin envelope) exigida para un token
-// de dispositivo inválido.
-const invalidTokenBody = `{"error":"Token de dispositivo inválido","code":"invalid_device_token"}`
-
 // BeforeMux autentica las rutas de dispositivo antes de ServeMux. Las rutas no
 // protegidas pasan sin modificar. Ante un token inválido responde 401 con un
 // error plano; ante exceso de cuota responde 429.
@@ -66,7 +62,7 @@ func BeforeMux(verifier *deviceauth.Verifier, limiter *guard.Limiter, next http.
 			principal, err = verifier.Authenticate(r.Context(), r)
 		}
 		if err != nil {
-			writeInvalidToken(w)
+			deviceauth.WriteInvalidToken(w)
 			return
 		}
 
@@ -77,12 +73,4 @@ func BeforeMux(verifier *deviceauth.Verifier, limiter *guard.Limiter, next http.
 
 		next.ServeHTTP(w, r.WithContext(deviceauth.WithPrincipal(r.Context(), principal)))
 	})
-}
-
-// writeInvalidToken escribe el error plano 401 con Cache-Control: no-store.
-func writeInvalidToken(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = w.Write([]byte(invalidTokenBody))
 }

@@ -2,11 +2,8 @@ package controller
 
 import (
 	"encoding/json"
-	"fmt"
-	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/helpers"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
@@ -39,54 +36,9 @@ func (h *ControlSSEHandler) HandleControlEvents(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming no soportado", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache, no-transform")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	rc := http.NewResponseController(w)
-	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-		log.Printf("[SSE] Error al limpiar write deadline: %v", err)
-	}
-
-	client := h.broker.Subscribe()
-	defer h.broker.Unsubscribe(client)
-
-	fmt.Fprintf(w, ": connected lote=%s\n\n", loteID)
-	flusher.Flush()
-
-	heartbeat := time.NewTicker(30 * time.Second)
-	defer heartbeat.Stop()
-
-	for {
-		select {
-		case event, ok := <-client.Events:
-			if !ok {
-				return
-			}
-			if event.EventType != "control.propuesta" {
-				continue
-			}
-			if !payloadMatchesLote(event.Data, loteID) {
-				continue
-			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.EventType, string(event.Data))
-			flusher.Flush()
-
-		case <-heartbeat.C:
-			fmt.Fprintf(w, ": heartbeat\n\n")
-			flusher.Flush()
-
-		case <-r.Context().Done():
-			return
-		}
-	}
+	sse.Serve(w, r, h.broker, "connected lote="+loteID, func(e sse.SSEEvent) bool {
+		return e.EventType == "control.propuesta" && payloadMatchesLote(e.Data, loteID)
+	})
 }
 
 // payloadMatchesLote inspecciona el payload JSON y devuelve true si su

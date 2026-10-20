@@ -54,7 +54,7 @@ está en [`docs/api-endpoints.md`](docs/api-endpoints.md). Los puntos de mayor i
 - **Consigna:** `POST /api/v1/lotes/inicio` **ya no dispara consigna automática**
   (SCA-142 retirado). La consigna es **manual-only** (SCA-320) vía
   `POST /api/v1/horno/consigna` (JWT; Operario/Supervisor/Admin).
-- **`/api/v1/parametros-producto`:** requiere JWT; las escrituras (`POST`/`PUT`) exigen
+- **`/api/v1/productos`:** requiere JWT; las escrituras (`POST`/`PUT`) exigen
   rol Supervisor o Admin.
 - **`/api/v1/dispositivos/ping`:** se autentica con el Bearer secret del dispositivo.
   En `/api/v1/dispositivos`, `POST` responde **405** y `PUT`/`DELETE` requieren

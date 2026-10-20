@@ -50,9 +50,9 @@ heterogéneas. Por eso hay un XGBoost por `producto_id`.
 
 ```bash
 DATABASE_URL='postgres://user:pass@host/db' \
-python -m cmd.predictor-svc.train
+python -m cmd.predictor_svc.train
 # o para un solo producto:
-DATABASE_URL='...' python -m cmd.predictor-svc.train --producto <uuid>
+DATABASE_URL='...' python -m cmd.predictor_svc.train --producto <uuid>
 ```
 
 El script entrena por producto si hay ≥ N muestras (default 30). Guarda
@@ -61,13 +61,13 @@ en `models_xgb/`. El próximo `/predict` levanta el modelo nuevo.
 ## Run local
 
 ```bash
-pip install -r cmd/predictor-svc/requirements.txt
-uvicorn cmd.predictor-svc.main:app --reload --port 8090
+pip install -r cmd/predictor_svc/requirements.txt
+uvicorn cmd.predictor_svc.main:app --reload --port 8090
 ```
 
 ## Run docker
 
 ```bash
-docker build -f cmd/predictor-svc/Dockerfile -t predictor-svc .
+docker build -f cmd/predictor_svc/Dockerfile -t predictor-svc .
 docker run -p 8090:8090 predictor-svc
 ```

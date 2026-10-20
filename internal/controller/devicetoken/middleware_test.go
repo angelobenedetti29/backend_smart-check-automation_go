@@ -77,7 +77,7 @@ func TestBeforeMuxRejectsMissingOrMalformedAuthorization(t *testing.T) {
 			assert.False(t, next.called)
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 			assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
-			assert.Equal(t, invalidTokenBody, rec.Body.String())
+			assert.Equal(t, deviceauth.InvalidTokenBody, rec.Body.String())
 		})
 	}
 }
@@ -118,7 +118,7 @@ func TestBeforeMuxProtectsRenameEndpoint(t *testing.T) {
 
 		assert.False(t, next.called)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
-		assert.Equal(t, invalidTokenBody, rec.Body.String())
+		assert.Equal(t, deviceauth.InvalidTokenBody, rec.Body.String())
 	})
 
 	t.Run("rename-con-token-valido", func(t *testing.T) {
@@ -170,7 +170,7 @@ func TestBeforeMuxProtectsSectorAndLoteEventEndpoints(t *testing.T) {
 
 			assert.False(t, next.called)
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
-			assert.Equal(t, invalidTokenBody, rec.Body.String())
+			assert.Equal(t, deviceauth.InvalidTokenBody, rec.Body.String())
 		})
 	}
 }
@@ -256,7 +256,7 @@ func TestBeforeMuxInterceptaSlashEscapadoEnLoteID(t *testing.T) {
 
 		assert.False(t, next.called)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
-		assert.Equal(t, invalidTokenBody, rec.Body.String())
+		assert.Equal(t, deviceauth.InvalidTokenBody, rec.Body.String())
 	})
 
 	t.Run("uuid-sin-token-401", func(t *testing.T) {

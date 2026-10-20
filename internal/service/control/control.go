@@ -56,7 +56,7 @@ type Loop struct {
 	productoID     string
 	modo           string // MANUAL | SUPERVISION | AUTOMATICO
 	horno2Hab      bool
-	hornoID        string // horno físico destino del despacho (MPC_HORNO_ID, default "horno-1")
+	hornoID        string // horno físico destino del despacho (MPC_HORNO_ID, default "horno-01")
 	ventanaEvalSeg int
 	ventanaActSeg  int
 	pesos          optimizador.Pesos
@@ -501,7 +501,7 @@ func (loop *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuest
 // `usuario` puede estar vacío cuando el origen es AUTOMATICO (MPC despacha
 // solo); en modo MANUAL el handler lo carga desde el JWT del operario.
 //
-// HornoID proviene de la env MPC_HORNO_ID (default "horno-1") y representa
+// HornoID proviene de la env MPC_HORNO_ID (default "horno-01") y representa
 // el horno físico destino del despacho. Si el lote tiene horno2_habilitado
 // pero el horno configurado no lo soporta físicamente, se loggea warning y se
 // despacha sólo T1 (el horno receptor rechazará silenciosamente T2 si no
@@ -509,7 +509,7 @@ func (loop *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuest
 func (loop *Loop) aplicarConsigna(ctx context.Context, prop *optimizador.Propuesta, origen consigna.Origen, usuario string) (*consigna.Consigna, error) {
 	hornoID := loop.hornoID
 	if hornoID == "" {
-		hornoID = "horno-1"
+		hornoID = "horno-01"
 	}
 	if loop.horno2Hab && prop.Temp2 != nil {
 		// Defensa preventiva: el horno configurado podría no tener T2 físico.

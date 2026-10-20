@@ -7,8 +7,8 @@ Lee el dataset desde el backend Go (vía DATABASE_URL): agrega por lote el
 `models_xgb/producto_{uuid}_v{n}.json`.
 
 Uso:
-    DATABASE_URL=postgres://... python -m cmd.predictor-svc.train
-    DATABASE_URL=postgres://... python -m cmd.predictor-svc.train --producto a1b2...
+    DATABASE_URL=postgres://... python -m cmd.predictor_svc.train
+    DATABASE_URL=postgres://... python -m cmd.predictor_svc.train --producto a1b2...
 
 Este script es batch: se corre bajo demanda cuando se acumula histórico
 suficiente (default: ≥30 muestras por producto). El MPC sigue funcionando

@@ -69,7 +69,7 @@ curl http://localhost:8080/health
 curl http://localhost:8080/api/v1/lotes
 
 # Listar parámetros por producto (requiere cookie JWT; ya viene con el seed de Tostada Integral)
-curl http://localhost:8080/api/v1/parametros-producto
+curl http://localhost:8080/api/v1/productos
 ```
 
 ---
@@ -114,7 +114,7 @@ Requiere cookie JWT `session_token` (endpoints del panel de configuración; las 
 **Modificar el rango de temperatura de un producto existente (PUT):**
 
 ```bash
-curl -X PUT http://localhost:8080/api/v1/parametros-producto \
+curl -X PUT http://localhost:8080/api/v1/productos \
   -b "session_token=<JWT>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -130,7 +130,7 @@ curl -X PUT http://localhost:8080/api/v1/parametros-producto \
   }'
 ```
 
-Después hacer GET a `http://localhost:8080/api/v1/parametros-producto` para confirmar el cambio.
+Después hacer GET a `http://localhost:8080/api/v1/productos` para confirmar el cambio.
 
 > El body es un reemplazo completo (no parcial): hay que enviar todos los campos. `tempMax` debe ser mayor a `tempMin` y `velocidadCintaMax` mayor a `velocidadCintaMin`, o el server responde 422.
 

@@ -1,5 +1,5 @@
 // Package predictor implementa el cliente HTTP al sidecar XGBoost
-// (cmd/predictor-svc). El backend Go llama por cada decisión del MPC.
+// (cmd/predictor_svc). El backend Go llama por cada decisión del MPC.
 //
 // El sidecar puede estar caído (por ejemplo durante un deploy). En ese caso
 // el optimizador recibe error y la decisión se marca como "skipped" en

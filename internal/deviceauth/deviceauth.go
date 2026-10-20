@@ -18,6 +18,18 @@ import (
 // no corresponde a ningún dispositivo activo.
 var ErrInvalidToken = errors.New("token de dispositivo inválido")
 
+// InvalidTokenBody es la respuesta plana (sin envelope) exigida para un token
+// de dispositivo inválido.
+const InvalidTokenBody = `{"error":"Token de dispositivo inválido","code":"invalid_device_token"}`
+
+// WriteInvalidToken escribe el error plano 401 con Cache-Control: no-store.
+func WriteInvalidToken(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(InvalidTokenBody))
+}
+
 // maxTokenBytes acota el tamaño del secret aceptado para evitar hashing de
 // payloads arbitrariamente grandes.
 const maxTokenBytes = 512

@@ -101,7 +101,7 @@ func TestDualAuthInvalidDeviceBearerResponds401FlatBody(t *testing.T) {
 			assert.False(t, spy.called)
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 			assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
-			assert.Equal(t, invalidDeviceTokenBody, rec.Body.String())
+			assert.Equal(t, deviceauth.InvalidTokenBody, rec.Body.String())
 		})
 	}
 }
@@ -116,7 +116,7 @@ func TestDualAuthNilVerifierWithAuthorizationRejects(t *testing.T) {
 
 	assert.False(t, spy.called)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, invalidDeviceTokenBody, rec.Body.String())
+	assert.Equal(t, deviceauth.InvalidTokenBody, rec.Body.String())
 }
 
 func TestDualAuthValidOAuthCookieInvokesNextWithClaims(t *testing.T) {
@@ -161,7 +161,7 @@ func TestDualAuthInvalidBearerDoesNotFallBackToValidCookie(t *testing.T) {
 
 	assert.False(t, spy.called)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, invalidDeviceTokenBody, rec.Body.String())
+	assert.Equal(t, deviceauth.InvalidTokenBody, rec.Body.String())
 }
 
 func TestDualAuthInvalidCookieResponds401(t *testing.T) {
