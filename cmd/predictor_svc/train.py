@@ -35,6 +35,8 @@ try:
 except ImportError:
     xgb = None
 
+from .features import construir_features
+
 try:
     import psycopg2  # type: ignore
     import psycopg2.extras  # type: ignore
@@ -82,20 +84,16 @@ def _version_actual(modelo_id: str) -> int:
 
 
 def _features_de_muestra(m: MuestraLote) -> list[float]:
-    ancho_t = max(1.0, m.temp_max - m.temp_min)
-    ancho_v = max(0.01, m.vel_max - m.vel_min)
-    centro_t = (m.temp_max + m.temp_min) / 2.0
-    centro_v = (m.vel_max + m.vel_min) / 2.0
-    d_t = (m.temp_horno_1 - centro_t) / ancho_t
-    d_v = (m.velocidad_cinta - centro_v) / ancho_v
-    return [
+    return construir_features(
         m.temp_horno_1,
         m.velocidad_cinta,
-        m.temp_comb_1 if m.temp_comb_1 is not None else float("nan"),
-        m.humedad_horno if m.humedad_horno is not None else float("nan"),
-        d_t,
-        d_v,
-    ]
+        m.temp_comb_1,
+        m.humedad_horno,
+        m.temp_min,
+        m.temp_max,
+        m.vel_min,
+        m.vel_max,
+    )
 
 
 def _targets(m: MuestraLote) -> tuple[float, float, float]:
@@ -146,7 +144,7 @@ def cargar_muestras(database_url: str) -> list[MuestraLote]:
     JOIN obs ON obs.lote_id = l.id
     JOIN params p ON p.id = l.producto_id
     LEFT JOIN metricas_horno m ON m.lote_id = l.id
-    WHERE obs.total > 0
+    WHERE obs.total > 0 AND l.estado = 'CERRADO'
     GROUP BY l.id, l.producto_id, obs.n_crudos, obs.n_ok, obs.n_quemados, obs.total,
              p.temp_min, p.temp_max, p.velocidad_cinta_min, p.velocidad_cinta_max
     ORDER BY l.id

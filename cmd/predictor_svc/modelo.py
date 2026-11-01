@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .features import construir_features
+
 try:
     import xgboost as xgb  # type: ignore
     _XGBOOST_DISPONIBLE = True
@@ -171,30 +173,29 @@ class ModeloXGB:
 def _features_de_request(producto: ProductoPlaceholder, req) -> list[float]:
     """Vector de features que consume el XGBoost. Orden estable.
 
-    Features:
-      - temp_horno_1, velocidad_cinta
-      - temp_comb_1 (opcional), humedad_horno (opcional)
-      - d_t = (temp_horno_1 - centro_t) / ancho_t
-      - d_v = (velocidad_cinta - centro_v) / ancho_v
+    Usa los rangos del request si vienen los cuatro; si no, cae a los
+    rangos placeholder para compatibilidad con callers viejos. La math
+    vive en `features.construir_features`, compartida con el entrenamiento.
     """
-    centro_t = (
-        producto.temp_setpoint
-        if producto.temp_setpoint is not None
-        else (producto.temp_max + producto.temp_min) / 2.0
-    )
-    ancho_t = max(1.0, producto.temp_max - producto.temp_min)
-    centro_v = (producto.velocidad_cinta_max + producto.velocidad_cinta_min) / 2.0
-    ancho_v = max(0.01, producto.velocidad_cinta_max - producto.velocidad_cinta_min)
-    d_t = (req.temp_horno_1 - centro_t) / ancho_t
-    d_v = (req.velocidad_cinta - centro_v) / ancho_v
-    return [
+    # Mismo criterio que el placeholder: cada rango falta por separado.
+    temp_min = getattr(req, "temp_min", None)
+    temp_max = getattr(req, "temp_max", None)
+    vel_min = getattr(req, "velocidad_cinta_min", None)
+    vel_max = getattr(req, "velocidad_cinta_max", None)
+    temp_min = 150.0 if temp_min is None else temp_min
+    temp_max = 230.0 if temp_max is None else temp_max
+    vel_min = 0.05 if vel_min is None else vel_min
+    vel_max = 0.50 if vel_max is None else vel_max
+    return construir_features(
         req.temp_horno_1,
         req.velocidad_cinta,
-        req.temp_comb_1 if req.temp_comb_1 is not None else float("nan"),
-        req.humedad_horno if req.humedad_horno is not None else float("nan"),
-        d_t,
-        d_v,
-    ]
+        req.temp_comb_1,
+        req.humedad_horno,
+        temp_min,
+        temp_max,
+        vel_min,
+        vel_max,
+    )
 
 
 def _directorio_modelos() -> Path:

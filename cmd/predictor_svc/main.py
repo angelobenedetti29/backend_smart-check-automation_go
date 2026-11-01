@@ -43,17 +43,19 @@ _cache_lock = Lock()
 def _placeholder_de_request(req: PredictRequest) -> ProductoPlaceholder:
     """Snapshot mínimo del producto que necesita el placeholder.
 
-    Cuando el sidecar hable directo con el backend Go (futuro), este
-    snapshot se completará con el catálogo. Por ahora usamos defaults
-    seguros si el request no trae los rangos.
+    Usa los rangos que venga en el request; si faltan, defaults seguros.
     """
     return ProductoPlaceholder(
         id=req.producto_id,
         nombre="(desconocido)",
-        temp_min=150.0,
-        temp_max=230.0,
-        velocidad_cinta_min=0.05,
-        velocidad_cinta_max=0.50,
+        temp_min=req.temp_min if req.temp_min is not None else 150.0,
+        temp_max=req.temp_max if req.temp_max is not None else 230.0,
+        velocidad_cinta_min=(
+            req.velocidad_cinta_min if req.velocidad_cinta_min is not None else 0.05
+        ),
+        velocidad_cinta_max=(
+            req.velocidad_cinta_max if req.velocidad_cinta_max is not None else 0.50
+        ),
     )
 
 

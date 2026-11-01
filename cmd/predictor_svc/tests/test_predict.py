@@ -112,6 +112,27 @@ def test_predict_xgboost_si_hay_modelos():
     assert data.get("esPlaceholder") is False, "debería usar XGBoost real, no placeholder"
 
 
+def test_predict_con_rangos_del_producto():
+    """El request puede traer los rangos del producto; el placeholder los usa."""
+    r = client.post(
+        "/predict",
+        json={
+            "productoId": "prod-rangos",
+            "tempHorno1": 190.0,
+            "velocidadCinta": 0.30,
+            "tempMin": 170.0,
+            "tempMax": 210.0,
+            "velocidadCintaMin": 0.20,
+            "velocidadCintaMax": 0.40,
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert "esPlaceholder" in data
+    total = data["pctCrudos"] + data["pctOk"] + data["pctQuemados"]
+    assert abs(total - 100.0) < 0.1, f"los porcentajes no suman ~100: {data}"
+
+
 def test_predict_invalid_payload():
     """Un payload sin los campos requeridos debe ser rechazado (422)."""
     r = client.post("/predict", json={"productoId": ""})
