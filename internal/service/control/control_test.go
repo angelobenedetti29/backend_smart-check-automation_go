@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
@@ -249,6 +250,28 @@ func (f *fakeDecisionesRepo) MarcarAplicada(_ context.Context, id string, t, v f
 	f.marcarArgs.decisionID = id
 	f.marcarArgs.temp, f.marcarArgs.vel, f.marcarArgs.aplicadoPor = t, v, ap
 	return f.marcarErr
+}
+
+// fakeAlertaRepoControl captura las alertas que persiste el loop.
+type fakeAlertaRepoControl struct {
+	guardadas []alerta.Alerta
+}
+
+func (f *fakeAlertaRepoControl) Save(a *alerta.Alerta) error {
+	f.guardadas = append(f.guardadas, *a)
+	return nil
+}
+
+func (f *fakeAlertaRepoControl) GetByHornoID(string) ([]alerta.Alerta, error) {
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepoControl) Listar(context.Context, string) ([]alerta.Alerta, error) {
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepoControl) Ack(context.Context, string, alerta.Usuario) (*alerta.Alerta, error) {
+	return nil, alerta.ErrNotFound
 }
 
 // fakeConsignaSrv implementa ConsignaDispatchService y devuelve una consigna
@@ -1072,7 +1095,9 @@ func TestPreheatSinTelemetriaPersisteSkip(t *testing.T) {
 func TestPreheatTimeoutAborta(t *testing.T) {
 	now := time.Now().UTC()
 	repo := &fakeDecisionesRepo{}
+	alertas := &fakeAlertaRepoControl{}
 	loop := newPreheatLoop(now, repo, sse.NewBroker(), propuestaOK(), 200, 0.35, 2.0, nil)
+	loop.SetAlertas(alertas)
 	loop.preheatInicio = now.Add(-time.Hour)
 	loop.preheatTimeoutSeg = 1800
 
@@ -1087,6 +1112,19 @@ func TestPreheatTimeoutAborta(t *testing.T) {
 	}
 	if loop.propuestaPendiente != nil {
 		t.Fatalf("no debe publicar propuesta al abortar")
+	}
+	if len(alertas.guardadas) != 1 {
+		t.Fatalf("se esperaba 1 alerta de timeout, got %d", len(alertas.guardadas))
+	}
+	a := alertas.guardadas[0]
+	if a.Tipo != alerta.TipoPrecalentamientoTimeout {
+		t.Errorf("tipo = %q, want %q", a.Tipo, alerta.TipoPrecalentamientoTimeout)
+	}
+	if a.Estado != alerta.EstadoActiva {
+		t.Errorf("estado = %q, want %q", a.Estado, alerta.EstadoActiva)
+	}
+	if a.LoteID == nil || *a.LoteID != "lote-1" {
+		t.Errorf("lote_id = %v, want lote-1", a.LoteID)
 	}
 }
 

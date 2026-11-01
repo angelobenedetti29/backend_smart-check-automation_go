@@ -35,6 +35,7 @@ import (
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/helpers"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
@@ -121,6 +122,9 @@ type ControlDeps struct {
 	// Modelos verifica si el sidecar tiene un modelo entrenado para el producto.
 	// Nil = se omite el chequeo (tests / sidecar opcional).
 	Modelos ModeloStatus
+	// Alertas persiste alertas del loop (p.ej. timeout de precalentamiento).
+	// Nil = el loop las omite.
+	Alertas alerta.Repository
 }
 
 // ModeloStatus es el mínimo del cliente del sidecar que necesita el handler.
@@ -297,6 +301,7 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps,
 	if seg, perr := strconv.Atoi(os.Getenv("MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS")); perr == nil {
 		loop.SetPreheatTimeout(seg)
 	}
+	loop.SetAlertas(deps.Alertas)
 	if faseInicial != "" {
 		loop.SetFaseInicial(faseInicial)
 	}

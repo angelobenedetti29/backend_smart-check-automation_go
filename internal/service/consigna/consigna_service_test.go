@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
@@ -26,6 +27,48 @@ type fakeController struct {
 func (f *fakeController) SendSetpoint(hornoID string, temperatura, velocidad float64) oven_controller.DispatchResult {
 	f.calls++
 	return f.result
+}
+
+// fakeHornoAlertaRepo implementa horno.Repository (delegando en el fake en
+// memoria) y alerta.Repository, para inyectar un único doble en ambos roles.
+type fakeHornoAlertaRepo struct {
+	*database.PostgresRepository
+	mu      sync.Mutex
+	alertas []alerta.Alerta
+}
+
+func newFakeHornoAlertaRepo() *fakeHornoAlertaRepo {
+	return &fakeHornoAlertaRepo{PostgresRepository: database.NewPostgresRepository()}
+}
+
+func (f *fakeHornoAlertaRepo) Save(a *alerta.Alerta) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a.ID = "alerta-1"
+	f.alertas = append(f.alertas, *a)
+	return nil
+}
+
+func (f *fakeHornoAlertaRepo) GetByHornoID(hornoID string) ([]alerta.Alerta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []alerta.Alerta
+	for _, a := range f.alertas {
+		if a.HornoID == hornoID {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeHornoAlertaRepo) Listar(context.Context, string) ([]alerta.Alerta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.alertas, nil
+}
+
+func (f *fakeHornoAlertaRepo) Ack(context.Context, string, alerta.Usuario) (*alerta.Alerta, error) {
+	return nil, alerta.ErrNotFound
 }
 
 const testProductoID = "a1b2c3d4-5678-90ab-cdef-1234567890ab"
@@ -124,10 +167,9 @@ func (f *fakeConsignaRepo) count() int {
 
 // newTestService arma un ConsignaService con el cliente simulado real (~5%
 // de fallo aleatorio) — usado por los tests existentes que toleran esa
-// variabilidad. database.PostgresRepository (en memoria) implementa tanto
-// horno.Repository como alerta.Repository, así que se reutiliza para ambos.
-func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *database.PostgresRepository, *fakeConsignaRepo) {
-	hornoRepo := database.NewPostgresRepository()
+// variabilidad. fakeHornoAlertaRepo cubre horno.Repository y alerta.Repository.
+func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *fakeHornoAlertaRepo, *fakeConsignaRepo) {
+	hornoRepo := newFakeHornoAlertaRepo()
 	consignaRepo := &fakeConsignaRepo{}
 	ctrl := oven_controller.NewSimulatedOvenController("http://localhost:8600/plc/horno")
 	broker := sse.NewBroker()
@@ -138,8 +180,8 @@ func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *database.Postg
 // newTestServiceWithController arma un ConsignaService con un OvenController
 // determinista (fakeController), para probar rutas de éxito/fallo sin depender
 // del azar del cliente simulado real.
-func newTestServiceWithController(paramRepo *fakeParamRepo, ctrl OvenController) (*ConsignaService, *database.PostgresRepository, *fakeConsignaRepo) {
-	hornoRepo := database.NewPostgresRepository()
+func newTestServiceWithController(paramRepo *fakeParamRepo, ctrl OvenController) (*ConsignaService, *fakeHornoAlertaRepo, *fakeConsignaRepo) {
+	hornoRepo := newFakeHornoAlertaRepo()
 	consignaRepo := &fakeConsignaRepo{}
 	broker := sse.NewBroker()
 	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
@@ -294,8 +336,11 @@ func TestDispatch_Fallido_GeneraAlertaCriticaYPasaAControlManual(t *testing.T) {
 	if len(alertas) != 1 {
 		t.Fatalf("expected 1 alerta crítica generada, got %d", len(alertas))
 	}
-	if alertas[0].Nivel != "CRITICAL" {
-		t.Errorf("expected nivel CRITICAL, got %s", alertas[0].Nivel)
+	if alertas[0].Severidad != alerta.SeveridadCritical {
+		t.Errorf("expected severidad CRITICAL, got %s", alertas[0].Severidad)
+	}
+	if alertas[0].Tipo != alerta.TipoConsignaEnlace {
+		t.Errorf("expected tipo %s, got %s", alerta.TipoConsignaEnlace, alertas[0].Tipo)
 	}
 }
 

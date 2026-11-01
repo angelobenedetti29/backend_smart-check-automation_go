@@ -16,6 +16,7 @@ import (
 	"github.com/joho/godotenv"
 
 	schema "github.com/angelobenedetti29/smart-check-automation/database"
+	alertaController "github.com/angelobenedetti29/smart-check-automation/internal/controller/alerta"
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	consignaController "github.com/angelobenedetti29/smart-check-automation/internal/controller/consigna"
 	controlController "github.com/angelobenedetti29/smart-check-automation/internal/controller/control"
@@ -118,6 +119,7 @@ func main() {
 	loteSectorRepo := repository.NewLoteSectorPostgresRepository(pgPool)
 	metricasHornoRepo := repository.NewMetricasHornoPostgresRepository(pgPool)
 	decisionesRepo := repository.NewDecisionesControlPostgresRepository(pgPool)
+	alertaRepo := repository.NewAlertaPostgresRepository(pgPool)
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
@@ -138,14 +140,14 @@ func main() {
 	controlSSEBroker := sse.NewBroker()
 
 	// 3. Instantiate Business Layer
-	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo)
+	hornoSvc := hornoService.NewHornoService(dbRepo, alertaRepo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	renamePushTimeout := getEnvDuration("DISPOSITIVO_RENAME_PUSH_TIMEOUT", 10*time.Second)
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker, renamePushTimeout)
 	// Autenticación de nodos: Bearer <secret> resuelto por hash contra dispositivos activos.
 	deviceVerifier := &deviceauth.Verifier{Store: deviceAuthRepo}
 	registroSvc := registroService.NewService(registrationRepo)
-	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, productoRepo, ovenController, hornoSSEBroker, dbRepo)
+	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, productoRepo, ovenController, hornoSSEBroker, alertaRepo)
 
 	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
 	userSvc := userService.NewService(userRepo)
@@ -169,7 +171,7 @@ func main() {
 	}
 
 	// 4. Instantiate Presentation HTTP Handlers
-	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
+	hornoHandler := hornoController.NewHornoHandler(hornoSvc, alertaRepo)
 	loteSectorSSEHandler := sseController.NewSSEHandler(loteSectorSSEBroker)
 	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc, dispositivoRepo)
 	registroHandler := registroController.NewHandler(registroSvc)
@@ -219,6 +221,7 @@ func main() {
 		LoteRepo:       loteSectorRepo,
 		DeviceSector:   loteSectorSvc,
 		Modelos:        predictorCliente,
+		Alertas:        alertaRepo,
 	}
 	controlHandler := controlController.NewControlHandler(controlDeps)
 	// Al abrir un lote en modo no manual, arrancar su loop de control.
@@ -419,6 +422,11 @@ func main() {
 	mux.HandleFunc("/api/v1/horno/consigna/historial", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, consignaHandler.GetHistorial)))
 	mux.HandleFunc("/api/v1/horno/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoSSEHandler.HandleSSE)))
 
+	// Alertas: listado para cualquier rol autenticado; el ACK es del panel
+	// (Supervisor/Administrador).
+	mux.HandleFunc("/api/v1/alertas", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, alertaController.HandleListar(alertaController.AlertaDeps{Repo: alertaRepo}))))
+	mux.HandleFunc("/api/v1/alertas/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, alertaController.HandleAck(alertaController.AlertaDeps{Repo: alertaRepo})))))
+
 	// 6. Autenticación de dispositivo antes del ServeMux, luego cuotas por peer/usuario.
 	limiter := guard.NewLimiter(0.5, 10)     // 30/minute, burst 10 para endpoints públicos de registro
 	deviceLimiter := guard.NewLimiter(2, 30) // 120/minute, burst 30 tras autenticar por UUID
@@ -555,7 +563,7 @@ func isManagementWrite(r *http.Request) bool {
 	if strings.HasSuffix(r.URL.Path, "/approve") || strings.HasSuffix(r.URL.Path, "/reject") {
 		return strings.HasPrefix(r.URL.Path, "/api/v1/registration-requests/")
 	}
-	return strings.HasPrefix(r.URL.Path, "/api/v1/admin/") || strings.HasPrefix(r.URL.Path, "/api/v1/dispositivos") || strings.HasPrefix(r.URL.Path, "/api/v1/productos") || strings.HasPrefix(r.URL.Path, "/api/v1/sectores") || strings.HasPrefix(r.URL.Path, "/api/v1/horno/")
+	return strings.HasPrefix(r.URL.Path, "/api/v1/admin/") || strings.HasPrefix(r.URL.Path, "/api/v1/dispositivos") || strings.HasPrefix(r.URL.Path, "/api/v1/productos") || strings.HasPrefix(r.URL.Path, "/api/v1/sectores") || strings.HasPrefix(r.URL.Path, "/api/v1/horno/") || strings.HasPrefix(r.URL.Path, "/api/v1/alertas")
 }
 
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {

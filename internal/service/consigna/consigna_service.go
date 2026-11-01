@@ -177,9 +177,11 @@ func (s *ConsignaService) handleFalloDeEnlace(h *horno.Horno, motivo string, ori
 	}
 
 	a := &alerta.Alerta{
-		HornoID: h.ID,
-		Nivel:   "CRITICAL",
-		Mensaje: fmt.Sprintf("Fallo de enlace con el controlador físico del horno (origen %s): %s. El horno pasó a modo CONTROL_MANUAL hasta que un operario confirme la reconexión.", origen, motivo),
+		HornoID:   h.ID,
+		Tipo:      alerta.TipoConsignaEnlace,
+		Severidad: alerta.SeveridadCritical,
+		Estado:    alerta.EstadoActiva,
+		Mensaje:   fmt.Sprintf("Fallo de enlace con el controlador físico del horno (origen %s): %s. El horno pasó a modo CONTROL_MANUAL hasta que un operario confirme la reconexión.", origen, motivo),
 	}
 	if err := s.alertaRepo.Save(a); err != nil {
 		log.Printf("[ERROR] Error al guardar alerta crítica de fallo de enlace en horno %s: %v", h.ID, err)

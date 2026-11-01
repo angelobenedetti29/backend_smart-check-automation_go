@@ -1,10 +1,6 @@
 package database
 
-import (
-	"testing"
-
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
-)
+import "testing"
 
 func TestPostgresRepository_GetByID(t *testing.T) {
 	repo := NewPostgresRepository()
@@ -44,34 +40,5 @@ func TestPostgresRepository_Update(t *testing.T) {
 	}
 	if updated.Estado != "MANTENIMIENTO" {
 		t.Errorf("expected updated state 'MANTENIMIENTO', got '%s'", updated.Estado)
-	}
-}
-
-func TestPostgresRepository_Alerts(t *testing.T) {
-	repo := NewPostgresRepository()
-
-	a := &alerta.Alerta{
-		ID:      "alert-01",
-		HornoID: "horno-01",
-		Nivel:   "WARNING",
-		Mensaje: "Test Alert",
-	}
-
-	err := repo.Save(a)
-	if err != nil {
-		t.Fatalf("failed to save alert: %v", err)
-	}
-
-	alerts, err := repo.GetByHornoID("horno-01")
-	if err != nil {
-		t.Fatalf("failed to fetch alerts: %v", err)
-	}
-
-	if len(alerts) != 1 {
-		t.Fatalf("expected 1 alert, got %d", len(alerts))
-	}
-
-	if alerts[0].Mensaje != "Test Alert" {
-		t.Errorf("expected 'Test Alert', got '%s'", alerts[0].Mensaje)
 	}
 }

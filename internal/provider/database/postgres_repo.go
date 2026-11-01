@@ -5,23 +5,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
 )
 
-// PostgresRepository implements horno.Repository and alerta.Repository.
+// PostgresRepository implements horno.Repository.
 // It simulates a PostgreSQL database adapter for testing and transactional scaffolding.
 type PostgresRepository struct {
-	mu      sync.RWMutex
-	hornos  map[string]horno.Horno
-	alertas map[string][]alerta.Alerta
+	mu     sync.RWMutex
+	hornos map[string]horno.Horno
 }
 
 // NewPostgresRepository initializes the PostgreSQL repository simulator with seed data.
 func NewPostgresRepository() *PostgresRepository {
 	repo := &PostgresRepository{
-		hornos:  make(map[string]horno.Horno),
-		alertas: make(map[string][]alerta.Alerta),
+		hornos: make(map[string]horno.Horno),
 	}
 
 	// Seed data representing a real industrial kiln (Horno) in factory line
@@ -61,26 +58,4 @@ func (r *PostgresRepository) Update(h *horno.Horno) error {
 	h.UltimoCheck = time.Now()
 	r.hornos[h.ID] = *h
 	return nil
-}
-
-// Save saves an industrial alert event to the database.
-func (r *PostgresRepository) Save(a *alerta.Alerta) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	a.CreadaEn = time.Now()
-	r.alertas[a.HornoID] = append(r.alertas[a.HornoID], *a)
-	return nil
-}
-
-// GetByHornoID retrieves all alerts generated for a specific kiln.
-func (r *PostgresRepository) GetByHornoID(hornoID string) ([]alerta.Alerta, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	alerts, ok := r.alertas[hornoID]
-	if !ok {
-		return []alerta.Alerta{}, nil
-	}
-	return alerts, nil
 }

@@ -2,20 +2,46 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 )
 
+// fakeAlertaRepo implementa alerta.Repository en memoria para los handlers.
+type fakeAlertaRepo struct {
+	guardadas []alerta.Alerta
+}
+
+func (f *fakeAlertaRepo) Save(a *alerta.Alerta) error {
+	a.ID = "alerta-1"
+	f.guardadas = append(f.guardadas, *a)
+	return nil
+}
+
+func (f *fakeAlertaRepo) GetByHornoID(string) ([]alerta.Alerta, error) {
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepo) Listar(context.Context, string) ([]alerta.Alerta, error) {
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepo) Ack(context.Context, string, alerta.Usuario) (*alerta.Alerta, error) {
+	return nil, alerta.ErrNotFound
+}
+
 func TestHornoHandler_GetHornoStatus(t *testing.T) {
 	// Initialize core database providers and service layers
 	dbRepo := database.NewPostgresRepository()
-	svc := service.NewHornoService(dbRepo, dbRepo)
-	handler := NewHornoHandler(svc, dbRepo)
+	aRepo := &fakeAlertaRepo{}
+	svc := service.NewHornoService(dbRepo, aRepo)
+	handler := NewHornoHandler(svc, aRepo)
 
 	// Create simulated GET request
 	req, err := http.NewRequest("GET", "/api/v1/horno?id=horno-01", nil)
@@ -50,8 +76,9 @@ func TestHornoHandler_GetHornoStatus(t *testing.T) {
 
 func TestHornoHandler_UpdateTemperature(t *testing.T) {
 	dbRepo := database.NewPostgresRepository()
-	svc := service.NewHornoService(dbRepo, dbRepo)
-	handler := NewHornoHandler(svc, dbRepo)
+	aRepo := &fakeAlertaRepo{}
+	svc := service.NewHornoService(dbRepo, aRepo)
+	handler := NewHornoHandler(svc, aRepo)
 
 	// Valid input JSON body
 	input := UpdateTemperatureInput{

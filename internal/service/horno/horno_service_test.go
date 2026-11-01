@@ -1,14 +1,39 @@
 package service
 
 import (
+	"context"
 	"testing"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 )
 
+// fakeAlertaRepo aísla el servicio del repositorio PostgreSQL real.
+type fakeAlertaRepo struct {
+	guardadas []alerta.Alerta
+}
+
+func (f *fakeAlertaRepo) Save(a *alerta.Alerta) error {
+	a.ID = "alerta-1"
+	f.guardadas = append(f.guardadas, *a)
+	return nil
+}
+
+func (f *fakeAlertaRepo) GetByHornoID(string) ([]alerta.Alerta, error) {
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepo) Listar(context.Context, string) ([]alerta.Alerta, error) {
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepo) Ack(context.Context, string, alerta.Usuario) (*alerta.Alerta, error) {
+	return nil, alerta.ErrNotFound
+}
+
 func TestHornoService_UpdateTemperature_Normal(t *testing.T) {
 	hRepo := database.NewPostgresRepository()
-	aRepo := hRepo // Simulates dual interface implementation
+	aRepo := &fakeAlertaRepo{}
 
 	svc := NewHornoService(hRepo, aRepo)
 
@@ -23,15 +48,14 @@ func TestHornoService_UpdateTemperature_Normal(t *testing.T) {
 	}
 
 	// Verify no alerts were stored
-	alerts, _ := aRepo.GetByHornoID("horno-01")
-	if len(alerts) != 0 {
-		t.Errorf("expected 0 alerts, got %d", len(alerts))
+	if len(aRepo.guardadas) != 0 {
+		t.Errorf("expected 0 alerts, got %d", len(aRepo.guardadas))
 	}
 }
 
 func TestHornoService_UpdateTemperature_Warning(t *testing.T) {
 	hRepo := database.NewPostgresRepository()
-	aRepo := hRepo
+	aRepo := &fakeAlertaRepo{}
 
 	svc := NewHornoService(hRepo, aRepo)
 
@@ -46,19 +70,24 @@ func TestHornoService_UpdateTemperature_Warning(t *testing.T) {
 	}
 
 	// Verify alert was stored
-	alerts, _ := aRepo.GetByHornoID("horno-01")
-	if len(alerts) != 1 {
-		t.Fatalf("expected 1 warning alert, got %d", len(alerts))
+	if len(aRepo.guardadas) != 1 {
+		t.Fatalf("expected 1 warning alert, got %d", len(aRepo.guardadas))
 	}
 
-	if alerts[0].Nivel != "WARNING" {
-		t.Errorf("expected level 'WARNING', got '%s'", alerts[0].Nivel)
+	if aRepo.guardadas[0].Severidad != alerta.SeveridadWarning {
+		t.Errorf("expected severidad 'WARNING', got '%s'", aRepo.guardadas[0].Severidad)
+	}
+	if aRepo.guardadas[0].Tipo != alerta.TipoTemperaturaHorno {
+		t.Errorf("expected tipo '%s', got '%s'", alerta.TipoTemperaturaHorno, aRepo.guardadas[0].Tipo)
+	}
+	if aRepo.guardadas[0].Estado != alerta.EstadoActiva {
+		t.Errorf("expected estado 'ACTIVA', got '%s'", aRepo.guardadas[0].Estado)
 	}
 }
 
 func TestHornoService_UpdateTemperature_Critical(t *testing.T) {
 	hRepo := database.NewPostgresRepository()
-	aRepo := hRepo
+	aRepo := &fakeAlertaRepo{}
 
 	svc := NewHornoService(hRepo, aRepo)
 
@@ -73,12 +102,11 @@ func TestHornoService_UpdateTemperature_Critical(t *testing.T) {
 	}
 
 	// Verify alert was stored
-	alerts, _ := aRepo.GetByHornoID("horno-01")
-	if len(alerts) != 1 {
-		t.Fatalf("expected 1 critical alert, got %d", len(alerts))
+	if len(aRepo.guardadas) != 1 {
+		t.Fatalf("expected 1 critical alert, got %d", len(aRepo.guardadas))
 	}
 
-	if alerts[0].Nivel != "CRITICAL" {
-		t.Errorf("expected level 'CRITICAL', got '%s'", alerts[0].Nivel)
+	if aRepo.guardadas[0].Severidad != alerta.SeveridadCritical {
+		t.Errorf("expected severidad 'CRITICAL', got '%s'", aRepo.guardadas[0].Severidad)
 	}
 }

@@ -1175,4 +1175,47 @@ CREATE INDEX IF NOT EXISTS idx_decisiones_control_lote_created
 CREATE INDEX IF NOT EXISTS idx_decisiones_control_origen
     ON decisiones_control (decision_origen_id) WHERE decision_origen_id IS NOT NULL;
 
+-- ----------------------------------------------------------------------------
+-- 5) alertas: eventos operativos que el panel muestra y el operario reconoce.
+--    sector_id/lote_id/acked_by usan SET NULL para no perder la alerta si se
+--    borra la entidad referenciada. La deduplicación se hace con índices
+--    parciales sobre las alertas ACTIVA: una sola por lote+tipo y por horno+tipo.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS alertas (
+    id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    sector_id   VARCHAR(50)  REFERENCES sectores(id) ON DELETE SET NULL,
+    lote_id     UUID         REFERENCES lotes_productivos(id) ON DELETE SET NULL,
+    horno_id    TEXT,
+    tipo        TEXT         NOT NULL,
+    severidad   TEXT         NOT NULL CHECK (severidad IN ('INFO', 'WARNING', 'CRITICAL')),
+    estado      TEXT         NOT NULL DEFAULT 'ACTIVA' CHECK (estado IN ('ACTIVA', 'ACK', 'RESUELTA')),
+    mensaje     TEXT         NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    acked_by    UUID         REFERENCES usuarios(id) ON DELETE SET NULL,
+    acked_at    TIMESTAMPTZ
+);
+
+COMMENT ON TABLE  alertas            IS 'Alertas operativas (temperatura, fallo de enlace, timeout de precalentamiento) visibles en el panel; el operario las reconoce (ACK).';
+COMMENT ON COLUMN alertas.sector_id  IS 'Sector afectado (nullable; SET NULL si se elimina el sector)';
+COMMENT ON COLUMN alertas.lote_id    IS 'Lote productivo afectado (nullable; SET NULL si se elimina el lote)';
+COMMENT ON COLUMN alertas.horno_id   IS 'Identificador del horno físico (no es FK: el dominio horno vive en memoria)';
+COMMENT ON COLUMN alertas.tipo       IS 'Origen de la alerta: TEMPERATURA_HORNO, CONSIGNA_ENLACE o PRECALENTAMIENTO_TIMEOUT';
+COMMENT ON COLUMN alertas.severidad  IS 'Gravedad: INFO, WARNING o CRITICAL';
+COMMENT ON COLUMN alertas.estado     IS 'Ciclo de vida: ACTIVA (sin reconocer), ACK (reconocida por un operario) o RESUELTA';
+COMMENT ON COLUMN alertas.mensaje    IS 'Texto legible de la alerta para el panel';
+COMMENT ON COLUMN alertas.created_at IS 'Marca temporal de generación de la alerta';
+COMMENT ON COLUMN alertas.acked_by   IS 'FK al usuario que reconoció la alerta (nullable mientras está ACTIVA)';
+COMMENT ON COLUMN alertas.acked_at   IS 'Marca temporal del reconocimiento (nullable mientras está ACTIVA)';
+
+-- Deduplicación: una sola alerta ACTIVA por lote+tipo y por horno+tipo.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alertas_activa_lote_tipo
+    ON alertas (lote_id, tipo) WHERE estado = 'ACTIVA' AND lote_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alertas_activa_horno_tipo
+    ON alertas (horno_id, tipo) WHERE estado = 'ACTIVA' AND horno_id IS NOT NULL;
+
+-- Listado del panel por estado, más recientes primero.
+CREATE INDEX IF NOT EXISTS idx_alertas_estado_created
+    ON alertas (estado, created_at DESC);
+
 COMMIT;

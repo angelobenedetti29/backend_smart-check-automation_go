@@ -85,10 +85,11 @@ func (h *HornoHandler) UpdateTemperature(w http.ResponseWriter, r *http.Request)
 
 	// 2. Output result and alert summary
 	alerts, _ := h.alertaRepo.GetByHornoID(input.ID)
-	
+
+	// GetByHornoID devuelve created_at DESC: la primera es la más reciente.
 	var latestAlert *alerta.Alerta
 	if len(alerts) > 0 {
-		latestAlert = &alerts[len(alerts)-1]
+		latestAlert = &alerts[0]
 	}
 
 	data := map[string]interface{}{

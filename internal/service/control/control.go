@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
@@ -71,6 +72,7 @@ type Loop struct {
 	decisiones  decisionesRepo
 	broker      *sse.Broker
 	now         func() time.Time
+	alertas     alerta.Repository
 
 	// shouldExit es la señal de salida natural (lote cerrado, etc.). Sólo la
 	// toca la goroutine de run/tick, no necesita mutex.
@@ -173,6 +175,12 @@ func (loop *Loop) SetConfianzaMin(v float64) {
 // placeholder (sin modelo entrenado). Default false.
 func (loop *Loop) SetPermitirPlaceholder(permitir bool) {
 	loop.permitirPlaceholder = permitir
+}
+
+// SetAlertas inyecta el repositorio de alertas. Es nil-safe: sin repo, el loop
+// omite la generación de alertas.
+func (loop *Loop) SetAlertas(a alerta.Repository) {
+	loop.alertas = a
 }
 
 // SetPreheatTimeout ajusta el máximo de espera de precalentamiento. Un valor
@@ -679,6 +687,7 @@ func (loop *Loop) tickPreheat(ctx context.Context, metricas []metricashorno.Metr
 		if err := loop.decisiones.Save(ctx, d); err != nil {
 			log.Printf("[control] Save decision (precalentamiento_timeout): %v", err)
 		}
+		loop.alertarPreheatTimeout(ctx, lote, ultima, now)
 		log.Printf("[control] precalentamiento agotó %ds; loop abortado", loop.preheatTimeoutSeg)
 		loop.shouldExit = true
 		return
@@ -768,6 +777,38 @@ func (loop *Loop) tickPreheat(ctx context.Context, metricas []metricashorno.Metr
 		return
 	}
 	loop.entregar(ctx, trans, transDecision)
+}
+
+// alertarPreheatTimeout genera una alerta CRITICAL por lote cuando el horno no
+// alcanza la temperatura de receta a tiempo. Es best-effort: un fallo al
+// guardar sólo se loguea y nunca altera el aborto del loop. El índice único
+// parcial garantiza una sola alerta ACTIVA por lote+tipo.
+func (loop *Loop) alertarPreheatTimeout(ctx context.Context, lote *lote_sector.Lote, ultima *metricashorno.MetricaHorno, now time.Time) {
+	if loop.alertas == nil {
+		return
+	}
+
+	transcurrido := int(now.Sub(loop.preheatInicio).Seconds())
+	mensaje := fmt.Sprintf("Precalentamiento agotado tras %ds sin alcanzar la temperatura objetivo", transcurrido)
+	if target, _, ok := loop.objetivoReceta(ctx, lote); ok {
+		mensaje += fmt.Sprintf(" (objetivo %.1f°C)", target)
+	}
+	if ultima != nil && ultima.TempHorno1 != nil {
+		mensaje += fmt.Sprintf("; última temperatura real %.1f°C", *ultima.TempHorno1)
+	}
+
+	loteID := loop.loteID
+	a := &alerta.Alerta{
+		LoteID:    &loteID,
+		HornoID:   loop.hornoID,
+		Tipo:      alerta.TipoPrecalentamientoTimeout,
+		Severidad: alerta.SeveridadCritical,
+		Estado:    alerta.EstadoActiva,
+		Mensaje:   mensaje,
+	}
+	if err := loop.alertas.Save(a); err != nil {
+		log.Printf("[control] Save alerta (precalentamiento_timeout) lote %s: %v", loop.loteID, err)
+	}
 }
 
 // objetivoReceta resuelve la temperatura/velocidad de arranque. Prefiere los

@@ -42,14 +42,16 @@ func (s *HornoService) UpdateTemperature(id string, temp float64) (*horno.Horno,
 
 	if temp > 200.0 {
 		h.Estado = "MANTENIMIENTO"
-		
+
 		// Create and store a CRITICAL alert
 		alt := &alerta.Alerta{
-			ID:       fmt.Sprintf("alt-temp-%d", time.Now().UnixNano()),
-			HornoID:  h.ID,
-			Nivel:    "CRITICAL",
-			Mensaje:  fmt.Sprintf("Temperatura crítica excedida: %.1f°C. Límite seguro: 200.0°C (Previa: %.1f°C)", temp, oldTemp),
-			CreadaEn: time.Now(),
+			ID:        fmt.Sprintf("alt-temp-%d", time.Now().UnixNano()),
+			HornoID:   h.ID,
+			Tipo:      alerta.TipoTemperaturaHorno,
+			Severidad: alerta.SeveridadCritical,
+			Estado:    alerta.EstadoActiva,
+			Mensaje:   fmt.Sprintf("Temperatura crítica excedida: %.1f°C. Límite seguro: 200.0°C (Previa: %.1f°C)", temp, oldTemp),
+			CreadaEn:  time.Now(),
 		}
 		err = s.alertaRepo.Save(alt)
 		if err != nil {
@@ -60,11 +62,13 @@ func (s *HornoService) UpdateTemperature(id string, temp float64) (*horno.Horno,
 
 		// Create and store a WARNING alert
 		alt := &alerta.Alerta{
-			ID:       fmt.Sprintf("alt-temp-%d", time.Now().UnixNano()),
-			HornoID:  h.ID,
-			Nivel:    "WARNING",
-			Mensaje:  fmt.Sprintf("Temperatura elevada en zona activa: %.1f°C. (Previa: %.1f°C)", temp, oldTemp),
-			CreadaEn: time.Now(),
+			ID:        fmt.Sprintf("alt-temp-%d", time.Now().UnixNano()),
+			HornoID:   h.ID,
+			Tipo:      alerta.TipoTemperaturaHorno,
+			Severidad: alerta.SeveridadWarning,
+			Estado:    alerta.EstadoActiva,
+			Mensaje:   fmt.Sprintf("Temperatura elevada en zona activa: %.1f°C. (Previa: %.1f°C)", temp, oldTemp),
+			CreadaEn:  time.Now(),
 		}
 		_ = s.alertaRepo.Save(alt)
 	} else {
