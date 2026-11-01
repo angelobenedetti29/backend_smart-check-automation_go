@@ -301,6 +301,11 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps,
 	if seg, perr := strconv.Atoi(os.Getenv("MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS")); perr == nil {
 		loop.SetPreheatTimeout(seg)
 	}
+	// Poll corto sólo para demos/E2E: por defecto el loop reintenta cada 15 s
+	// mientras espera la primera telemetría.
+	if seg, perr := strconv.Atoi(os.Getenv("MPC_PREHEAT_POLL_SEGUNDOS")); perr == nil {
+		loop.SetPreheatPoll(seg)
+	}
 	loop.SetAlertas(deps.Alertas)
 	if faseInicial != "" {
 		loop.SetFaseInicial(faseInicial)

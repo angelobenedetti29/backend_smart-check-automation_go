@@ -191,6 +191,15 @@ func (loop *Loop) SetPreheatTimeout(segundos int) {
 	}
 }
 
+// SetPreheatPoll ajusta cada cuántos segundos el loop reintenta mientras está
+// en calentamiento o esperando la primera telemetría. Un valor <= 0 conserva el
+// default (15 s). Bajarlo sólo tiene sentido en demos/E2E con ventanas cortas.
+func (loop *Loop) SetPreheatPoll(segundos int) {
+	if segundos > 0 {
+		loop.preheatPollSeg = segundos
+	}
+}
+
 // SetFaseInicial fuerza la fase con la que arranca run. Sólo acepta CALENTANDO
 // o ADAPTANDO; cualquier otro valor se ignora. Debe llamarse antes de Start.
 func (loop *Loop) SetFaseInicial(fase string) {
