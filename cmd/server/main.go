@@ -190,13 +190,18 @@ func main() {
 		predictorURL = "http://localhost:8090"
 	}
 	predictorToken := os.Getenv("PREDICTOR_AUTH_TOKEN")
-	var predictorCliente optimizador.Predictor
+	var predictorCliente *predictor.ClientePredictor
 	if predictorToken != "" {
 		predictorCliente = predictor.NewClientePredictorWithAuth(predictorURL, predictorToken)
 	} else {
 		predictorCliente = predictor.NewClientePredictor(predictorURL)
 	}
 	optimizer := optimizador.NewOptimizer(predictorCliente)
+
+	// rootCtx es el ciclo de vida de las goroutines de fondo (reaper, reanudación
+	// del control tras un reinicio). Se crea antes del wiring para pasárselo.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
 
 	// Registry de loops activos por lote y handlers de control.
 	loopRegistry := controlController.NewLoopRegistry()
@@ -213,10 +218,13 @@ func main() {
 		Broker:         controlSSEBroker,
 		LoteRepo:       loteSectorRepo,
 		DeviceSector:   loteSectorSvc,
+		Modelos:        predictorCliente,
 	}
 	controlHandler := controlController.NewControlHandler(controlDeps)
 	// Al abrir un lote en modo no manual, arrancar su loop de control.
 	loteSectorHandler.SetOnAbierto(controlHandler.EnsureLoopForLote)
+	// Reanudar los lotes que quedaron ABIERTO si el backend se reinició.
+	go controlHandler.ResumeLotesAbiertos(rootCtx)
 	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
 	controlSSEHandler := controlController.NewControlSSEHandler(controlSSEBroker)
 
@@ -292,6 +300,8 @@ func main() {
 			jwtWrap(controlHandler.HandleControlStart(controlDeps))(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
 			jwtWrap(controlHandler.HandleControlStop())(w, r)
+		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/control/parametros"):
+			jwtWrap(controlHandler.HandleTuning)(w, r)
 		case (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.HasSuffix(r.URL.Path, "/modo"):
 			// PATCH = panel (cookie JWT), PUT = Pi (Bearer). DualAuth elige la
 			// credencial correcta y el handler valida rol o sector según sea.
@@ -426,9 +436,6 @@ func main() {
 	}, handler)
 
 	// 7. Launch reaper goroutine: detects offline devices and emits SSE events
-	rootCtx, rootCancel := context.WithCancel(context.Background())
-	defer rootCancel()
-
 	go dispositivoSvc.StartReaper(rootCtx, reaperInterval, offlineThreshold)
 
 	// 8. Launch server with graceful shutdown

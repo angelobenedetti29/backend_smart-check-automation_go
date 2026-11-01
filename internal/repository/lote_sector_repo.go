@@ -52,7 +52,8 @@ const loteSectorSelect = `
 		lp.tolerancia_temp_c,
 		lp.umbral_aceptacion_crudo, lp.umbral_aceptacion_quemado,
 		lp.pesos_objetivo,
-		lp.temp1_objetivo, lp.vel_objetivo
+		lp.temp1_objetivo, lp.vel_objetivo,
+		lp.delta_temp1_max_c, lp.delta_vel_max
 	FROM lotes_productivos lp
 	JOIN productos pr ON pr.id = lp.producto_id
 	LEFT JOIN dispositivos d ON d.id = lp.abierto_por
@@ -82,6 +83,7 @@ func scanLoteSector(row pgx.Row) (*lotesector.Lote, error) {
 		&l.UmbralAceptacionCrudo, &l.UmbralAceptacionQuemado,
 		&pesosJSON,
 		&l.Temp1Objetivo, &l.VelObjetivo,
+		&l.DeltaTemp1MaxC, &l.DeltaVelMax,
 	); err != nil {
 		return nil, err
 	}
@@ -159,6 +161,79 @@ func (r *LoteSectorPostgresRepository) UpdateModo(ctx context.Context, loteID, m
 			return lotesector.ErrNotFound
 		}
 		return fmt.Errorf("update lote modo: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return lotesector.ErrNotFound
+	}
+	return nil
+}
+
+// ListAbiertos devuelve todos los lotes ABIERTO ordenados por inicio.
+func (r *LoteSectorPostgresRepository) ListAbiertos(ctx context.Context) ([]lotesector.Lote, error) {
+	rows, err := r.db.Query(ctx, loteSectorSelect+`
+		WHERE lp.estado='ABIERTO'
+		ORDER BY lp.inicio_at, lp.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list lotes abiertos: %w", err)
+	}
+	defer rows.Close()
+
+	out := []lotesector.Lote{}
+	for rows.Next() {
+		l, serr := scanLoteSector(rows)
+		if serr != nil {
+			return nil, fmt.Errorf("list lotes abiertos: scan: %w", serr)
+		}
+		out = append(out, *l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list lotes abiertos: rows iteration: %w", err)
+	}
+	return out, nil
+}
+
+// updateParametrosControlSQL aplica un tuning parcial: COALESCE preserva el
+// valor vigente cuando el parámetro llega NULL.
+const updateParametrosControlSQL = `
+	UPDATE lotes_productivos SET
+		tolerancia_temp_c = COALESCE($2::numeric, tolerancia_temp_c),
+		umbral_aceptacion_crudo = COALESCE($3::numeric, umbral_aceptacion_crudo),
+		umbral_aceptacion_quemado = COALESCE($4::numeric, umbral_aceptacion_quemado),
+		delta_temp1_max_c = COALESCE($5::numeric, delta_temp1_max_c),
+		delta_vel_max = COALESCE($6::numeric, delta_vel_max),
+		updated_at = now()
+	WHERE id = $1`
+
+// UpdateParametrosControl aplica el tuning parcial del lote. Devuelve
+// ErrNotFound si el lote no existe (o el id no es un UUID válido).
+func (r *LoteSectorPostgresRepository) UpdateParametrosControl(ctx context.Context, loteID string, p lotesector.ParametrosControl) error {
+	tag, err := r.db.Exec(ctx, updateParametrosControlSQL,
+		loteID, p.ToleranciaTempC, p.UmbralAceptacionCrudo, p.UmbralAceptacionQuemado,
+		p.DeltaTemp1MaxC, p.DeltaVelMax)
+	if err != nil {
+		if isInvalidTextRepresentation(err) {
+			return lotesector.ErrNotFound
+		}
+		return fmt.Errorf("update parametros control: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return lotesector.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateSetpointsAplicados persiste los setpoints confirmados por el ack de la
+// Pi. Devuelve ErrNotFound si el lote no existe.
+func (r *LoteSectorPostgresRepository) UpdateSetpointsAplicados(ctx context.Context, loteID string, temp, vel float64) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE lotes_productivos
+		SET temp1_objetivo = $2, vel_objetivo = $3, updated_at = now()
+		WHERE id = $1`, loteID, temp, vel)
+	if err != nil {
+		if isInvalidTextRepresentation(err) {
+			return lotesector.ErrNotFound
+		}
+		return fmt.Errorf("update setpoints aplicados: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return lotesector.ErrNotFound

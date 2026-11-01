@@ -1002,7 +1002,9 @@ ALTER TABLE lotes_productivos
     ADD COLUMN IF NOT EXISTS pesos_objetivo             JSONB        NOT NULL DEFAULT '{"wc":1.0,"wq":1.0,"wo":1.0,"dt":0.05,"dc":0.5}'::jsonb,
     ADD COLUMN IF NOT EXISTS iniciado_manualmente       BOOLEAN      NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS temp1_objetivo             NUMERIC(6,2),
-    ADD COLUMN IF NOT EXISTS vel_objetivo               NUMERIC(6,3);
+    ADD COLUMN IF NOT EXISTS vel_objetivo               NUMERIC(6,3),
+    ADD COLUMN IF NOT EXISTS delta_temp1_max_c          NUMERIC(6,3),
+    ADD COLUMN IF NOT EXISTS delta_vel_max              NUMERIC(6,4);
 
 DO $$
 BEGIN
@@ -1027,6 +1029,16 @@ BEGIN
             CHECK (umbral_aceptacion_crudo >= 0 AND umbral_aceptacion_quemado >= 0
                 AND umbral_aceptacion_crudo <= 100 AND umbral_aceptacion_quemado <= 100);
     END IF;
+    -- Columnas de tuning opcionales: NULL = usar el valor del producto, así el
+    -- CHECK admite NULL (delta_temp1_max_c > 0 sólo aplica cuando está seteado).
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_delta_temp1_pos') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_delta_temp1_pos
+            CHECK (delta_temp1_max_c > 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_delta_vel_pos') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_delta_vel_pos
+            CHECK (delta_vel_max > 0);
+    END IF;
 END $$;
 
 COMMENT ON COLUMN lotes_productivos.modo                       IS 'Modo de operación: MANUAL/SUPERVISION/AUTOMATICO (default MANUAL para no romper lotes existentes)';
@@ -1039,6 +1051,8 @@ COMMENT ON COLUMN lotes_productivos.pesos_objetivo             IS 'Pesos de la f
 COMMENT ON COLUMN lotes_productivos.iniciado_manualmente       IS 'TRUE = el operador arrancó horno+cinta por su cuenta y el sistema se enganchó después';
 COMMENT ON COLUMN lotes_productivos.temp1_objetivo             IS 'Último setpoint de T1 aplicado por el control (lectura del estado activo)';
 COMMENT ON COLUMN lotes_productivos.vel_objetivo               IS 'Último setpoint de velocidad de cinta aplicado por el control';
+COMMENT ON COLUMN lotes_productivos.delta_temp1_max_c          IS 'Override de tuning del ΔT1 máximo por ciclo (°C); NULL = usa el valor del producto';
+COMMENT ON COLUMN lotes_productivos.delta_vel_max              IS 'Override de tuning del ΔV máximo por ciclo (m/s); NULL = usa el valor del producto';
 
 -- ----------------------------------------------------------------------------
 -- 3) metricas_horno: telemetría cruda del horno reportada por la Pi ENTRADA.

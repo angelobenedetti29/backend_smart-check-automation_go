@@ -30,10 +30,16 @@ type Predictor interface {
 }
 
 // EntradasPredictor son las features que consume el XGBoost por producto.
+// TempMin/TempMax/VelMin/VelMax viajan en el payload para que el modelo se
+// entrene y sirva con las mismas features (evita train/serve skew).
 type EntradasPredictor struct {
 	ProductoID     string
 	TempHorno1     float64
 	VelocidadCinta float64
+	TempMin        float64
+	TempMax        float64
+	VelMin         float64
+	VelMax         float64
 	TempComb1      *float64
 	HumedadHorno   *float64
 }
@@ -161,6 +167,10 @@ func (o *Optimizer) Resolver(
 				ProductoID:     productoID,
 				TempHorno1:     t1,
 				VelocidadCinta: v,
+				TempMin:        lim.TempMin,
+				TempMax:        lim.TempMax,
+				VelMin:         lim.VelMin,
+				VelMax:         lim.VelMax,
 				TempComb1:      estado.TempComb1,
 				HumedadHorno:   estado.HumedadHorno,
 			})
@@ -308,8 +318,9 @@ func PesosDesdeLote(p *lote_sector.PesosObjetivo) Pesos {
 }
 
 // LimitesDe deriva los límites del MPC desde el producto y el lote. El lote
-// aporta los umbrales de aceptación y la tolerancia de temperatura; si es nil
-// se usan defaults conservadores (umbrales 5.0, tolerancia 2.0 °C).
+// aporta los umbrales de aceptación, la tolerancia de temperatura y, cuando los
+// define, los Δmáx por ciclo (override de tuning); si es nil se usan defaults
+// conservadores (umbrales 5.0, tolerancia 2.0 °C) y los Δmáx del producto.
 //
 // Nota: la spec pedía llamarla Limites(), pero Go no permite que una función y
 // el tipo Limites compartan identificador en el mismo paquete.
@@ -317,18 +328,26 @@ func LimitesDe(p *producto.Producto, l *lote_sector.Lote) Limites {
 	umbralCrudo := 5.0
 	umbralQuem := 5.0
 	tolerancia := 2.0
+	deltaTemp1 := p.DeltaTemp1MaxC
+	deltaVel := p.DeltaVelMax
 	if l != nil {
 		umbralCrudo = l.UmbralAceptacionCrudo
 		umbralQuem = l.UmbralAceptacionQuemado
 		tolerancia = l.ToleranciaTempC
+		if l.DeltaTemp1MaxC != nil {
+			deltaTemp1 = *l.DeltaTemp1MaxC
+		}
+		if l.DeltaVelMax != nil {
+			deltaVel = *l.DeltaVelMax
+		}
 	}
 	lim := Limites{
 		TempMin:         p.TempMin,
 		TempMax:         p.TempMax,
 		VelMin:          p.VelocidadCintaMin,
 		VelMax:          p.VelocidadCintaMax,
-		DeltaTemp1:      p.DeltaTemp1MaxC,
-		DeltaVel:        p.DeltaVelMax,
+		DeltaTemp1:      deltaTemp1,
+		DeltaVel:        deltaVel,
 		UmbralCrudo:     umbralCrudo,
 		UmbralQuem:      umbralQuem,
 		ToleranciaTempC: tolerancia,

@@ -1089,3 +1089,75 @@ func TestPreheatTimeoutAborta(t *testing.T) {
 		t.Fatalf("no debe publicar propuesta al abortar")
 	}
 }
+
+// TestRunFaseInicialAdaptandoSaltaPreheat verifica que una reanudación puede
+// forzar ADAPTANDO y run no entra en el precalentamiento.
+func TestRunFaseInicialAdaptandoSaltaPreheat(t *testing.T) {
+	casos := []struct {
+		name     string
+		fase     string
+		wantFase string
+	}{
+		{"forzada-adaptando", FaseAdaptando, FaseAdaptando},
+		{"sin-forzar-automatico-frio", "", FaseCalentando},
+	}
+	for _, tc := range casos {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			loop := newSupervisionLoop(now, &fakeDecisionesRepo{}, sse.NewBroker(), propuestaOK())
+			loop.modo = lote_sector.ModoAutomatico
+			loop.clienteLote = &fakeLoteLookupControl{lote: &lote_sector.Lote{
+				ID: "lote-1", Estado: lote_sector.EstadoCerrado, Modo: lote_sector.ModoAutomatico,
+			}}
+			loop.SetFaseInicial(tc.fase)
+
+			loop.run(context.Background())
+
+			if loop.fase != tc.wantFase {
+				t.Fatalf("fase = %q, want %q", loop.fase, tc.wantFase)
+			}
+		})
+	}
+}
+
+// TestSetFaseInicialIgnoraValoresInvalidos verifica que una fase desconocida no
+// altera la derivación por defecto.
+func TestSetFaseInicialIgnoraValoresInvalidos(t *testing.T) {
+	loop := &Loop{}
+	loop.SetFaseInicial("VOLANDO")
+	if loop.FaseInicial() != "" {
+		t.Fatalf("faseInicial = %q, want vacío", loop.FaseInicial())
+	}
+}
+
+// TestLimitesVigentesAplicaTuningDelLote verifica que el tuning del panel
+// aplique en el tick siguiente sin reiniciar el loop.
+func TestLimitesVigentesAplicaTuningDelLote(t *testing.T) {
+	loop := &Loop{limites: optimizador.Limites{
+		TempMin: 100, TempMax: 300, VelMin: 0.05, VelMax: 0.5,
+		DeltaTemp1: 10, DeltaVel: 0.05,
+		UmbralCrudo: 5, UmbralQuem: 5, ToleranciaTempC: 2,
+	}}
+	deltaT, deltaV := 4.0, 0.01
+	lote := &lote_sector.Lote{
+		DeltaTemp1MaxC: &deltaT, DeltaVelMax: &deltaV,
+		UmbralAceptacionCrudo: 3, UmbralAceptacionQuemado: 4, ToleranciaTempC: 1.5,
+	}
+
+	got := loop.limitesVigentes(lote)
+	if got.DeltaTemp1 != deltaT || got.DeltaVel != deltaV {
+		t.Fatalf("deltas del lote no aplicados: %+v", got)
+	}
+	if got.UmbralCrudo != 3 || got.UmbralQuem != 4 || got.ToleranciaTempC != 1.5 {
+		t.Fatalf("umbrales/tolerancia no aplicados: %+v", got)
+	}
+	// Los rangos de la receta se conservan del arranque.
+	if got.TempMin != 100 || got.TempMax != 300 || got.VelMax != 0.5 {
+		t.Fatalf("rango del producto alterado: %+v", got)
+	}
+
+	// Sin lote (o sin overrides) se comporta como el arranque.
+	if got := loop.limitesVigentes(nil); got.DeltaTemp1 != 10 {
+		t.Fatalf("sin lote debe conservar el arranque: %+v", got)
+	}
+}

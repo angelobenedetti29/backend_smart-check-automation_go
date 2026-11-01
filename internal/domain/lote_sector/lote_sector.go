@@ -170,6 +170,9 @@ type Lote struct {
 	PesosObjetivo                *PesosObjetivo `json:"pesos_objetivo,omitempty"`
 	Temp1Objetivo                *float64       `json:"temp1_objetivo,omitempty"`
 	VelObjetivo                  *float64       `json:"vel_objetivo,omitempty"`
+	// Overrides de tuning del lote; nil = usar el valor del producto.
+	DeltaTemp1MaxC *float64 `json:"delta_temp1_max_c,omitempty"`
+	DeltaVelMax    *float64 `json:"delta_vel_max,omitempty"`
 }
 
 // TurnoDe clasifica el momento de apertura de un lote en el turno de
@@ -277,6 +280,16 @@ type HistorialParams struct {
 	Limite     int
 }
 
+// ParametrosControl son los ajustes de tuning de un lote. Todos nil = no
+// cambiar el valor vigente.
+type ParametrosControl struct {
+	ToleranciaTempC         *float64
+	UmbralAceptacionCrudo   *float64
+	UmbralAceptacionQuemado *float64
+	DeltaTemp1MaxC          *float64
+	DeltaVelMax             *float64
+}
+
 // Repository define el contrato de persistencia del ciclo de vida de los lotes
 // por sector. La implementación real vive en internal/repository/.
 type Repository interface {
@@ -306,4 +319,13 @@ type Repository interface {
 	// UpdateModo persiste el modo vigente del lote. No valida transiciones — el
 	// caller lo hace. Devuelve ErrNotFound si el lote no existe.
 	UpdateModo(ctx context.Context, loteID, modo string) error
+	// ListAbiertos devuelve todos los lotes ABIERTO (para reanudar sus loops
+	// tras un reinicio del backend).
+	ListAbiertos(ctx context.Context) ([]Lote, error)
+	// UpdateParametrosControl aplica un tuning parcial: los campos nil dejan el
+	// valor vigente. Devuelve ErrNotFound si el lote no existe.
+	UpdateParametrosControl(ctx context.Context, loteID string, p ParametrosControl) error
+	// UpdateSetpointsAplicados registra los setpoints que la Pi confirmó con el
+	// ack. Devuelve ErrNotFound si el lote no existe.
+	UpdateSetpointsAplicados(ctx context.Context, loteID string, temp, vel float64) error
 }

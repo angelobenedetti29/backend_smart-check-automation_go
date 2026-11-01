@@ -3,6 +3,7 @@
 //
 //	POST  /api/v1/lotes/{id}/control/start         (Supervisor/Admin)
 //	POST  /api/v1/lotes/{id}/control/stop          (Supervisor/Admin)
+//	PATCH /api/v1/lotes/{id}/control/parametros    (Supervisor/Admin)
 //	PATCH /api/v1/lotes/{id}/modo                  (Supervisor/Admin)
 //	GET   /api/v1/lotes/{id}/consigna-propuesta     (Bearer dispositivo o JWT)
 //	POST  /api/v1/lotes/{id}/aplicar-consigna       (Operario mínimo o Bearer dispositivo)
@@ -117,6 +118,14 @@ type ControlDeps struct {
 	LoteRepo lotesector.Repository
 	// DeviceSector valida que el PUT de la Pi afecte sólo lotes de su sector.
 	DeviceSector DeviceSectorLookup
+	// Modelos verifica si el sidecar tiene un modelo entrenado para el producto.
+	// Nil = se omite el chequeo (tests / sidecar opcional).
+	Modelos ModeloStatus
+}
+
+// ModeloStatus es el mínimo del cliente del sidecar que necesita el handler.
+type ModeloStatus interface {
+	ModeloEntrenado(ctx context.Context, productoID string) (bool, error)
 }
 
 // DeviceSectorLookup resuelve el sector de la Pi autenticada.
@@ -219,13 +228,19 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 // EnsureLoopForLote arranca el loop del lote si corresponde (ABIERTO y modo no
 // MANUAL) y todavía no hay uno registrado. Es idempotente.
 func (h *ControlHandler) EnsureLoopForLote(ctx context.Context, lote *lotesector.Lote) error {
+	return h.EnsureLoopForLoteEnFase(ctx, lote, "")
+}
+
+// EnsureLoopForLoteEnFase es como EnsureLoopForLote pero fuerza la fase inicial
+// del loop (p.ej. ADAPTANDO al reanudar lotes abiertos tras un reinicio).
+func (h *ControlHandler) EnsureLoopForLoteEnFase(ctx context.Context, lote *lotesector.Lote, fase string) error {
 	if lote == nil || lote.Estado != lotesector.EstadoAbierto || lote.Modo == lotesector.ModoManual {
 		return nil
 	}
 	if _, ok := h.registry.GetLoop(lote.ID); ok {
 		return nil
 	}
-	return h.startLoopForLote(ctx, h.deps, lote)
+	return h.startLoopForLote(ctx, h.deps, lote, fase)
 }
 
 // startLoopForLote arranca un Loop de control para el lote con la configuración
@@ -233,7 +248,7 @@ func (h *ControlHandler) EnsureLoopForLote(ctx context.Context, lote *lotesector
 // previo del mismo lote. El contexto del loop es propio (no el de la request):
 // si se atara a r.Context(), el servidor lo cancelaría al responder y mataría
 // el control (regresión F-B2). Devuelve error si el producto del lote no existe.
-func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps, lote *lotesector.Lote) error {
+func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps, lote *lotesector.Lote, faseInicial string) error {
 	prod, err := deps.ProductoRepo.GetByID(ctx, lote.ProductoID)
 	if err != nil {
 		return err
@@ -282,10 +297,61 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps,
 	if seg, perr := strconv.Atoi(os.Getenv("MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS")); perr == nil {
 		loop.SetPreheatTimeout(seg)
 	}
+	if faseInicial != "" {
+		loop.SetFaseInicial(faseInicial)
+	}
 	deps.LoopCancels.Register(lote.ID, loopCtx, cancel)
 	deps.LoopCancels.SetLoop(lote.ID, loop)
 	loop.Start(loopCtx, cancel)
 	return nil
+}
+
+// ResumeLotesAbiertos reanuda los loops de todos los lotes ABIERTO no MANUAL
+// tras un reinicio del backend, arrancándolos en ADAPTANDO (el horno ya está en
+// régimen) y dejando una fila de auditoría por lote. Idempotente: un lote que ya
+// tiene loop registrado se saltea.
+func (h *ControlHandler) ResumeLotesAbiertos(ctx context.Context) {
+	lotes, err := h.deps.LoteRepo.ListAbiertos(ctx)
+	if err != nil {
+		log.Printf("[control] reanudando lotes abiertos: %v", err)
+		return
+	}
+	for i := range lotes {
+		lote := &lotes[i]
+		if lote.Modo == lotesector.ModoManual {
+			continue
+		}
+		if _, ok := h.registry.GetLoop(lote.ID); ok {
+			continue
+		}
+		if err := h.EnsureLoopForLoteEnFase(ctx, lote, control.FaseAdaptando); err != nil {
+			log.Printf("[control] reanudando loop lote %s: %v", lote.ID, err)
+			continue
+		}
+		h.auditarReanudacion(ctx, lote)
+	}
+}
+
+// auditarReanudacion deja traza del reinicio. Es best-effort: un fallo de Save
+// no frena la reanudación del resto de los lotes.
+func (h *ControlHandler) auditarReanudacion(ctx context.Context, lote *lotesector.Lote) {
+	skipped := "reanudado_tras_reinicio"
+	cero := 0.0
+	now := time.Now().UTC()
+	decision := &decisiones_control.DecisionControl{
+		LoteID:        lote.ID,
+		VentanaInicio: now,
+		VentanaFin:    now,
+		Muestras:      0,
+		TempActual:    0,
+		// vel_actual es NOT NULL en la tabla: 0 como el resto de los skips.
+		VelActual:    &cero,
+		AplicadoPor:  decisiones_control.AplicadoPorNadie,
+		RazonSkipped: &skipped,
+	}
+	if err := h.decisionesRepo.Save(ctx, decision); err != nil {
+		log.Printf("[control] audit reanudación lote %s: %v", lote.ID, err)
+	}
 }
 
 // HandleControlStop maneja POST /api/v1/lotes/{id}/control/stop.
@@ -496,9 +562,32 @@ func (h *ControlHandler) HandleModeChange(w http.ResponseWriter, r *http.Request
 	// requiere loop (SUPERVISION/AUTOMATICO). Un producto inexistente se
 	// rechaza sin cambiar el modo, igual que HandleControlStart.
 	if nuevo != lotesector.ModoManual {
-		if _, perr := h.deps.ProductoRepo.GetByID(r.Context(), lote.ProductoID); perr != nil {
+		prod, perr := h.deps.ProductoRepo.GetByID(r.Context(), lote.ProductoID)
+		if perr != nil || prod == nil {
 			response.Error(w, http.StatusUnprocessableEntity, "Producto desconocido", nil)
 			return
+		}
+		if nuevo == lotesector.ModoAutomatico {
+			if prod.TempSetpoint == nil || prod.VelocidadCintaSetpoint == nil {
+				response.Error(w, http.StatusUnprocessableEntity,
+					"Receta incompleta: el producto no tiene setpoint de temperatura/velocidad", nil)
+				return
+			}
+			// Sin modelo entrenado, AUTOMATICO no debe mover el horno. El
+			// placeholder sólo se permite explícitamente para demos.
+			permitir, _ := strconv.ParseBool(os.Getenv("MPC_PERMITIR_PLACEHOLDER"))
+			if !permitir && h.deps.Modelos != nil {
+				entrenado, merr := h.deps.Modelos.ModeloEntrenado(r.Context(), lote.ProductoID)
+				if merr != nil {
+					response.Error(w, http.StatusServiceUnavailable, "El predictor no está disponible", nil)
+					return
+				}
+				if !entrenado {
+					response.Error(w, http.StatusUnprocessableEntity,
+						"El modelo XGBoost todavía no está entrenado", nil)
+					return
+				}
+			}
 		}
 	}
 	// Persistir primero: si falla, no tocamos el loop en memoria.
@@ -518,7 +607,7 @@ func (h *ControlHandler) HandleModeChange(w http.ResponseWriter, r *http.Request
 	h.auditarCambioModo(r.Context(), lote, anterior, nuevo)
 	loopActivo := false
 	if nuevo != lotesector.ModoManual {
-		if err := h.startLoopForLote(r.Context(), h.deps, lote); err != nil {
+		if err := h.startLoopForLote(r.Context(), h.deps, lote, ""); err != nil {
 			log.Printf("[control] arrancando loop tras cambio de modo lote %s: %v", loteID, err)
 		} else {
 			loopActivo = true
@@ -557,6 +646,156 @@ func (h *ControlHandler) auditarCambioModo(ctx context.Context, lote *lotesector
 	}
 }
 
+// tuningRequest es el body de PATCH /api/v1/lotes/{id}/control/parametros.
+// Todos los campos son opcionales: ausente = no cambiar.
+type tuningRequest struct {
+	ToleranciaTempC         *float64 `json:"tolerancia_temp_c"`
+	UmbralAceptacionCrudo   *float64 `json:"umbral_aceptacion_crudo"`
+	UmbralAceptacionQuemado *float64 `json:"umbral_aceptacion_quemado"`
+	DeltaTemp1MaxC          *float64 `json:"delta_temp1_max_c"`
+	DeltaVelMax             *float64 `json:"delta_vel_max"`
+}
+
+// HandleTuning maneja PATCH /api/v1/lotes/{id}/control/parametros: ajusta
+// tolerancia, umbrales de aceptación y Δmáx del lote (Supervisor/Admin). Si el
+// loop estaba activo se reinicia en ADAPTANDO para tomar los valores nuevos.
+func (h *ControlHandler) HandleTuning(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+	if !helpers.RolValido(r, user.RoleSupervisor, user.RoleAdmin) {
+		response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
+		return
+	}
+	loteID, err := helpers.ExtractLoteID(r.URL.Path, "/control/parametros")
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	var body tuningRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.Error(w, http.StatusBadRequest, "Body inválido", nil)
+		return
+	}
+	if body.ToleranciaTempC == nil && body.UmbralAceptacionCrudo == nil &&
+		body.UmbralAceptacionQuemado == nil && body.DeltaTemp1MaxC == nil && body.DeltaVelMax == nil {
+		response.Error(w, http.StatusBadRequest, "Sin parámetros para actualizar", nil)
+		return
+	}
+	if v := body.ToleranciaTempC; v != nil && (*v <= 0 || *v > 20) {
+		response.Error(w, http.StatusBadRequest, "tolerancia_temp_c fuera de rango (0,20]", nil)
+		return
+	}
+	for _, v := range []*float64{body.UmbralAceptacionCrudo, body.UmbralAceptacionQuemado} {
+		if v != nil && (*v < 0 || *v > 100) {
+			response.Error(w, http.StatusBadRequest, "umbral de aceptación fuera de rango [0,100]", nil)
+			return
+		}
+	}
+	if v := body.DeltaTemp1MaxC; v != nil && (*v <= 0 || *v > 50) {
+		response.Error(w, http.StatusBadRequest, "delta_temp1_max_c fuera de rango (0,50]", nil)
+		return
+	}
+	if v := body.DeltaVelMax; v != nil && (*v <= 0 || *v > 2) {
+		response.Error(w, http.StatusBadRequest, "delta_vel_max fuera de rango (0,2]", nil)
+		return
+	}
+
+	lote, err := h.loteLookup.GetByID(r.Context(), loteID)
+	if err != nil || lote == nil {
+		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+		return
+	}
+	if lote.Estado != lotesector.EstadoAbierto {
+		response.Error(w, http.StatusConflict, "Lote no está abierto", nil)
+		return
+	}
+
+	params := lotesector.ParametrosControl{
+		ToleranciaTempC:         body.ToleranciaTempC,
+		UmbralAceptacionCrudo:   body.UmbralAceptacionCrudo,
+		UmbralAceptacionQuemado: body.UmbralAceptacionQuemado,
+		DeltaTemp1MaxC:          body.DeltaTemp1MaxC,
+		DeltaVelMax:             body.DeltaVelMax,
+	}
+	if err := h.deps.LoteRepo.UpdateParametrosControl(r.Context(), loteID, params); err != nil {
+		if errors.Is(err, lotesector.ErrNotFound) {
+			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
+		return
+	}
+
+	// Reflejar el tuning en la copia en memoria para la respuesta. El loop
+	// vivo relee los límites en cada tick (`limitesVigentes`), así que no hace
+	// falta reiniciarlo ni resetear la fase de precalentamiento.
+	aplicarTuning(lote, params)
+
+	response.OK(w, "Parámetros actualizados", map[string]interface{}{
+		"lote_id":                   lote.ID,
+		"tolerancia_temp_c":         lote.ToleranciaTempC,
+		"umbral_aceptacion_crudo":   lote.UmbralAceptacionCrudo,
+		"umbral_aceptacion_quemado": lote.UmbralAceptacionQuemado,
+		"delta_temp1_max_c":         lote.DeltaTemp1MaxC,
+		"delta_vel_max":             lote.DeltaVelMax,
+	})
+}
+
+// aplicarTuning copia a lote los parámetros no nulos del tuning.
+func aplicarTuning(lote *lotesector.Lote, p lotesector.ParametrosControl) {
+	if p.ToleranciaTempC != nil {
+		lote.ToleranciaTempC = *p.ToleranciaTempC
+	}
+	if p.UmbralAceptacionCrudo != nil {
+		lote.UmbralAceptacionCrudo = *p.UmbralAceptacionCrudo
+	}
+	if p.UmbralAceptacionQuemado != nil {
+		lote.UmbralAceptacionQuemado = *p.UmbralAceptacionQuemado
+	}
+	if p.DeltaTemp1MaxC != nil {
+		lote.DeltaTemp1MaxC = p.DeltaTemp1MaxC
+	}
+	if p.DeltaVelMax != nil {
+		lote.DeltaVelMax = p.DeltaVelMax
+	}
+}
+
+// limitesResponse son los límites efectivos del MPC que viajan con la propuesta
+// para que el panel muestre el rango vigente.
+type limitesResponse struct {
+	TempMin         float64 `json:"temp_min"`
+	TempMax         float64 `json:"temp_max"`
+	VelMin          float64 `json:"vel_min"`
+	VelMax          float64 `json:"vel_max"`
+	DeltaTemp1MaxC  float64 `json:"delta_temp1_max_c"`
+	DeltaVelMax     float64 `json:"delta_vel_max"`
+	ToleranciaTempC float64 `json:"tolerancia_temp_c"`
+}
+
+// limitesDe resuelve los límites efectivos (producto + overrides del lote). Si
+// no hay producto o lote, devuelve nil y el campo se omite del payload.
+func (h *ControlHandler) limitesDe(ctx context.Context, lote *lotesector.Lote) *limitesResponse {
+	if lote == nil || h.deps.ProductoRepo == nil {
+		return nil
+	}
+	prod, err := h.deps.ProductoRepo.GetByID(ctx, lote.ProductoID)
+	if err != nil || prod == nil {
+		return nil
+	}
+	lim := optimizador.LimitesDe(prod, lote)
+	return &limitesResponse{
+		TempMin:         lim.TempMin,
+		TempMax:         lim.TempMax,
+		VelMin:          lim.VelMin,
+		VelMax:          lim.VelMax,
+		DeltaTemp1MaxC:  lim.DeltaTemp1,
+		DeltaVelMax:     lim.DeltaVel,
+		ToleranciaTempC: lim.ToleranciaTempC,
+	}
+}
+
 // consignaPropuestaResponse es el payload de GET /lotes/{id}/consigna-propuesta.
 type consignaPropuestaResponse struct {
 	DecisionID    string    `json:"decision_id"`
@@ -572,6 +811,8 @@ type consignaPropuestaResponse struct {
 	Fase       string `json:"fase,omitempty"`
 	// AprobadaPor identifica quién aprobó la propuesta en SUPERVISION.
 	AprobadaPor *string `json:"aprobada_por,omitempty"`
+	// Limites son los límites efectivos del MPC (producto + overrides del lote).
+	Limites *limitesResponse `json:"limites,omitempty"`
 }
 
 // propuestaProvider es la vista mínima del loop que expone la propuesta
@@ -599,11 +840,14 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 	// El TTL coincide con la ventana de actualización del lote. Si no se puede
 	// resolver, se sirve la propuesta con TTL 0 sin bloquear el endpoint.
 	ttl := 0
+	var lote *lotesector.Lote
 	if h.loteLookup != nil {
-		if lote, err := h.loteLookup.GetByID(r.Context(), loteID); err == nil && lote != nil {
+		if l, err := h.loteLookup.GetByID(r.Context(), loteID); err == nil && l != nil {
+			lote = l
 			ttl = lote.VentanaActualizacionSegundos
 		}
 	}
+	limites := h.limitesDe(r.Context(), lote)
 
 	// 1. Propuesta en memoria del loop activo (lectura no destructiva).
 	if h.registry != nil {
@@ -620,6 +864,7 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 						VentanaFin:    snap.VentanaFin,
 						Autorizada:    snap.Autorizada,
 						Fase:          snap.Fase,
+						Limites:       limites,
 					})
 					return
 				}
@@ -645,14 +890,10 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 	// Chequear que el lote está vivo y en modo compatible, y que la propuesta
 	// no esté vencida. Si no, respondemos 204 (mismo caso que sin propuesta):
 	// no se sirve una decisión NADIE de un lote cerrado, en MANUAL o vieja.
-	var lote *lotesector.Lote
-	if h.loteLookup != nil {
-		if l, lerr := h.loteLookup.GetByID(r.Context(), loteID); lerr == nil && l != nil {
-			lote = l
-			if l.Estado != lotesector.EstadoAbierto || l.Modo == lotesector.ModoManual {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
+	if lote != nil {
+		if lote.Estado != lotesector.EstadoAbierto || lote.Modo == lotesector.ModoManual {
+			w.WriteHeader(http.StatusNoContent)
+			return
 		}
 	}
 	if ttl > 0 && time.Since(d.CreatedAt) > time.Duration(ttl)*time.Second {
@@ -675,6 +916,7 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 		VentanaFin:    d.VentanaFin,
 		Autorizada:    autorizada,
 		AprobadaPor:   d.AprobadaPor,
+		Limites:       limites,
 	})
 }
 
@@ -893,6 +1135,11 @@ func (h *ControlHandler) HandleConsignaAck(deps ControlDeps) http.HandlerFunc {
 			}
 			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
 			return
+		}
+		// Best-effort: el ack ya es válido; si falla el espejo de setpoints
+		// sólo se loguea.
+		if err := deps.LoteRepo.UpdateSetpointsAplicados(r.Context(), loteID, *body.TempAplicado, *body.VelAplicado); err != nil {
+			log.Printf("[control] actualizando setpoints del lote %s tras ack: %v", loteID, err)
 		}
 		if loopAny, ok := h.registry.GetLoop(loteID); ok {
 			if clearer, ok := loopAny.(propuestaClearer); ok {

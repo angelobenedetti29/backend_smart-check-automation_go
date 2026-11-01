@@ -90,6 +90,7 @@ type Loop struct {
 
 	// fase y muestrasEnTolerancia sólo los toca la goroutine del loop.
 	fase                 string // CALENTANDO | ADAPTANDO ("" hasta que run inicializa)
+	faseInicial          string // fase forzada por el caller (reanudación); "" = derivarla del modo
 	muestrasEnTolerancia int
 	preheatInicio        time.Time
 	preheatTimeoutSeg    int
@@ -181,6 +182,18 @@ func (loop *Loop) SetPreheatTimeout(segundos int) {
 		loop.preheatTimeoutSeg = segundos
 	}
 }
+
+// SetFaseInicial fuerza la fase con la que arranca run. Sólo acepta CALENTANDO
+// o ADAPTANDO; cualquier otro valor se ignora. Debe llamarse antes de Start.
+func (loop *Loop) SetFaseInicial(fase string) {
+	if fase != FaseCalentando && fase != FaseAdaptando {
+		return
+	}
+	loop.faseInicial = fase
+}
+
+// FaseInicial devuelve la fase forzada al arrancar ("" = derivada del modo).
+func (loop *Loop) FaseInicial() string { return loop.faseInicial }
 
 // AprobarPropuesta marca como aprobada la propuesta pendiente indicada.
 func (loop *Loop) AprobarPropuesta(decisionID string) bool {
@@ -340,7 +353,8 @@ func (loop *Loop) run(ctx context.Context) {
 		return
 	}
 	// Fase inicial: un horno automático que arranca frío calienta primero; un
-	// lote enganchado manualmente (o supervisado) ya está adaptando.
+	// lote enganchado manualmente (o supervisado) ya está adaptando. Una
+	// reanudación tras reinicio puede forzarla vía SetFaseInicial.
 	if loop.fase == "" {
 		loop.fase = FaseAdaptando
 		if loop.modo == lote_sector.ModoAutomatico {
@@ -354,6 +368,9 @@ func (loop *Loop) run(ctx context.Context) {
 					loop.fase = FaseAdaptando
 				}
 			}
+		}
+		if loop.faseInicial != "" {
+			loop.fase = loop.faseInicial
 		}
 	}
 	if loop.fase == FaseCalentando && loop.preheatInicio.IsZero() {
@@ -417,6 +434,29 @@ func (loop *Loop) debeTerminar(ctx context.Context) bool {
 // Antes de cada tick relee el modo del lote: si el operador cambió a MANUAL,
 // el loop se autodesactiva (deja de despachar consignas) para no consumir
 // telemetría innecesariamente.
+// limitesVigentes aplica el tuning del lote sobre los límites del arranque.
+// No relee el producto: los rangos de la receta quedan fijados al abrir el
+// lote y el panel sólo puede mover tolerancia, umbrales y deltas. Así el
+// tuning aplica en el tick siguiente sin reiniciar el loop (reiniciarlo en
+// ADAPTANDO durante el precalentamiento podría arrancar la cinta antes de
+// temperatura).
+func (loop *Loop) limitesVigentes(lote *lote_sector.Lote) optimizador.Limites {
+	lim := loop.limites
+	if lote == nil {
+		return lim
+	}
+	lim.ToleranciaTempC = lote.ToleranciaTempC
+	lim.UmbralCrudo = lote.UmbralAceptacionCrudo
+	lim.UmbralQuem = lote.UmbralAceptacionQuemado
+	if lote.DeltaTemp1MaxC != nil {
+		lim.DeltaTemp1 = *lote.DeltaTemp1MaxC
+	}
+	if lote.DeltaVelMax != nil {
+		lim.DeltaVel = *lote.DeltaVelMax
+	}
+	return lim
+}
+
 func (loop *Loop) tick(ctx context.Context) {
 	if loop.modo == lote_sector.ModoManual {
 		return
@@ -521,7 +561,7 @@ func (loop *Loop) tick(ctx context.Context) {
 		return
 	}
 
-	predXGB, err := loop.optimizer.Resolver(ctx, loop.productoID, estado, loop.limites, loop.pesos)
+	predXGB, err := loop.optimizer.Resolver(ctx, loop.productoID, estado, loop.limitesVigentes(loteActual), loop.pesos)
 	if err != nil {
 		loop.skipError(ctx, ventanaInicio, now, err, filtradas)
 		return

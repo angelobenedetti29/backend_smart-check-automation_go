@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -180,12 +181,25 @@ func (f *fakeDeviceSector) SectorDelDispositivo(_ context.Context, _ string) (*l
 }
 
 // fakeLoteRepoHandler implementa lotesector.Repository para los tests del
-// handler. Sólo UpdateModo es configurable; el resto son stubs no usados por
-// los handlers de control.
+// handler. Sólo UpdateModo (y los métodos de tuning/reanudación) son
+// configurables; el resto son stubs no usados por los handlers de control.
 type fakeLoteRepoHandler struct {
 	updateErr   error
 	updatedModo string
 	updateCalls int
+
+	abiertos  []lotesector.Lote
+	listErr   error
+	listCalls int
+
+	paramErr      error
+	paramCalls    int
+	ultimosParams lotesector.ParametrosControl
+
+	setpointsErr   error
+	setpointsCalls int
+	setpointsTemp  float64
+	setpointsVel   float64
 }
 
 func (f *fakeLoteRepoHandler) GetAbiertoBySector(_ context.Context, _ string) (*lotesector.Lote, error) {
@@ -220,6 +234,23 @@ func (f *fakeLoteRepoHandler) UpdateModo(_ context.Context, _ string, modo strin
 	f.updateCalls++
 	f.updatedModo = modo
 	return f.updateErr
+}
+
+func (f *fakeLoteRepoHandler) ListAbiertos(_ context.Context) ([]lotesector.Lote, error) {
+	f.listCalls++
+	return f.abiertos, f.listErr
+}
+
+func (f *fakeLoteRepoHandler) UpdateParametrosControl(_ context.Context, _ string, p lotesector.ParametrosControl) error {
+	f.paramCalls++
+	f.ultimosParams = p
+	return f.paramErr
+}
+
+func (f *fakeLoteRepoHandler) UpdateSetpointsAplicados(_ context.Context, _ string, temp, vel float64) error {
+	f.setpointsCalls++
+	f.setpointsTemp, f.setpointsVel = temp, vel
+	return f.setpointsErr
 }
 
 // validControlDeps arma un set completo (todas no-nil) de deps del handler.
@@ -662,7 +693,11 @@ func newModeChangeHandler(t *testing.T, lote *lotesector.Lote, loteRepo *fakeLot
 	deps.LoteLookup = &fakeLoteLookup{lote: lote}
 	deps.LoteRepo = loteRepo
 	deps.DecisionesRepo = decisiones
-	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: lote.ProductoID}}
+	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{
+		ID:                     lote.ProductoID,
+		TempSetpoint:           ptrF64(200),
+		VelocidadCintaSetpoint: ptrF64(0.3),
+	}}
 	h := NewControlHandler(deps)
 
 	secret := []byte("mode-change-test-secret-1234567890")
@@ -886,7 +921,11 @@ func TestHandleModeChangeDevicePutActualizaModo(t *testing.T) {
 	deps.LoteLookup = &fakeLoteLookup{lote: lote}
 	repo := &fakeLoteRepoHandler{}
 	deps.LoteRepo = repo
-	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: lote.ProductoID}}
+	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{
+		ID:                     lote.ProductoID,
+		TempSetpoint:           ptrF64(200),
+		VelocidadCintaSetpoint: ptrF64(0.3),
+	}}
 	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-1"}}
 	h := NewControlHandler(deps)
 	t.Cleanup(h.registry.StopAll)
@@ -1690,6 +1729,378 @@ func TestHandleConsignaAckBodyIncompleto400(t *testing.T) {
 	h, deps := newAckTestHandler(t, lote, &fakeDecisionesRepo{}, "s-1")
 	if rec := doAck(t, h, deps, `{"decision_id":"dec-1","temp_aplicado":180}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// fakeModelos implementa ModeloStatus con resultado controlable.
+type fakeModelos struct {
+	entrenado bool
+	err       error
+	calls     int
+}
+
+func (f *fakeModelos) ModeloEntrenado(_ context.Context, _ string) (bool, error) {
+	f.calls++
+	return f.entrenado, f.err
+}
+
+// safeDecisionesRepo envuelve fakeDecisionesRepo con mutex: los loops reales
+// reanudados escriben en paralelo mientras el test lee las filas.
+type safeDecisionesRepo struct {
+	mu sync.Mutex
+	fakeDecisionesRepo
+}
+
+func (s *safeDecisionesRepo) Save(ctx context.Context, d *decisiones_control.DecisionControl) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeDecisionesRepo.Save(ctx, d)
+}
+
+func (s *safeDecisionesRepo) countRazon(razon string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, d := range s.fakeDecisionesRepo.saved {
+		if d.RazonSkipped != nil && *d.RazonSkipped == razon {
+			n++
+		}
+	}
+	return n
+}
+
+// TestResumeLotesAbiertos verifica que la reanudación arranque en ADAPTANDO los
+// lotes AUTOMATICO/SUPERVISION, saltee MANUAL y sea idempotente.
+func TestResumeLotesAbiertos(t *testing.T) {
+	repo := &fakeLoteRepoHandler{abiertos: []lotesector.Lote{
+		{ID: "lote-auto", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico,
+			ProductoID: "prod-1", VentanaEvaluacionSegundos: 3600, VentanaActualizacionSegundos: 3600},
+		{ID: "lote-sup", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision,
+			ProductoID: "prod-1", VentanaEvaluacionSegundos: 3600, VentanaActualizacionSegundos: 3600},
+		{ID: "lote-manual", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+			ProductoID: "prod-1"},
+	}}
+	dec := &safeDecisionesRepo{}
+	deps := validControlDeps()
+	deps.LoteRepo = repo
+	deps.DecisionesRepo = dec
+	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: "prod-1"}}
+	h := NewControlHandler(deps)
+	t.Cleanup(h.registry.StopAll)
+
+	h.ResumeLotesAbiertos(context.Background())
+
+	for _, id := range []string{"lote-auto", "lote-sup"} {
+		v, ok := h.registry.GetLoop(id)
+		if !ok {
+			t.Fatalf("el lote %s debe tener loop reanudado", id)
+		}
+		loop, ok := v.(*control.Loop)
+		if !ok {
+			t.Fatalf("loop de %s es %T", id, v)
+		}
+		if loop.FaseInicial() != control.FaseAdaptando {
+			t.Fatalf("lote %s: fase inicial = %q, want ADAPTANDO", id, loop.FaseInicial())
+		}
+	}
+	if _, ok := h.registry.GetLoop("lote-manual"); ok {
+		t.Fatalf("MANUAL no debe reanudar loop")
+	}
+	if got := dec.countRazon("reanudado_tras_reinicio"); got != 2 {
+		t.Fatalf("auditorías = %d, want 2", got)
+	}
+
+	// Idempotente: una segunda pasada no re-arranca ni re-audita.
+	h.ResumeLotesAbiertos(context.Background())
+	if got := dec.countRazon("reanudado_tras_reinicio"); got != 2 {
+		t.Fatalf("tras segunda pasada: auditorías = %d, want 2", got)
+	}
+	if repo.listCalls != 2 {
+		t.Fatalf("ListAbiertos calls = %d, want 2", repo.listCalls)
+	}
+}
+
+// TestHandleModeChangeAAutomaticoSinReceta422 verifica que AUTOMATICO exija la
+// receta completa del producto.
+func TestHandleModeChangeAAutomaticoSinReceta422(t *testing.T) {
+	lote := &lotesector.Lote{ID: "lote-1", Estado: lotesector.EstadoAbierto,
+		Modo: lotesector.ModoManual, ProductoID: "prod-1"}
+	repo := &fakeLoteRepoHandler{}
+	h, srv, secret := newModeChangeHandler(t, lote, repo, &fakeDecisionesRepo{})
+	h.deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: "prod-1"}}
+
+	status, _ := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"AUTOMATICO"}`)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	if repo.updateCalls != 0 {
+		t.Fatalf("no debe persistir el modo sin receta")
+	}
+}
+
+// TestHandleModeChangeAAutomaticoModelo cubre el gate del modelo entrenado:
+// ausente → 422, predictor caído → 503, presente → 200, placeholder permitido.
+func TestHandleModeChangeAAutomaticoModelo(t *testing.T) {
+	cases := []struct {
+		name        string
+		modelos     *fakeModelos
+		placeholder bool
+		wantStatus  int
+		wantCalls   int
+	}{
+		{"sin-modelo", &fakeModelos{entrenado: false}, false, http.StatusUnprocessableEntity, 1},
+		{"predictor-caido", &fakeModelos{err: errors.New("down")}, false, http.StatusServiceUnavailable, 1},
+		{"con-modelo", &fakeModelos{entrenado: true}, false, http.StatusOK, 1},
+		{"placeholder-permitido", &fakeModelos{entrenado: false}, true, http.StatusOK, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.placeholder {
+				t.Setenv("MPC_PERMITIR_PLACEHOLDER", "true")
+			}
+			lote := &lotesector.Lote{ID: "lote-1", Estado: lotesector.EstadoAbierto,
+				Modo: lotesector.ModoManual, ProductoID: "prod-1", VentanaEvaluacionSegundos: 600}
+			repo := &fakeLoteRepoHandler{}
+			h, srv, secret := newModeChangeHandler(t, lote, repo, &fakeDecisionesRepo{})
+			h.deps.Modelos = tc.modelos
+
+			status, _ := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"AUTOMATICO"}`)
+			if status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", status, tc.wantStatus)
+			}
+			if tc.modelos.calls != tc.wantCalls {
+				t.Fatalf("ModeloEntrenado calls = %d, want %d", tc.modelos.calls, tc.wantCalls)
+			}
+			wantUpdate := 0
+			if tc.wantStatus == http.StatusOK {
+				wantUpdate = 1
+			}
+			if repo.updateCalls != wantUpdate {
+				t.Fatalf("UpdateModo calls = %d, want %d", repo.updateCalls, wantUpdate)
+			}
+		})
+	}
+}
+
+// --- PATCH /lotes/{id}/control/parametros ---
+
+// newTuningServer monta HandleTuning con el JWT middleware real.
+func newTuningServer(t *testing.T, deps ControlDeps) (*ControlHandler, *httptest.Server, []byte) {
+	t.Helper()
+	h := NewControlHandler(deps)
+	secret := []byte("tuning-test-secret-1234567890")
+	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleTuning))
+	t.Cleanup(srv.Close)
+	t.Cleanup(h.registry.StopAll)
+	return h, srv, secret
+}
+
+func patchTuning(t *testing.T, srv *httptest.Server, secret []byte, role, body string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPatch, srv.URL+"/api/v1/lotes/lote-1/control/parametros", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("crear request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "session_token", Value: signedTestToken(t, secret, role)})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH tuning: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// TestHandleTuningActualizaSinReiniciarLoop verifica el tuning parcial y que
+// el loop vivo NO se reinicie: reiniciarlo en ADAPTANDO durante el
+// precalentamiento podría proponer velocidad y arrancar la cinta antes de
+// temperatura. El loop relee los límites por tick.
+func TestHandleTuningActualizaSinReiniciarLoop(t *testing.T) {
+	lote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico,
+		ProductoID: "prod-1", VentanaEvaluacionSegundos: 3600, VentanaActualizacionSegundos: 3600,
+	}
+	repo := &fakeLoteRepoHandler{}
+	deps := validControlDeps()
+	deps.LoteLookup = &fakeLoteLookup{lote: lote}
+	deps.LoteRepo = repo
+	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: "prod-1"}}
+	h, srv, secret := newTuningServer(t, deps)
+
+	viejoCtx, viejoCancel := context.WithCancel(context.Background())
+	defer viejoCancel()
+	h.registry.Register("lote-1", viejoCtx, viejoCancel)
+	loopViejo := &fakeLoop{}
+	h.registry.SetLoop("lote-1", loopViejo)
+
+	status := patchTuning(t, srv, secret, user.RoleSupervisor,
+		`{"tolerancia_temp_c":1.5,"umbral_aceptacion_crudo":3,"umbral_aceptacion_quemado":4,"delta_temp1_max_c":4,"delta_vel_max":0.01}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if repo.paramCalls != 1 {
+		t.Fatalf("UpdateParametrosControl calls = %d, want 1", repo.paramCalls)
+	}
+	p := repo.ultimosParams
+	if p.ToleranciaTempC == nil || *p.ToleranciaTempC != 1.5 ||
+		p.UmbralAceptacionCrudo == nil || *p.UmbralAceptacionCrudo != 3 ||
+		p.UmbralAceptacionQuemado == nil || *p.UmbralAceptacionQuemado != 4 ||
+		p.DeltaTemp1MaxC == nil || *p.DeltaTemp1MaxC != 4 ||
+		p.DeltaVelMax == nil || *p.DeltaVelMax != 0.01 {
+		t.Fatalf("parámetros mal propagados: %+v", p)
+	}
+	select {
+	case <-viejoCtx.Done():
+		t.Fatalf("el tuning no debe cancelar el loop vivo")
+	default:
+	}
+	v, ok := h.registry.GetLoop("lote-1")
+	if !ok || v != loopViejo {
+		t.Fatalf("el loop debe seguir siendo el mismo; got=%T", v)
+	}
+	if lote.ToleranciaTempC != 1.5 || lote.DeltaTemp1MaxC == nil || *lote.DeltaTemp1MaxC != 4 {
+		t.Fatalf("el lote en memoria no refleja el tuning: %+v", lote)
+	}
+}
+
+// TestHandleTuningValidacion verifica los 400 de rango/vacío y el 409 de lote
+// cerrado, sin tocar el repo.
+func TestHandleTuningValidacion(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		estado string
+		want   int
+	}{
+		{"vacio", `{}`, lotesector.EstadoAbierto, http.StatusBadRequest},
+		{"tolerancia-alta", `{"tolerancia_temp_c":25}`, lotesector.EstadoAbierto, http.StatusBadRequest},
+		{"tolerancia-cero", `{"tolerancia_temp_c":0}`, lotesector.EstadoAbierto, http.StatusBadRequest},
+		{"umbral-alto", `{"umbral_aceptacion_crudo":101}`, lotesector.EstadoAbierto, http.StatusBadRequest},
+		{"umbral-negativo", `{"umbral_aceptacion_quemado":-1}`, lotesector.EstadoAbierto, http.StatusBadRequest},
+		{"delta-temp", `{"delta_temp1_max_c":51}`, lotesector.EstadoAbierto, http.StatusBadRequest},
+		{"delta-vel", `{"delta_vel_max":3}`, lotesector.EstadoAbierto, http.StatusBadRequest},
+		{"lote-cerrado", `{"tolerancia_temp_c":1}`, lotesector.EstadoCerrado, http.StatusConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lote := &lotesector.Lote{ID: "lote-1", Estado: tc.estado, Modo: lotesector.ModoAutomatico, ProductoID: "prod-1"}
+			repo := &fakeLoteRepoHandler{}
+			deps := validControlDeps()
+			deps.LoteLookup = &fakeLoteLookup{lote: lote}
+			deps.LoteRepo = repo
+			deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: "prod-1"}}
+			_, srv, secret := newTuningServer(t, deps)
+
+			if got := patchTuning(t, srv, secret, user.RoleSupervisor, tc.body); got != tc.want {
+				t.Fatalf("status = %d, want %d", got, tc.want)
+			}
+			if repo.paramCalls != 0 {
+				t.Fatalf("no debe persistir con body inválido/estado conflictivo")
+			}
+		})
+	}
+}
+
+// TestHandleTuningRolInsuficiente403 verifica que un Operario no pueda hacer
+// tuning.
+func TestHandleTuningRolInsuficiente403(t *testing.T) {
+	lote := &lotesector.Lote{ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico, ProductoID: "prod-1"}
+	repo := &fakeLoteRepoHandler{}
+	deps := validControlDeps()
+	deps.LoteLookup = &fakeLoteLookup{lote: lote}
+	deps.LoteRepo = repo
+	_, srv, secret := newTuningServer(t, deps)
+
+	if got := patchTuning(t, srv, secret, user.RoleOperario, `{"tolerancia_temp_c":1}`); got != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", got)
+	}
+	if repo.paramCalls != 0 {
+		t.Fatalf("un rol insuficiente no debe persistir")
+	}
+}
+
+// TestHandleConsignaPropuestaIncluyeLimites verifica que la propuesta exponga
+// los límites efectivos (producto + override del lote) en ambos caminos.
+func TestHandleConsignaPropuestaIncluyeLimites(t *testing.T) {
+	dt, dv := 4.0, 0.01
+	limitesLote := &lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision,
+		ProductoID: "prod-1", VentanaActualizacionSegundos: 30,
+		ToleranciaTempC: 1.5, UmbralAceptacionCrudo: 3, UmbralAceptacionQuemado: 4,
+		DeltaTemp1MaxC: &dt, DeltaVelMax: &dv,
+	}
+	prod := &producto.Producto{
+		ID: "prod-1", TempMin: 150, TempMax: 250,
+		VelocidadCintaMin: 0.1, VelocidadCintaMax: 0.4,
+		DeltaTemp1MaxC: 10, DeltaVelMax: 0.05,
+	}
+	cases := []struct {
+		name  string
+		enMem bool
+	}{
+		{"snapshot", true},
+		{"fallback", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := validControlDeps()
+			deps.LoteLookup = &fakeLoteLookup{lote: limitesLote}
+			deps.ProductoRepo = &fakeProductoRepo{prod: prod}
+			dec := &fakeDecisionesRepo{pendiente: &decisiones_control.DecisionControl{
+				ID: "dec-1", TempPropuesto: 180, VelPropuesto: 0.2,
+				CreatedAt: time.Now().UTC(),
+			}}
+			deps.DecisionesRepo = dec
+			h := NewControlHandler(deps)
+			if tc.enMem {
+				h.registry.SetLoop("lote-1", &fakeLoop{snap: &control.PropuestaSnapshot{
+					DecisionID: "dec-1", Temp1: 180, Velocidad: 0.2, Autorizada: true,
+				}})
+			}
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/lotes/lote-1/consigna-propuesta", nil)
+			h.HandleConsignaPropuesta(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			var env consignaEnvelope
+			if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			lim := env.Data.Limites
+			if lim == nil {
+				t.Fatalf("la propuesta debe incluir limites; body=%s", rec.Body.String())
+			}
+			if lim.TempMin != 150 || lim.TempMax != 250 || lim.VelMin != 0.1 || lim.VelMax != 0.4 {
+				t.Fatalf("rangos mal propagados: %+v", lim)
+			}
+			if lim.DeltaTemp1MaxC != 4 || lim.DeltaVelMax != 0.01 {
+				t.Fatalf("overrides del lote mal propagados: %+v", lim)
+			}
+			if lim.ToleranciaTempC != 1.5 {
+				t.Fatalf("tolerancia = %v, want 1.5", lim.ToleranciaTempC)
+			}
+		})
+	}
+}
+
+// TestHandleConsignaAckActualizaSetpointsLote verifica el espejo best-effort de
+// los setpoints confirmados en el ack.
+func TestHandleConsignaAckActualizaSetpointsLote(t *testing.T) {
+	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico}
+	repo := &fakeDecisionesRepo{porID: &decisiones_control.DecisionControl{ID: "dec-1", LoteID: "lote-1"}}
+	h, deps := newAckTestHandler(t, lote, repo, "s-1")
+	loteRepo := deps.LoteRepo.(*fakeLoteRepoHandler)
+
+	if rec := doAck(t, h, deps, ackBody); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if loteRepo.setpointsCalls != 1 {
+		t.Fatalf("UpdateSetpointsAplicados calls = %d, want 1", loteRepo.setpointsCalls)
+	}
+	if loteRepo.setpointsTemp != 180 || loteRepo.setpointsVel != 0.4 {
+		t.Fatalf("setpoints persistidos = %v/%v, want 180/0.4", loteRepo.setpointsTemp, loteRepo.setpointsVel)
 	}
 }
 

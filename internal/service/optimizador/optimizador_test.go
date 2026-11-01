@@ -5,6 +5,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
 )
@@ -129,4 +130,54 @@ func TestPesosDesdeLote(t *testing.T) {
 	}
 	p := &struct{}{} // no es un PesosObjetivo válido; el cast fallaría en runtime
 	_ = p
+}
+
+// TestLimitesDePrefiereOverridesDelLote verifica que los Δmáx del lote ganen al
+// valor del producto y que un lote sin override conserve los del producto.
+func TestLimitesDePrefiereOverridesDelLote(t *testing.T) {
+	prod := &producto.Producto{
+		TempMin: 100, TempMax: 300,
+		VelocidadCintaMin: 0.05, VelocidadCintaMax: 0.5,
+		DeltaTemp1MaxC: 10, DeltaVelMax: 0.05,
+	}
+	dt, dv := 4.0, 0.01
+	got := optimizador.LimitesDe(prod, &lote_sector.Lote{DeltaTemp1MaxC: &dt, DeltaVelMax: &dv})
+	if got.DeltaTemp1 != dt || got.DeltaVel != dv {
+		t.Fatalf("overrides del lote no aplicados: ΔT=%.2f ΔV=%.4f", got.DeltaTemp1, got.DeltaVel)
+	}
+
+	sinOverride := optimizador.LimitesDe(prod, &lote_sector.Lote{})
+	if sinOverride.DeltaTemp1 != 10 || sinOverride.DeltaVel != 0.05 {
+		t.Fatalf("sin override deben quedar los del producto: ΔT=%.2f ΔV=%.4f",
+			sinOverride.DeltaTemp1, sinOverride.DeltaVel)
+	}
+}
+
+// capturaPredictor registra las entradas del último Predict.
+type capturaPredictor struct{ in optimizador.EntradasPredictor }
+
+func (c *capturaPredictor) Predict(_ context.Context, in optimizador.EntradasPredictor) (optimizador.PrediccionSalida, error) {
+	c.in = in
+	return optimizador.PrediccionSalida{PctOk: 100}, nil
+}
+
+// TestResolverPropagaRangosAlPredictor verifica que los rangos del producto
+// viajen en cada evaluación (feature ranges: evita train/serve skew).
+func TestResolverPropagaRangosAlPredictor(t *testing.T) {
+	pred := &capturaPredictor{}
+	opt := optimizador.NewOptimizer(pred)
+	lim := optimizador.Limites{
+		TempMin: 150, TempMax: 250,
+		VelMin: 0.1, VelMax: 0.4,
+		DeltaTemp1: 2, DeltaVel: 0.02,
+	}
+	if _, err := opt.Resolver(context.Background(), "prod-x",
+		optimizador.Estado{TempObjetivo: 200, VelObjetivo: 0.2}, lim,
+		optimizador.Pesos{WO: 1}); err != nil {
+		t.Fatalf("Resolver: %v", err)
+	}
+	got := pred.in
+	if got.TempMin != 150 || got.TempMax != 250 || got.VelMin != 0.1 || got.VelMax != 0.4 {
+		t.Fatalf("rangos no propagados: %+v", got)
+	}
 }

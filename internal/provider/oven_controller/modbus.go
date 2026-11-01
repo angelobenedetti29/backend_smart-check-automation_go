@@ -40,7 +40,7 @@ type ModbusConfig struct {
 	SlaveID           byte          // default 1
 	Timeout           time.Duration // default 2s
 	RegTemp1          uint16        // 100 típico
-	RegVelocidad      uint16        // 102 típico
+	RegVelocidad      uint16        // 104 típico
 	ReadBackTolerance float64       // default 0.1
 }
 

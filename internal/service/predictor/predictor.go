@@ -63,11 +63,15 @@ func (c *ClientePredictor) setAuth(req *http.Request) {
 // Predict envía la request al sidecar y devuelve la triplete predicha.
 func (c *ClientePredictor) Predict(ctx context.Context, in optimizador.EntradasPredictor) (optimizador.PrediccionSalida, error) {
 	payload, err := json.Marshal(map[string]interface{}{
-		"producto_id":     in.ProductoID,
-		"temp_horno_1":    in.TempHorno1,
-		"velocidad_cinta": in.VelocidadCinta,
-		"temp_comb_1":     in.TempComb1,
-		"humedad_horno":   in.HumedadHorno,
+		"producto_id":         in.ProductoID,
+		"temp_horno_1":        in.TempHorno1,
+		"velocidad_cinta":     in.VelocidadCinta,
+		"temp_min":            in.TempMin,
+		"temp_max":            in.TempMax,
+		"velocidad_cinta_min": in.VelMin,
+		"velocidad_cinta_max": in.VelMax,
+		"temp_comb_1":         in.TempComb1,
+		"humedad_horno":       in.HumedadHorno,
 	})
 	if err != nil {
 		return optimizador.PrediccionSalida{}, fmt.Errorf("marshal predict payload: %w", err)
@@ -115,4 +119,40 @@ func (c *ClientePredictor) Health(ctx context.Context) bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// ModeloEntrenado indica si el sidecar tiene un modelo XGBoost entrenado para el
+// producto (GET /admin/modelos). Un error se devuelve tal cual: el sidecar puede
+// estar caído y el caller decide cómo degradar.
+func (c *ClientePredictor) ModeloEntrenado(ctx context.Context, productoID string) (bool, error) {
+	url := c.baseURL + "/admin/modelos"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	c.setAuth(req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("predictor http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return false, fmt.Errorf("predictor status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var out struct {
+		Productos []string `json:"productos"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, fmt.Errorf("decode modelos: %w", err)
+	}
+	for _, id := range out.Productos {
+		if id == productoID {
+			return true, nil
+		}
+	}
+	return false, nil
 }

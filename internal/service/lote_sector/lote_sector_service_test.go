@@ -80,6 +80,18 @@ func (f *fakeLoteRepo) UpdateModo(ctx context.Context, loteID, modo string) erro
 	return nil
 }
 
+func (f *fakeLoteRepo) ListAbiertos(ctx context.Context) ([]lotesector.Lote, error) {
+	return nil, nil
+}
+
+func (f *fakeLoteRepo) UpdateParametrosControl(ctx context.Context, loteID string, p lotesector.ParametrosControl) error {
+	return nil
+}
+
+func (f *fakeLoteRepo) UpdateSetpointsAplicados(ctx context.Context, loteID string, temp, vel float64) error {
+	return nil
+}
+
 type fakeSectorRepo struct {
 	deviceInfo    *sector.DeviceInfo
 	deviceErr     error

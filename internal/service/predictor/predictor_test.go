@@ -84,3 +84,47 @@ func TestClientePredictorHealthConAuth(t *testing.T) {
 		t.Fatalf("Authorization = %q, want %q", gotAuth, want)
 	}
 }
+
+// TestModeloEntrenado cubre presente, ausente y status no-200.
+func TestModeloEntrenado(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		productoID string
+		want       bool
+		wantErr    bool
+	}{
+		{"presente", http.StatusOK, `{"productos":["p1","p2"]}`, "p2", true, false},
+		{"ausente", http.StatusOK, `{"productos":["p1"]}`, "p9", false, false},
+		{"lista-vacia", http.StatusOK, `{"productos":[]}`, "p1", false, false},
+		{"no-200", http.StatusInternalServerError, `boom`, "p1", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotAuth = r.Header.Get("Authorization")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c := NewClientePredictorWithAuth(srv.URL, "tok")
+			got, err := c.ModeloEntrenado(context.Background(), tc.productoID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Fatalf("ModeloEntrenado = %v, want %v", got, tc.want)
+			}
+			if gotPath != "/admin/modelos" {
+				t.Fatalf("path = %q, want /admin/modelos", gotPath)
+			}
+			if gotAuth != "Bearer tok" {
+				t.Fatalf("Authorization = %q, want Bearer tok", gotAuth)
+			}
+		})
+	}
+}
