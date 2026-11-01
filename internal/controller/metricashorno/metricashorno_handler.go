@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
@@ -35,9 +36,11 @@ type LoteLookupService interface {
 	GetByID(ctx context.Context, loteID string) (*lotesector.Lote, error)
 }
 
-// MetricasHornoService es el contrato que consume el handler para persistir.
+// MetricasHornoService es el contrato que consume el handler para persistir
+// y leer los heartbeats del horno.
 type MetricasHornoService interface {
 	Save(ctx context.Context, m *metricashorno.MetricaHorno) error
+	GetUltimasParaLote(ctx context.Context, loteID string, limite int) ([]metricashorno.MetricaHorno, error)
 }
 
 // MetricasHornoHandler maneja POST /api/v1/lotes/{id}/metricas-horno.
@@ -110,9 +113,7 @@ func (h *MetricasHornoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		DispositivoID:      principal.DeviceID,
 		SectorID:           info.SectorID,
 		TempHorno1:         req.TempHorno1,
-		TempHorno2:         req.TempHorno2,
 		TempComb1:          req.TempComb1,
-		TempComb2:          req.TempComb2,
 		HumedadHorno:       req.HumedadHorno,
 		TempAmbiente:       req.TempAmbiente,
 		HumedadAmbiente:    req.HumedadAmbiente,
@@ -132,6 +133,43 @@ func (h *MetricasHornoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		"id":          m.ID,
 		"received_at": m.ReceivedAt,
 	}, nil)
+}
+
+// HandleUltimas maneja GET /api/v1/lotes/{id}/metricas-horno: devuelve las
+// últimas N lecturas del horno para que el panel muestre telemetría en vivo.
+// El default es 1 muestra (la más reciente); el máximo es 200.
+func (h *MetricasHornoHandler) HandleUltimas(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+	loteID, err := extractLoteIDFromPath(r.URL.Path, "/metricas-horno")
+	if err != nil {
+		writeMetricasError(w, err)
+		return
+	}
+	if _, err := h.lookup.GetByID(r.Context(), loteID); err != nil {
+		writeMetricasError(w, err)
+		return
+	}
+	limite := 1
+	if raw := r.URL.Query().Get("limite"); raw != "" {
+		if n, perr := strconv.Atoi(raw); perr == nil {
+			limite = n
+		}
+	}
+	if limite < 1 {
+		limite = 1
+	}
+	if limite > 200 {
+		limite = 200
+	}
+	metricas, err := h.repo.GetUltimasParaLote(r.Context(), loteID, limite)
+	if err != nil {
+		writeMetricasError(w, err)
+		return
+	}
+	response.OK(w, "Métricas del horno", map[string]interface{}{"metricas": metricas})
 }
 
 // extractLoteIDFromPath obtiene el {id} de /api/v1/lotes/{id}/metricas-horno.

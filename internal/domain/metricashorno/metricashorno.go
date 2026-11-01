@@ -1,5 +1,5 @@
 // Package metricashorno define el modelo de dominio de la telemetría cruda
-// del horno reportada por la Pi ENTRADA: temperaturas leídas (T1, T2,
+// del horno reportada por la Pi ENTRADA: temperaturas leídas (T1,
 // combustión, ambiente, humedad) y velocidad de cinta activa. Cada fila es un
 // heartbeat periódico y se persiste append-only sobre la tabla metricas_horno.
 //
@@ -20,22 +20,20 @@ var ErrLoteNoAbierto = errors.New("metricashorno: el lote no está abierto")
 // MetricaHorno es la entidad persistida. Los punteros representan lecturas
 // que el sensor puede no entregar (caída momentánea, sensor opcional).
 type MetricaHorno struct {
-	ID                  string     `json:"id"`
-	LoteID              string     `json:"lote_id"`
-	DispositivoID       string     `json:"dispositivo_id"`
-	SectorID            string     `json:"sector_id"`
-	TempHorno1          *float64   `json:"temp_horno_1,omitempty"`
-	TempHorno2          *float64   `json:"temp_horno_2,omitempty"`
-	TempComb1           *float64   `json:"temp_comb_1,omitempty"`
-	TempComb2           *float64   `json:"temp_comb_2,omitempty"`
-	HumedadHorno        *float64   `json:"humedad_horno,omitempty"`
-	TempAmbiente        *float64   `json:"temp_ambiente,omitempty"`
-	HumedadAmbiente     *float64   `json:"humedad_ambiente,omitempty"`
-	VelocidadCinta      *float64   `json:"velocidad_cinta,omitempty"`
-	TempObjetivo        *float64   `json:"temp_objetivo,omitempty"`
-	VelObjetivo         *float64   `json:"vel_objetivo,omitempty"`
-	ConfianzaDeteccion  *float64   `json:"confianza_deteccion,omitempty"`
-	ReceivedAt          time.Time  `json:"received_at"`
+	ID                 string    `json:"id"`
+	LoteID             string    `json:"lote_id"`
+	DispositivoID      string    `json:"dispositivo_id"`
+	SectorID           string    `json:"sector_id"`
+	TempHorno1         *float64  `json:"temp_horno_1,omitempty"`
+	TempComb1          *float64  `json:"temp_comb_1,omitempty"`
+	HumedadHorno       *float64  `json:"humedad_horno,omitempty"`
+	TempAmbiente       *float64  `json:"temp_ambiente,omitempty"`
+	HumedadAmbiente    *float64  `json:"humedad_ambiente,omitempty"`
+	VelocidadCinta     *float64  `json:"velocidad_cinta,omitempty"`
+	TempObjetivo       *float64  `json:"temp_objetivo,omitempty"`
+	VelObjetivo        *float64  `json:"vel_objetivo,omitempty"`
+	ConfianzaDeteccion *float64  `json:"confianza_deteccion,omitempty"`
+	ReceivedAt         time.Time `json:"received_at"`
 }
 
 // MetricaHornoRequest es el body de POST /api/v1/lotes/{id}/metricas-horno.
@@ -44,9 +42,7 @@ type MetricaHorno struct {
 // reporta en este heartbeat.
 type MetricaHornoRequest struct {
 	TempHorno1         *float64   `json:"temp_horno_1,omitempty"`
-	TempHorno2         *float64   `json:"temp_horno_2,omitempty"`
 	TempComb1          *float64   `json:"temp_comb_1,omitempty"`
-	TempComb2          *float64   `json:"temp_comb_2,omitempty"`
 	HumedadHorno       *float64   `json:"humedad_horno,omitempty"`
 	TempAmbiente       *float64   `json:"temp_ambiente,omitempty"`
 	HumedadAmbiente    *float64   `json:"humedad_ambiente,omitempty"`

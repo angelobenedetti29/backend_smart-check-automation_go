@@ -51,14 +51,26 @@ func setupLoteSectorRepo(t *testing.T) (*LoteSectorPostgresRepository, *pgxpool.
 	return NewLoteSectorPostgresRepository(pool), pool
 }
 
+// paramsAbrirDePrueba refleja los defaults que el service aplica antes del repo.
+func paramsAbrirDePrueba() lotesector.AbrirParams {
+	return lotesector.AbrirParams{
+		Modo:                         lotesector.ModoManual,
+		VentanaEvaluacionSegundos:    600,
+		VentanaActualizacionSegundos: 300,
+		ToleranciaTempC:              2.0,
+		UmbralAceptacionCrudo:        5.0,
+		UmbralAceptacionQuemado:      5.0,
+	}
+}
+
 // abrirLote abre el lote del sector de prueba y exige que sea una creación.
 func abrirLote(t *testing.T, ctx context.Context, repo *LoteSectorPostgresRepository) *lotesector.Lote {
 	t.Helper()
-	l, creado, err := repo.Abrir(ctx, lotesector.AbrirParams{
-		SectorID:   testSectorID,
-		ProductoID: testProductoID,
-		AbiertoPor: testEntradaDevID,
-	})
+	params := paramsAbrirDePrueba()
+	params.SectorID = testSectorID
+	params.ProductoID = testProductoID
+	params.AbiertoPor = testEntradaDevID
+	l, creado, err := repo.Abrir(ctx, params)
 	require.NoError(t, err)
 	require.True(t, creado, "la primera apertura debe crear el lote")
 	return l
@@ -120,11 +132,11 @@ func TestLoteSectorRepository_AbrirConcurrente(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			l, creado, err := repo.Abrir(ctx, lotesector.AbrirParams{
-				SectorID:   testSectorID,
-				ProductoID: testProductoID,
-				AbiertoPor: testEntradaDevID,
-			})
+			params := paramsAbrirDePrueba()
+			params.SectorID = testSectorID
+			params.ProductoID = testProductoID
+			params.AbiertoPor = testEntradaDevID
+			l, creado, err := repo.Abrir(ctx, params)
 			results <- result{lote: l, creado: creado, err: err}
 		}()
 	}
@@ -157,12 +169,11 @@ func TestLoteSectorRepository_AbrirIdempotente(t *testing.T) {
 	ctx := context.Background()
 	repo, _ := setupLoteSectorRepo(t)
 
-	params := lotesector.AbrirParams{
-		SectorID:       testSectorID,
-		ProductoID:     testProductoID,
-		AbiertoPor:     testEntradaDevID,
-		IdempotencyKey: "key-abrir-1",
-	}
+	params := paramsAbrirDePrueba()
+	params.SectorID = testSectorID
+	params.ProductoID = testProductoID
+	params.AbiertoPor = testEntradaDevID
+	params.IdempotencyKey = "key-abrir-1"
 	first, creado, err := repo.Abrir(ctx, params)
 	require.NoError(t, err)
 	require.True(t, creado)
@@ -297,21 +308,17 @@ func TestLoteSectorRepository_AbrirClaveDeOtroSector(t *testing.T) {
 	require.NoError(t, err)
 
 	const key = "key-compartida"
-	_, creado, err := repo.Abrir(ctx, lotesector.AbrirParams{
-		SectorID:       testSectorID,
-		ProductoID:     testProductoID,
-		AbiertoPor:     testEntradaDevID,
-		IdempotencyKey: key,
-	})
+	params := paramsAbrirDePrueba()
+	params.SectorID = testSectorID
+	params.ProductoID = testProductoID
+	params.AbiertoPor = testEntradaDevID
+	params.IdempotencyKey = key
+	_, creado, err := repo.Abrir(ctx, params)
 	require.NoError(t, err)
 	require.True(t, creado)
 
-	_, _, err = repo.Abrir(ctx, lotesector.AbrirParams{
-		SectorID:       otroSectorID,
-		ProductoID:     testProductoID,
-		AbiertoPor:     testEntradaDevID,
-		IdempotencyKey: key,
-	})
+	params.SectorID = otroSectorID
+	_, _, err = repo.Abrir(ctx, params)
 	require.ErrorIs(t, err, lotesector.ErrIdempotencyKeyConflicto)
 }
 

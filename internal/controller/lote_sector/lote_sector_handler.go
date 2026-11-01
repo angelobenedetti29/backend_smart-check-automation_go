@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -50,6 +51,9 @@ type LoteSectorService interface {
 // /api/v1/dispositivos/sector.
 type LoteSectorHandler struct {
 	service LoteSectorService
+	// onAbierto se invoca tras abrir un lote en modo no manual para arrancar el
+	// loop de control. Su error no falla la apertura.
+	onAbierto func(context.Context, *lotesector.Lote) error
 }
 
 // NewLoteSectorHandler instancia el handler inyectando el servicio.
@@ -57,23 +61,28 @@ func NewLoteSectorHandler(svc LoteSectorService) *LoteSectorHandler {
 	return &LoteSectorHandler{service: svc}
 }
 
+// SetOnAbierto registra el callback que arranca el control al abrir un lote.
+func (h *LoteSectorHandler) SetOnAbierto(fn func(context.Context, *lotesector.Lote) error) {
+	h.onAbierto = fn
+}
+
 // inicioRequest es el payload de POST /api/v1/lotes/inicio. Momento es
 // informativo: el servidor usa su propio reloj. Desde SCA-400 admite los
 // parámetros de operación del control (modo, ventanas, tolerancias, umbrales,
-// pesos, flag de horno2, inicio manual con estado inicial).
+// pesos, inicio manual con estado inicial).
 type inicioRequest struct {
-	IdempotencyKey             string                              `json:"idempotency_key"`
-	ProductoID                 string                              `json:"producto_id"`
-	Momento                    *time.Time                          `json:"momento"`
-	Modo                       string                              `json:"modo,omitempty"`
-	IniciadoManualmente        bool                                `json:"iniciado_manualmente"`
-	VentanaEvaluacionSegundos  int                                 `json:"ventana_evaluacion_segundos"`
-	VentanaActualizacionSegundos int                               `json:"ventana_actualizacion_segundos"`
-	ToleranciaTempC            float64                             `json:"tolerancia_temp_c"`
-	UmbralAceptacionCrudo      float64                             `json:"umbral_aceptacion_crudo"`
-	UmbralAceptacionQuemado    float64                             `json:"umbral_aceptacion_quemado"`
-	PesosObjetivo              *lotesector.PesosObjetivo           `json:"pesos_objetivo,omitempty"`
-	EstadoInicial              *lotesector.EstadoInicialLote       `json:"estado_inicial,omitempty"`
+	IdempotencyKey               string                        `json:"idempotency_key"`
+	ProductoID                   string                        `json:"producto_id"`
+	Momento                      *time.Time                    `json:"momento"`
+	Modo                         string                        `json:"modo,omitempty"`
+	IniciadoManualmente          bool                          `json:"iniciado_manualmente"`
+	VentanaEvaluacionSegundos    int                           `json:"ventana_evaluacion_segundos"`
+	VentanaActualizacionSegundos int                           `json:"ventana_actualizacion_segundos"`
+	ToleranciaTempC              float64                       `json:"tolerancia_temp_c"`
+	UmbralAceptacionCrudo        float64                       `json:"umbral_aceptacion_crudo"`
+	UmbralAceptacionQuemado      float64                       `json:"umbral_aceptacion_quemado"`
+	PesosObjetivo                *lotesector.PesosObjetivo     `json:"pesos_objetivo,omitempty"`
+	EstadoInicial                *lotesector.EstadoInicialLote `json:"estado_inicial,omitempty"`
 }
 
 // eventoDTO es una detección reportada por la salida.
@@ -169,21 +178,29 @@ func (h *LoteSectorHandler) HandleInicio(w http.ResponseWriter, r *http.Request)
 	}
 
 	params := &lotesector.AbrirParams{
-		Modo:                        req.Modo,
-		IniciadoManualmente:         req.IniciadoManualmente,
-		VentanaEvaluacionSegundos:   req.VentanaEvaluacionSegundos,
+		Modo:                         req.Modo,
+		IniciadoManualmente:          req.IniciadoManualmente,
+		VentanaEvaluacionSegundos:    req.VentanaEvaluacionSegundos,
 		VentanaActualizacionSegundos: req.VentanaActualizacionSegundos,
-		ToleranciaTempC:             req.ToleranciaTempC,
-		UmbralAceptacionCrudo:       req.UmbralAceptacionCrudo,
-		UmbralAceptacionQuemado:     req.UmbralAceptacionQuemado,
-		PesosObjetivo:               req.PesosObjetivo,
-		EstadoInicial:               req.EstadoInicial,
+		ToleranciaTempC:              req.ToleranciaTempC,
+		UmbralAceptacionCrudo:        req.UmbralAceptacionCrudo,
+		UmbralAceptacionQuemado:      req.UmbralAceptacionQuemado,
+		PesosObjetivo:                req.PesosObjetivo,
+		EstadoInicial:                req.EstadoInicial,
 	}
 
 	lote, creado, err := h.service.Abrir(r.Context(), principal.DeviceID, req.ProductoID, req.IdempotencyKey, params)
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+
+	// El arranque del loop es best-effort: un fallo se loguea y el lote igual
+	// queda abierto.
+	if lote.Modo != lotesector.ModoManual && h.onAbierto != nil {
+		if err := h.onAbierto(r.Context(), lote); err != nil {
+			log.Printf("[control] arrancando loop al abrir lote %s: %v", lote.ID, err)
+		}
 	}
 
 	status := http.StatusOK
@@ -425,6 +442,8 @@ func writeError(w http.ResponseWriter, err error) {
 		response.Error(w, http.StatusBadRequest, "Payload inválido", map[string]string{"code": "payload_invalido"})
 	case errors.Is(err, lotesector.ErrSectorActivo):
 		response.Error(w, http.StatusConflict, "El sector todavía está activo", map[string]string{"code": "sector_activo"})
+	case errors.Is(err, lotesector.ErrRecetaIncompleta):
+		response.Error(w, http.StatusUnprocessableEntity, "El producto no tiene receta de temperatura/velocidad", map[string]string{"code": "receta_incompleta"})
 	case errors.Is(err, producto.ErrDesconocido):
 		response.Error(w, http.StatusUnprocessableEntity, "Producto desconocido", map[string]string{"code": "producto_desconocido"})
 	case errors.Is(err, sector.ErrSinSector):

@@ -11,19 +11,15 @@ import "time"
 const EstadoControlManual = "CONTROL_MANUAL"
 
 // Horno represents an industrial oven entity in the factory line.
-//
-// Desde SCA-400 incluye TemperaturaHorno2 (opcional) para líneas con dos
-// hornos en serie. Cuando la línea tiene un solo horno, este campo queda nil.
 type Horno struct {
-	ID               string    `json:"id"`
-	Nombre           string    `json:"nombre"`
-	Temperatura      float64   `json:"temperatura"`
-	TemperaturaHorno2 *float64 `json:"temperatura_horno_2,omitempty"` // NULL cuando la línea tiene un solo horno
-	VelocidadCinta   float64   `json:"velocidad_cinta"`               // Velocidad activa de la cinta transportadora (m/s)
-	ProductoID       *string   `json:"producto_id,omitempty"`         // Producto activo actualmente en el horno (última consigna aplicada)
-	LoteID           *string   `json:"lote_id,omitempty"`             // Lote de correlación de la última consigna aplicada
-	Estado           string    `json:"estado"`                        // "ACTIVO", "ATENCION", "MANTENIMIENTO", "CONTROL_MANUAL"
-	UltimoCheck      time.Time `json:"ultimo_check"`                  // Timestamp of the last check
+	ID             string    `json:"id"`
+	Nombre         string    `json:"nombre"`
+	Temperatura    float64   `json:"temperatura"`
+	VelocidadCinta float64   `json:"velocidad_cinta"`       // Velocidad activa de la cinta transportadora (m/s)
+	ProductoID     *string   `json:"producto_id,omitempty"` // Producto activo actualmente en el horno (última consigna aplicada)
+	LoteID         *string   `json:"lote_id,omitempty"`     // Lote de correlación de la última consigna aplicada
+	Estado         string    `json:"estado"`                // "ACTIVO", "ATENCION", "MANTENIMIENTO", "CONTROL_MANUAL"
+	UltimoCheck    time.Time `json:"ultimo_check"`          // Timestamp of the last check
 }
 
 // Repository defines the contract for persisting and retrieving Horno entities.

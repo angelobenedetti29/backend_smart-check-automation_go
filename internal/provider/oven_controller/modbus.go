@@ -18,9 +18,8 @@ import (
 // común en PLCs Schneider/Modicon. Verificar contra el manual del PLC físico
 // antes de deployar en planta.
 //
-// Limitación de la interfaz actual: SendSetpoint(hornoID, temperatura,
-// velocidad) no transporta T2, así que este driver escribe T1 y V; regTemp2
-// queda reservado para cuando la interfaz exponga el setpoint del horno 2.
+// El driver escribe T1 y V (la interfaz SendSetpoint no transporta más
+// variables).
 //
 // Verificación: después de escribir cada setpoint, lee de vuelta el registro y
 // compara con tolerancia (default 0.1 °C / m/s). Si difiere, retorna
@@ -31,7 +30,6 @@ type ModbusOvenController struct {
 	slaveID      byte
 	regTemp1     uint16 // holding register address (0-based)
 	regVelocidad uint16
-	regTemp2     uint16 // 0 = deshabilitado (reservado)
 	readBackTol  float64
 	timeout      time.Duration
 }
@@ -43,7 +41,6 @@ type ModbusConfig struct {
 	Timeout           time.Duration // default 2s
 	RegTemp1          uint16        // 100 típico
 	RegVelocidad      uint16        // 102 típico
-	RegTemp2          uint16        // 104 típico, 0 = deshabilitado
 	ReadBackTolerance float64       // default 0.1
 }
 
@@ -83,7 +80,6 @@ func NewModbusOvenControllerFromClient(client modbus.Client, cfg ModbusConfig) *
 		slaveID:      cfg.SlaveID,
 		regTemp1:     cfg.RegTemp1,
 		regVelocidad: cfg.RegVelocidad,
-		regTemp2:     cfg.RegTemp2,
 		readBackTol:  tol,
 		timeout:      timeout,
 	}

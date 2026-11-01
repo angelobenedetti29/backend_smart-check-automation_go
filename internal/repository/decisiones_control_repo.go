@@ -73,7 +73,7 @@ pct_crudos_obs, pct_ok_obs, pct_quemados_obs, conf_promedio,
 temp_propuesto, vel_propuesto,
 temp_aplicado, vel_aplicado,
 	prediccion, z_observado, z_predicho,
-	razon_skipped, aplicado_por, decision_origen_id, created_at`
+	razon_skipped, aplicado_por, decision_origen_id, aprobada_por, aprobada_at, created_at`
 
 // ListByLote devuelve las últimas N decisiones del lote, ordenadas por
 // created_at DESC. Un lote sin decisiones devuelve slice vacío.
@@ -131,6 +131,41 @@ func (r *DecisionesControlPostgresRepository) GetUltimaPendiente(ctx context.Con
 	return &d, nil
 }
 
+// GetByID devuelve una decisión por id, o (nil, nil) si no existe.
+func (r *DecisionesControlPostgresRepository) GetByID(ctx context.Context, decisionID string) (*decisiones_control.DecisionControl, error) {
+	row := r.db.QueryRow(ctx, `
+		SELECT `+selectDecisionesColumns+`
+		FROM decisiones_control
+		WHERE id = $1`, decisionID)
+	var d decisiones_control.DecisionControl
+	if err := scanDecision(row, &d); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query decision por id: %w", err)
+	}
+	return &d, nil
+}
+
+const updateAprobarSQL = `
+	UPDATE decisiones_control
+	SET aprobada_por = $2, aprobada_at = now()
+	WHERE id = $1 AND aplicado_por = 'NADIE' AND aprobada_por IS NULL`
+
+// Aprobar registra la aprobación de una propuesta pendiente. Idempotente:
+// sólo toca filas aún no aplicadas ni aprobadas; si no afectó ninguna fila
+// devuelve ErrSinPendiente.
+func (r *DecisionesControlPostgresRepository) Aprobar(ctx context.Context, decisionID, usuario string) error {
+	tag, err := r.db.Exec(ctx, updateAprobarSQL, decisionID, usuario)
+	if err != nil {
+		return fmt.Errorf("update decision aprobada: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return decisiones_control.ErrSinPendiente
+	}
+	return nil
+}
+
 const updateMarcarAplicadaSQL = `
 	UPDATE decisiones_control
 	SET aplicado_por = $1, temp_aplicado = $2, vel_aplicado = $3, decision_origen_id = $4
@@ -165,7 +200,7 @@ func scanDecision(s rowScanner, d *decisiones_control.DecisionControl) error {
 		&d.TempPropuesto, &d.VelPropuesto,
 		&d.TempAplicado, &d.VelAplicado,
 		&d.Prediccion, &d.ZObservado, &d.ZPredicho,
-		&d.RazonSkipped, &d.AplicadoPor, &d.DecisionOrigenID, &d.CreatedAt,
+		&d.RazonSkipped, &d.AplicadoPor, &d.DecisionOrigenID, &d.AprobadaPor, &d.AprobadaAt, &d.CreatedAt,
 	); err != nil {
 		return err
 	}

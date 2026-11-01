@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -183,6 +184,28 @@ func TestHandleInicioProductoDesconocido422(t *testing.T) {
 
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	assert.Equal(t, "producto_desconocido", errorCode(t, rec))
+}
+
+func TestHandleInicioRecetaIncompleta422(t *testing.T) {
+	svc := &fakeService{abrirErr: lotesector.ErrRecetaIncompleta}
+	h := NewLoteSectorHandler(svc)
+
+	rec := httptest.NewRecorder()
+	h.HandleInicio(rec, deviceRequest(http.MethodPost, "/api/v1/lotes/inicio", `{"producto_id":"prod-1"}`))
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Equal(t, "receta_incompleta", errorCode(t, rec))
+}
+
+func TestHandleInicioOnAbiertoErrorNoFalla(t *testing.T) {
+	svc := &fakeService{abrirLote: &lotesector.Lote{ID: testLoteUUID, Modo: lotesector.ModoAutomatico}, abrirCreado: true}
+	h := NewLoteSectorHandler(svc)
+	h.SetOnAbierto(func(context.Context, *lotesector.Lote) error { return errors.New("loop caído") })
+
+	rec := httptest.NewRecorder()
+	h.HandleInicio(rec, deviceRequest(http.MethodPost, "/api/v1/lotes/inicio", `{"producto_id":"prod-1"}`))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
 }
 
 func TestHandleInicioJSONInvalido400(t *testing.T) {

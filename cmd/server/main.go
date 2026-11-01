@@ -215,6 +215,8 @@ func main() {
 		DeviceSector:   loteSectorSvc,
 	}
 	controlHandler := controlController.NewControlHandler(controlDeps)
+	// Al abrir un lote en modo no manual, arrancar su loop de control.
+	loteSectorHandler.SetOnAbierto(controlHandler.EnsureLoopForLote)
 	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
 	controlSSEHandler := controlController.NewControlSSEHandler(controlSSEBroker)
 
@@ -280,6 +282,10 @@ func main() {
 			loteSectorHandler.HandleCierre(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
 			metricasHornoHandler.Handle(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, metricasHornoHandler.HandleUltimas)(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/consigna/ack"):
+			controlHandler.HandleConsignaAck(controlDeps)(w, r)
 
 		// --- panel (JWT cookie) ---
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/start"):
@@ -299,8 +305,9 @@ func main() {
 			jwtWrap(controlHandler.HandleControlEstado)(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/confianza-clases"):
 			jwtWrap(controlHandler.HandleConfianzaClases)(w, r)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/aplicar-consigna"):
-			jwtWrap(controlHandler.HandleAplicarConsigna(controlDeps))(w, r)
+		case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/aplicar-consigna") || strings.HasSuffix(r.URL.Path, "/aprobar-consigna")):
+			// Aprueba el operario (cookie) o la propia Pi (Bearer).
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, controlHandler.HandleAplicarConsigna(controlDeps))(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/decisiones"):
 			jwtWrap(decisionesHandler.Handle)(w, r)
 

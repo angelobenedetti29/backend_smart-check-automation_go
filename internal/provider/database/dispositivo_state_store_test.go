@@ -108,7 +108,7 @@ func TestMemoryDispositivoStateStore_Register_AppearsOffline(t *testing.T) {
 func TestMemoryDispositivoStateStore_Register_UpdatesWithoutDuplicating(t *testing.T) {
 	store := NewMemoryDispositivoStateStore()
 	sectorA := "horno-1"
-	sectorB := "horno-2"
+	sectorB := "horno-b"
 
 	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorA})
 	store.Register(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1 Renombrada", SectorID: &sectorB})
@@ -262,7 +262,7 @@ func TestMemoryDispositivoStateStore_PropagaWhepURL(t *testing.T) {
 
 func TestMemoryDispositivoStateStore_Hydrate_PropagaWhepURL(t *testing.T) {
 	store := NewMemoryDispositivoStateStore()
-	whep := "https://camaras.example.com/whep/horno-2"
+	whep := "https://camaras.example.com/whep/horno-b"
 
 	store.Hydrate([]dispositivo.DispositivoConUltimaMetrica{
 		{Dispositivo: dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", WhepURL: whep}},

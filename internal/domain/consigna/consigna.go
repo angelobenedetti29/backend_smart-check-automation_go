@@ -23,10 +23,6 @@ var ErrFueraDeRango = errors.New("consigna: valores fuera de rango seguro")
 // pudo aplicar la consigna.
 var ErrDispatchFallido = errors.New("consigna: el controlador físico rechazó la consigna")
 
-// ErrHorno2NoHabilitado indica que la consigna pidió TempHorno2Objetivo pero
-// el producto del lote no tiene el horno 2 habilitado.
-var ErrHorno2NoHabilitado = errors.New("consigna: el producto no tiene el horno 2 habilitado")
-
 // Origen identifica el mecanismo que disparó la consigna. Hoy conviven:
 //   - MANUAL (SCA-320): envío desde el panel por un operario.
 //   - AUTOMATICO (SCA-142 reactivado por SCA-400): despacho que dispara el
@@ -51,9 +47,6 @@ func (e *ValidationError) Error() string {
 // Consigna representa un registro histórico de auditoría: una consigna
 // térmica y de velocidad de cinta que fue (o se intentó) despachar al
 // controlador físico del horno, tal como se persiste en PostgreSQL.
-//
-// Desde SCA-400 incluye TempHorno2Objetivo/Previa y Horno2Habilitado para
-// soportar dos zonas térmicas cuando la línea tiene horno 2 en serie.
 type Consigna struct {
 	ID                     string    `json:"id"                        db:"id"`
 	DispositivoID          *string   `json:"dispositivoId,omitempty"   db:"dispositivo_id"`
@@ -68,12 +61,6 @@ type Consigna struct {
 	MotivoError            *string   `json:"motivoError,omitempty"     db:"motivo_error"`
 	TemperaturaPrevia      *float64  `json:"temperaturaPrevia,omitempty" db:"temperatura_previa"`
 	VelocidadCintaPrevia   *float64  `json:"velocidadCintaPrevia,omitempty" db:"velocidad_cinta_previa"`
-	// SCA-400: horno 2 (T2). NULL cuando la línea tiene un solo horno.
-	TempHorno2Objetivo     *float64  `json:"tempHorno2Objetivo,omitempty" db:"temp_horno2_objetivo"`
-	TempHorno2Previa       *float64  `json:"tempHorno2Previa,omitempty"   db:"temp_horno2_previa"`
-	// Horno2Habilitado: snapshot del flag del producto al momento del despacho.
-	// NULL en consignas previas a SCA-400 (migración); true/false en las nuevas.
-	Horno2Habilitado       *bool     `json:"horno2Habilitado,omitempty"   db:"horno2_habilitado"`
 	CreadaEn               time.Time `json:"creadaEn"                  db:"creada_en"`
 }
 
@@ -81,14 +68,11 @@ type Consigna struct {
 // envío manual de consigna térmica (SCA-320). ProductoID es obligatorio: el
 // despacho manual siempre valida contra el rango real cargado en el producto
 // unificado, sin caer a límites de seguridad hardcodeados.
-//
-// Desde SCA-400 admite TempHorno2 opcional para líneas con horno 2.
 type ConsignaManualRequest struct {
 	HornoID                string  `json:"hornoId"`
 	ProductoID             string  `json:"productoId"`
 	TemperaturaObjetivo    float64 `json:"temperaturaObjetivo"`
 	VelocidadCintaObjetivo float64 `json:"velocidadCintaObjetivo"`
-	TempHorno2Objetivo     *float64 `json:"tempHorno2Objetivo,omitempty"`
 	Usuario                string  `json:"usuario,omitempty"` // nombre del operario que envía la consigna manual (opcional)
 	// LoteID es opcional: permite correlacionar un ajuste manual con el lote
 	// en curso (por ejemplo, el loteId de correlación devuelto por

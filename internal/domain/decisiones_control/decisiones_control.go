@@ -8,8 +8,13 @@ package decisiones_control
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrSinPendiente se retorna al aprobar una decisión que ya no está pendiente
+// (inexistente, ya aplicada o ya aprobada).
+var ErrSinPendiente = errors.New("decisiones_control: no hay propuesta pendiente")
 
 // Estados posibles del flag aplicado_por.
 const (
@@ -22,30 +27,31 @@ const (
 // cliente (lo demás es interno). Permite al operario distinguir si la
 // decisión del MPC vino del modelo real o del placeholder determinístico.
 type PrediccionResumen struct {
-	PctCrudos     float64 `json:"pctCrudos"`
-	PctOk         float64 `json:"pctOk"`
-	PctQuemados   float64 `json:"pctQuemados"`
-	ModelVersion  string  `json:"modelVersion"`
-	EsPlaceholder bool    `json:"esPlaceholder"`
+	PctCrudos           float64 `json:"pctCrudos"`
+	PctOk               float64 `json:"pctOk"`
+	PctQuemados         float64 `json:"pctQuemados"`
+	ModelVersion        string  `json:"modelVersion"`
+	EsPlaceholder       bool    `json:"esPlaceholder"`
+	RestriccionRelajada bool    `json:"restriccionRelajada,omitempty"`
 }
 
 // DecisionControl es el registro persistido.
 type DecisionControl struct {
-	ID              string     `json:"id"`
-	LoteID          string     `json:"lote_id"`
-	VentanaInicio   time.Time  `json:"ventana_inicio"`
-	VentanaFin      time.Time  `json:"ventana_fin"`
-	Muestras        int        `json:"muestras"`
-	TempActual      float64    `json:"temp_actual"`
-	VelActual       *float64   `json:"vel_actual,omitempty"`
-	PctCrudosObs    float64    `json:"pct_crudos_obs"`
-	PctOkObs        float64    `json:"pct_ok_obs"`
-	PctQuemadosObs  float64    `json:"pct_quemados_obs"`
-	ConfPromedio    float64    `json:"conf_promedio"`
-	TempPropuesto   float64    `json:"temp_propuesto"`
-	VelPropuesto    float64    `json:"vel_propuesto"`
-	TempAplicado    *float64   `json:"temp_aplicado,omitempty"`
-	VelAplicado     *float64   `json:"vel_aplicado,omitempty"`
+	ID             string    `json:"id"`
+	LoteID         string    `json:"lote_id"`
+	VentanaInicio  time.Time `json:"ventana_inicio"`
+	VentanaFin     time.Time `json:"ventana_fin"`
+	Muestras       int       `json:"muestras"`
+	TempActual     float64   `json:"temp_actual"`
+	VelActual      *float64  `json:"vel_actual,omitempty"`
+	PctCrudosObs   float64   `json:"pct_crudos_obs"`
+	PctOkObs       float64   `json:"pct_ok_obs"`
+	PctQuemadosObs float64   `json:"pct_quemados_obs"`
+	ConfPromedio   float64   `json:"conf_promedio"`
+	TempPropuesto  float64   `json:"temp_propuesto"`
+	VelPropuesto   float64   `json:"vel_propuesto"`
+	TempAplicado   *float64  `json:"temp_aplicado,omitempty"`
+	VelAplicado    *float64  `json:"vel_aplicado,omitempty"`
 	// Prediccion es la salida cruda del XGBoost (model_version, es_placeholder, ...).
 	// En la API se serializa como PrediccionResumen (subset); el []byte raw
 	// persiste en BD como JSONB pero no viaja en el response.
@@ -57,8 +63,11 @@ type DecisionControl struct {
 	AplicadoPor    string             `json:"aplicado_por"`
 	// DecisionOrigenID apunta a la decisión origen cuando esta fila fue
 	// promovida (NADIE→OPERARIO/AUTO). Self-ref cuando se promueve la misma fila.
-	DecisionOrigenID *string          `json:"decision_origen_id,omitempty"`
-	CreatedAt      time.Time          `json:"created_at"`
+	DecisionOrigenID *string `json:"decision_origen_id,omitempty"`
+	// AprobadaPor/AprobadaAt registran la aprobación en SUPERVISION.
+	AprobadaPor *string    `json:"aprobada_por,omitempty"`
+	AprobadaAt  *time.Time `json:"aprobada_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 // Repository define el contrato de persistencia del audit del MPC.
@@ -73,6 +82,13 @@ type Repository interface {
 	// todavía no fue aplicada (aplicado_por='NADIE' y sin razon_skipped), o
 	// nil si el lote no tiene ninguna propuesta pendiente.
 	GetUltimaPendiente(ctx context.Context, loteID string) (*DecisionControl, error)
+
+	// GetByID devuelve una decisión por id, o nil si no existe.
+	GetByID(ctx context.Context, decisionID string) (*DecisionControl, error)
+
+	// Aprobar registra la aprobación de una propuesta pendiente. Idempotente:
+	// una fila ya aprobada o aplicada no se toca y devuelve ErrSinPendiente.
+	Aprobar(ctx context.Context, decisionID, usuario string) error
 
 	// MarcarAplicada actualiza la fila de una decisión para reflejar que la
 	// propuesta fue aplicada por un operario (o MPC) e incluye los valores

@@ -40,20 +40,19 @@ func isInvalidTextRepresentation(err error) bool {
 // JOIN. Las columnas nullable se escanean a punteros para preservar los null.
 //
 // Desde SCA-400 también trae modo, ventanas, tolerancias, umbrales, pesos
-// (JSONB), flag de inicio manual, snapshot de horno2_habilitado y últimos
-// setpoints aplicados al horno.
+// (JSONB), flag de inicio manual y últimos setpoints aplicados al horno.
 const loteSectorSelect = `
 	SELECT
 		lp.id, lp.sector_id, lp.estado, lp.turno, lp.producto_id, pr.nombre,
 		lp.inicio_at, lp.abierto_por, d.tipo,
 		lp.correctos, lp.crudas, lp.quemados,
 		lp.ultimo_evento_en, lp.fin_at, lp.motivo_cierre,
-		lp.modo, lp.horno2_habilitado, lp.iniciado_manualmente,
+		lp.modo, lp.iniciado_manualmente,
 		lp.ventana_evaluacion_segundos, lp.ventana_actualizacion_segundos,
 		lp.tolerancia_temp_c,
 		lp.umbral_aceptacion_crudo, lp.umbral_aceptacion_quemado,
 		lp.pesos_objetivo,
-		lp.temp1_objetivo, lp.temp2_objetivo, lp.vel_objetivo
+		lp.temp1_objetivo, lp.vel_objetivo
 	FROM lotes_productivos lp
 	JOIN productos pr ON pr.id = lp.producto_id
 	LEFT JOIN dispositivos d ON d.id = lp.abierto_por
@@ -77,12 +76,12 @@ func scanLoteSector(row pgx.Row) (*lotesector.Lote, error) {
 		&l.AbiertoEn, &abiertoPor, &tipo,
 		&ok, &crudo, &quemado,
 		&l.UltimoEventoEn, &l.CerradoEn, &l.MotivoCierre,
-		&l.Modo, &l.Horno2Habilitado, &l.IniciadoManualmente,
+		&l.Modo, &l.IniciadoManualmente,
 		&l.VentanaEvaluacionSegundos, &l.VentanaActualizacionSegundos,
 		&l.ToleranciaTempC,
 		&l.UmbralAceptacionCrudo, &l.UmbralAceptacionQuemado,
 		&pesosJSON,
-		&l.Temp1Objetivo, &l.Temp2Objetivo, &l.VelObjetivo,
+		&l.Temp1Objetivo, &l.VelObjetivo,
 	); err != nil {
 		return nil, err
 	}
@@ -251,41 +250,41 @@ func (r *LoteSectorPostgresRepository) Abrir(ctx context.Context, params lotesec
 	// del lote con las lecturas reales para que el loop arranque en fase de
 	// adaptación. Si no, todos NULL hasta el primer despacho.
 	var temp1Seed, velSeed *float64
-	var temp2Seed *float64
 	if params.IniciadoManualmente && params.EstadoInicial != nil {
 		ei := params.EstadoInicial
 		t1 := ei.TempObjetivo
 		temp1Seed = &t1
 		v := ei.VelObjetivo
 		velSeed = &v
-		if params.Horno2Habilitado && ei.Temp2 != nil {
-			t2 := *ei.Temp2
-			temp2Seed = &t2
-		}
+	} else {
+		// Setpoints de la receta del producto, resueltos por el service. Un
+		// arranque manual con EstadoInicial tiene prioridad sobre ellos.
+		temp1Seed = params.Temp1Objetivo
+		velSeed = params.VelObjetivo
 	}
 
 	var newID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO lotes_productivos
 			(producto_id, inicio_at, estado, sector_id, abierto_por, abrir_idempotency_key, turno, updated_at,
-			 modo, horno2_habilitado, iniciado_manualmente,
+			 modo, iniciado_manualmente,
 			 ventana_evaluacion_segundos, ventana_actualizacion_segundos,
 			 tolerancia_temp_c, umbral_aceptacion_crudo, umbral_aceptacion_quemado,
 			 pesos_objetivo,
-			 temp1_objetivo, temp2_objetivo, vel_objetivo)
+			 temp1_objetivo, vel_objetivo)
 		VALUES ($1, now(), 'ABIERTO', $2, $3, $4, $5, now(),
-		        $6, $7, $8,
-		        $9, $10,
-		        $11, $12, $13,
-		        $14,
-		        $15, $16, $17)
+		        $6, $7,
+		        $8, $9,
+		        $10, $11, $12,
+		        $13,
+		        $14, $15)
 		RETURNING id`,
 		params.ProductoID, params.SectorID, abiertoPor, abrirKey, turno,
-		modo, params.Horno2Habilitado, params.IniciadoManualmente,
+		modo, params.IniciadoManualmente,
 		params.VentanaEvaluacionSegundos, params.VentanaActualizacionSegundos,
 		params.ToleranciaTempC, params.UmbralAceptacionCrudo, params.UmbralAceptacionQuemado,
 		pesosJSON,
-		temp1Seed, temp2Seed, velSeed).Scan(&newID)
+		temp1Seed, velSeed).Scan(&newID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeUniqueViolation {
@@ -669,4 +668,21 @@ func (r *LoteSectorPostgresRepository) CountEventosEnVentana(
 		return 0, 0, 0, fmt.Errorf("count eventos rows: %w", rowsErr)
 	}
 	return okN, crudoN, quemadoN, nil
+}
+
+// ConfianzaPromedioEnVentana agrega la confianza de detección reportada por la
+// Pi SALIDA en eventos_lote para [desde, hasta). Ignora las filas sin
+// confianza; muestras==0 cuando la ventana no tiene detecciones confiables.
+func (r *LoteSectorPostgresRepository) ConfianzaPromedioEnVentana(
+	ctx context.Context, loteID string, desde, hasta time.Time,
+) (promedio float64, muestras int, err error) {
+	err = r.db.QueryRow(ctx, `
+		SELECT COALESCE(AVG(confianza),0), COUNT(confianza)
+		FROM eventos_lote
+		WHERE lote_id = $1 AND momento >= $2 AND momento < $3 AND confianza IS NOT NULL`,
+		loteID, desde, hasta).Scan(&promedio, &muestras)
+	if err != nil {
+		return 0, 0, fmt.Errorf("confianza promedio en ventana: %w", err)
+	}
+	return promedio, muestras, nil
 }

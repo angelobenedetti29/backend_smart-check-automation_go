@@ -2,7 +2,7 @@
 
 Servicio HTTP que el backend Go invoca por cada decisión del MPC del horno.
 Devuelve `pct_crudos`, `pct_ok`, `pct_quemados` para una configuración
-dada del horno (T1, T2, velocidad, combustión, humedad).
+dada del horno (T1, velocidad, combustión, humedad).
 
 ## Por qué per-producto
 
@@ -27,7 +27,6 @@ heterogéneas. Por eso hay un XGBoost por `producto_id`.
   {
     "producto_id": "uuid",
     "temp_horno_1": 195.0,
-    "temp_horno_2": 200.0,
     "velocidad_cinta": 0.22,
     "temp_comb_1": 800.0,
     "humedad_horno": 12.0

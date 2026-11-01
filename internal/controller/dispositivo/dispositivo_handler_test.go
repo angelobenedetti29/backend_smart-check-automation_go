@@ -319,12 +319,12 @@ func TestHandleCreate_Success(t *testing.T) {
 	sectorID := "horno-1"
 	estado := &dispositivo.EstadoDispositivo{
 		DispositivoID: "d-nuevo",
-		Nombre:        "Raspberry Pi Horno 2",
+		Nombre:        "Raspberry Pi Horno",
 		SectorID:      &sectorID,
 		Estado:        dispositivo.EstadoOffline,
 	}
 	h := NewDispositivoHandler(&fakeDispositivoService{createResp: estado})
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","sectorId":"horno-1","type":"ENTRADA_HORNO"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno","sectorId":"horno-1","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -351,7 +351,7 @@ func TestHandleCreate_Success(t *testing.T) {
 	if data["estado"] != dispositivo.EstadoOffline {
 		t.Fatalf("expected estado=offline in response, got %v", data["estado"])
 	}
-	if data["nombre"] != "Raspberry Pi Horno 2" {
+	if data["nombre"] != "Raspberry Pi Horno" {
 		t.Fatalf("expected nombre in response, got %v", data["nombre"])
 	}
 	if data["sectorId"] != sectorID {
@@ -385,7 +385,7 @@ func TestHandleCreate_EmptyNombre(t *testing.T) {
 func TestHandleCreate_SinType(t *testing.T) {
 	svc := &fakeDispositivoService{}
 	h := NewDispositivoHandler(svc)
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -404,7 +404,7 @@ func TestHandleCreate_SinType(t *testing.T) {
 func TestHandleCreate_TypeInvalido(t *testing.T) {
 	svc := &fakeDispositivoService{}
 	h := NewDispositivoHandler(svc)
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","type":"HORNO"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno","type":"HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -459,7 +459,7 @@ func TestHandleCreate_InvalidJSON(t *testing.T) {
 
 func TestHandleCreate_InvalidContentType(t *testing.T) {
 	h := NewDispositivoHandler(&fakeDispositivoService{})
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "text/plain")
@@ -474,7 +474,7 @@ func TestHandleCreate_InvalidContentType(t *testing.T) {
 
 func TestHandleCreate_InternalError(t *testing.T) {
 	h := NewDispositivoHandler(&fakeDispositivoService{createErr: errors.New("db caída")})
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","type":"ENTRADA_HORNO"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -826,16 +826,16 @@ func TestHandleMetricas_Success(t *testing.T) {
 }
 
 func TestHandleCreate_RoundTripWhepURL(t *testing.T) {
-	const whep = "https://camaras.example.com/whep/horno-2"
+	const whep = "https://camaras.example.com/whep/horno-b"
 	estado := &dispositivo.EstadoDispositivo{
 		DispositivoID: "d-nuevo",
-		Nombre:        "Raspberry Pi Horno 2",
+		Nombre:        "Raspberry Pi Horno",
 		WhepURL:       whep,
 		Estado:        dispositivo.EstadoOffline,
 	}
 	svc := &fakeDispositivoService{createResp: estado}
 	h := NewDispositivoHandler(svc)
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","whepUrl":"` + whep + `","type":"SALIDA_HORNO"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno","whepUrl":"` + whep + `","type":"SALIDA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -866,7 +866,7 @@ func TestHandleCreate_RoundTripWhepURL(t *testing.T) {
 func TestHandleCreate_RejectsInvalidWhepURL(t *testing.T) {
 	svc := &fakeDispositivoService{}
 	h := NewDispositivoHandler(svc)
-	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno 2","whepUrl":"no-es-url","type":"ENTRADA_HORNO"}`)
+	body := bytes.NewBufferString(`{"nombre":"Raspberry Pi Horno","whepUrl":"no-es-url","type":"ENTRADA_HORNO"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/dispositivos", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -1004,7 +1004,7 @@ func TestHandleEstados_ExponeWhepURL(t *testing.T) {
 // and case-alias members fail at the decode boundary, before the service.
 func TestHandleUpdate_RejectsStrictJSONViolationsBeforeService(t *testing.T) {
 	for name, body := range map[string]string{
-		"duplicate-sectorId":  `{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1","sectorId":"horno-2"}`,
+		"duplicate-sectorId":  `{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1","sectorId":"horno-b"}`,
 		"case-alias-sectorId": `{"dispositivoId":"11111111-1111-1111-1111-111111111111","SectorId":"horno-1"}`,
 		"trailing-doc":        `{"dispositivoId":"11111111-1111-1111-1111-111111111111","sectorId":"horno-1"}{"x":1}`,
 	} {

@@ -23,18 +23,18 @@ func NewMetricasHornoPostgresRepository(db *pgxpool.Pool) *MetricasHornoPostgres
 const insertMetricaHornoSQL = `
 INSERT INTO metricas_horno (
 	lote_id, dispositivo_id, sector_id,
-	temp_horno_1, temp_horno_2,
-	temp_comb_1, temp_comb_2,
+	temp_horno_1,
+	temp_comb_1,
 	humedad_horno, temp_ambiente, humedad_ambiente,
 	velocidad_cinta, temp_objetivo, vel_objetivo,
 	confianza_deteccion, received_at
 ) VALUES (
 	$1, $2, $3,
-	$4, $5,
-	$6, $7,
-	$8, $9, $10,
-	$11, $12, $13,
-	$14, COALESCE($15, now())
+	$4,
+	$5,
+	$6, $7, $8,
+	$9, $10, $11,
+	$12, COALESCE($13, now())
 )
 RETURNING id, received_at`
 
@@ -43,8 +43,8 @@ RETURNING id, received_at`
 func (r *MetricasHornoPostgresRepository) Save(ctx context.Context, m *metricashorno.MetricaHorno) error {
 	err := r.db.QueryRow(ctx, insertMetricaHornoSQL,
 		m.LoteID, m.DispositivoID, m.SectorID,
-		m.TempHorno1, m.TempHorno2,
-		m.TempComb1, m.TempComb2,
+		m.TempHorno1,
+		m.TempComb1,
 		m.HumedadHorno, m.TempAmbiente, m.HumedadAmbiente,
 		m.VelocidadCinta, m.TempObjetivo, m.VelObjetivo,
 		m.ConfianzaDeteccion, m.ReceivedAt,
@@ -63,8 +63,8 @@ func (r *MetricasHornoPostgresRepository) Save(ctx context.Context, m *metricash
 
 const selectMetricasHornoColumns = `
 id, lote_id, dispositivo_id, sector_id,
-temp_horno_1, temp_horno_2,
-temp_comb_1, temp_comb_2,
+temp_horno_1,
+temp_comb_1,
 humedad_horno, temp_ambiente, humedad_ambiente,
 velocidad_cinta, temp_objetivo, vel_objetivo,
 confianza_deteccion, received_at`
@@ -91,8 +91,8 @@ func (r *MetricasHornoPostgresRepository) GetUltimasParaLote(ctx context.Context
 		var m metricashorno.MetricaHorno
 		if err := rows.Scan(
 			&m.ID, &m.LoteID, &m.DispositivoID, &m.SectorID,
-			&m.TempHorno1, &m.TempHorno2,
-			&m.TempComb1, &m.TempComb2,
+			&m.TempHorno1,
+			&m.TempComb1,
 			&m.HumedadHorno, &m.TempAmbiente, &m.HumedadAmbiente,
 			&m.VelocidadCinta, &m.TempObjetivo, &m.VelObjetivo,
 			&m.ConfianzaDeteccion, &m.ReceivedAt,

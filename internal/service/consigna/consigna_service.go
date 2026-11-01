@@ -87,21 +87,9 @@ func (s *ConsignaService) Dispatch(ctx context.Context, req consigna.ConsignaMan
 		return nil, consigna.ErrFueraDeRango
 	}
 
-	// Si llega T2, validar también contra el rango del horno 2 cuando está habilitado.
-	if req.TempHorno2Objetivo != nil {
-		if !p.Horno2Habilitado {
-			return nil, consigna.ErrHorno2NoHabilitado
-		}
-		t2 := *req.TempHorno2Objetivo
-		if t2 < *p.Temp2Min || t2 > *p.Temp2Max {
-			return nil, consigna.ErrFueraDeRango
-		}
-	}
-
 	prod := req.ProductoID
 	return s.dispatch(ctx, req.HornoID, req.LoteID, &prod,
 		req.TemperaturaObjetivo, req.VelocidadCintaObjetivo,
-		req.TempHorno2Objetivo, p.Horno2Habilitado,
 		origen, usuario)
 }
 
@@ -117,17 +105,11 @@ func (s *ConsignaService) GetHistorialByLote(ctx context.Context, loteID string)
 //   - fallo: audita el intento, genera una alerta CRITICAL y fuerza al horno
 //     a CONTROL_MANUAL, para que el control automático deje de insistir hasta
 //     que un operario intervenga.
-//
-// Desde SCA-400 acepta también el setpoint del horno 2 (TempHorno2Objetivo)
-// cuando la línea tiene horno 2 habilitado. La auditoría persiste ambos
-// objetivos y un snapshot del flag.
 func (s *ConsignaService) dispatch(
 	ctx context.Context,
 	hornoID string,
 	loteID, productoID *string,
 	temperatura, velocidad float64,
-	tempHorno2 *float64,
-	horno2Habilitado bool,
 	origen consigna.Origen,
 	usuario *string,
 ) (*consigna.Consigna, error) {
@@ -139,18 +121,7 @@ func (s *ConsignaService) dispatch(
 	prevTemp := h.Temperatura
 	prevVel := h.VelocidadCinta
 
-	// T2 previo: se persiste si el horno físico lo lleva en su estado.
-	var prevTemp2 *float64
-	if horno2Habilitado && h.TemperaturaHorno2 != nil {
-		v := *h.TemperaturaHorno2
-		prevTemp2 = &v
-	}
-
 	result := s.controller.SendSetpoint(hornoID, temperatura, velocidad)
-
-	// Snapshot del flag al momento del despacho: se persiste como puntero
-	// para distinguir NULL histórico (sin SCA-400) de false explícito.
-	horno2Snapshot := horno2Habilitado
 
 	rec := &consigna.Consigna{
 		HornoID:                hornoID,
@@ -163,9 +134,6 @@ func (s *ConsignaService) dispatch(
 		Exitosa:                result.Aplicada,
 		TemperaturaPrevia:      &prevTemp,
 		VelocidadCintaPrevia:   &prevVel,
-		TempHorno2Objetivo:     tempHorno2,
-		TempHorno2Previa:       prevTemp2,
-		Horno2Habilitado:       &horno2Snapshot,
 	}
 	if principal, ok := deviceauth.PrincipalFromContext(ctx); ok {
 		rec.DispositivoID = &principal.DeviceID
@@ -184,9 +152,6 @@ func (s *ConsignaService) dispatch(
 
 	h.Temperatura = result.TemperaturaReal
 	h.VelocidadCinta = result.VelocidadReal
-	if horno2Habilitado && tempHorno2 != nil {
-		h.TemperaturaHorno2 = tempHorno2
-	}
 	h.ProductoID = productoID
 	h.LoteID = loteID
 	h.Estado = "ACTIVO" // éxito: restaura el control automático aunque venga de CONTROL_MANUAL

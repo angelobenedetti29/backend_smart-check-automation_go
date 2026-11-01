@@ -7,12 +7,10 @@
 // de los Δmáx por ciclo alrededor del estado actual, evaluamos el
 // predictor XGBoost en cada candidato, computamos el objetivo y
 // elegimos el mínimo respetando las restricciones. Con Δtemp1=10 °C y
-// paso=2 °C son 11 valores de T1; idem T2 y V → ≤ 1331 candidatos por
-// decisión. Con XGBoost a <1 ms por eval, la decisión tarda <1 s.
+// paso=2 °C son 11 valores de T1; idem V → ≤ 121 candidatos por decisión.
+// Con XGBoost a <1 ms por eval, la decisión tarda <1 s.
 //
-// Branching por horno2_habilitado:
-//   - true  → 3 variables (T1, T2, V).
-//   - false → 2 variables (T1, V).
+// Variables: T1 y V.
 package optimizador
 
 import (
@@ -35,10 +33,8 @@ type Predictor interface {
 type EntradasPredictor struct {
 	ProductoID     string
 	TempHorno1     float64
-	TempHorno2     *float64
 	VelocidadCinta float64
 	TempComb1      *float64
-	TempComb2      *float64
 	HumedadHorno   *float64
 }
 
@@ -75,24 +71,21 @@ func ZCalidad(p Pesos, pctCrudos, pctOk, pctQuemados float64) float64 {
 // Estado es la foto del horno al momento de optimizar.
 type Estado struct {
 	TempHorno1     float64
-	TempHorno2     *float64 // nil cuando la línea tiene un solo horno
 	VelocidadCinta float64
 	TempObjetivo   float64 // setpoint activo de T1 (último aplicado)
 	VelObjetivo    float64 // setpoint activo de V (último aplicado)
+	TempComb1      *float64
+	HumedadHorno   *float64
 }
 
 // Limites del producto: rangos y Δmáx por ciclo.
 type Limites struct {
 	TempMin         float64
 	TempMax         float64
-	Temp2Min        *float64
-	Temp2Max        *float64
 	VelMin          float64
 	VelMax          float64
-	DeltaTemp1      float64  // |ΔT1| máximo por ciclo
-	DeltaTemp2      *float64 // |ΔT2| máximo por ciclo (nil si no hay horno 2)
+	DeltaTemp1      float64 // |ΔT1| máximo por ciclo
 	DeltaVel        float64
-	Horno2Hab       bool
 	UmbralCrudo     float64 // % crudo aceptable
 	UmbralQuem      float64 // % quemado aceptable
 	ToleranciaTempC float64 // |ΔT| permitido vs TempObjetivo; candidatos fuera se penalizan
@@ -103,12 +96,14 @@ type Limites struct {
 // confirme el despacho.
 type Propuesta struct {
 	Temp1         float64
-	Temp2         *float64
 	Velocidad     float64
 	Z             float64
 	Prediccion    PrediccionSalida
 	VentanaInicio string `json:"ventana_inicio,omitempty"`
 	VentanaFin    string `json:"ventana_fin,omitempty"`
+	// RestriccionRelajada indica que ningún candidato cumplió los umbrales de
+	// aceptación del producto y se devolvió el mejor Z absoluto.
+	RestriccionRelajada bool `json:"restriccion_relajada,omitempty"`
 }
 
 // ErrSinPrediccion se retorna cuando el predictor falla de manera
@@ -149,73 +144,48 @@ func (o *Optimizer) Resolver(
 		return nil, ErrSinLimites
 	}
 
-	// Grilla acotada al Δmáx del producto. Las variables son T1, T2 (si
-	// horno2), V; cada una varía en [-Δ, +Δ] alrededor del estado actual,
-	// discretizada al paso configurado.
+	// Grilla acotada al Δmáx del producto. Las variables son T1 y V; cada
+	// una varía en [-Δ, +Δ] alrededor del estado actual, discretizada al
+	// paso configurado.
 	t1Inicio := o.grillaTemp(estado.TempObjetivo, lim.DeltaTemp1, lim.TempMin, lim.TempMax)
 	vInicio := o.grillaVel(estado.VelObjetivo, lim.DeltaVel, lim.VelMin, lim.VelMax)
-
-	var t2Inicio []float64
-	t2Habilitado := lim.Horno2Hab && lim.Temp2Min != nil && lim.Temp2Max != nil && lim.DeltaTemp2 != nil
-	if t2Habilitado {
-		base := estado.TempObjetivo
-		if estado.TempHorno2 != nil {
-			base = *estado.TempHorno2
-		}
-		t2Inicio = o.grillaTemp(base, *lim.DeltaTemp2, *lim.Temp2Min, *lim.Temp2Max)
-	}
 
 	// Candidatos: producto cartesiano de las grillas.
 	mejor := (*Propuesta)(nil)
 	var mejorZ float64
+	mejorFactible := (*Propuesta)(nil)
+	var mejorFactibleZ float64
 	for _, t1 := range t1Inicio {
 		for _, v := range vInicio {
-			if t2Habilitado {
-				for _, t2 := range t2Inicio {
-					pred, err := o.predictor.Predict(ctx, EntradasPredictor{
-						ProductoID:     productoID,
-						TempHorno1:     t1,
-						TempHorno2:     &t2,
-						VelocidadCinta: v,
-					})
-					if err != nil {
-						log.Printf("[MPC] predictor.Predict error: %v", err)
-						continue
-					}
-					z := o.objetivo(estado, lim, pesos, pred, t1, &t2, v)
-					if mejor == nil || z < mejorZ {
-						p := &Propuesta{
-							Temp1:      t1,
-							Temp2:      &t2,
-							Velocidad:  v,
-							Z:          z,
-							Prediccion: pred,
-						}
-						mejor = p
-						mejorZ = z
-					}
+			pred, err := o.predictor.Predict(ctx, EntradasPredictor{
+				ProductoID:     productoID,
+				TempHorno1:     t1,
+				VelocidadCinta: v,
+				TempComb1:      estado.TempComb1,
+				HumedadHorno:   estado.HumedadHorno,
+			})
+			if err != nil {
+				log.Printf("[MPC] predictor.Predict error: %v", err)
+				continue
+			}
+			z := o.objetivo(estado, lim, pesos, pred, t1, v)
+			if mejor == nil || z < mejorZ {
+				mejor = &Propuesta{
+					Temp1:      t1,
+					Velocidad:  v,
+					Z:          z,
+					Prediccion: pred,
 				}
-			} else {
-				pred, err := o.predictor.Predict(ctx, EntradasPredictor{
-					ProductoID:     productoID,
-					TempHorno1:     t1,
-					VelocidadCinta: v,
-				})
-				if err != nil {
-					log.Printf("[MPC] predictor.Predict error: %v", err)
-					continue
+				mejorZ = z
+			}
+			if cumpleUmbrales(pred, lim) && (mejorFactible == nil || z < mejorFactibleZ) {
+				mejorFactible = &Propuesta{
+					Temp1:      t1,
+					Velocidad:  v,
+					Z:          z,
+					Prediccion: pred,
 				}
-				z := o.objetivo(estado, lim, pesos, pred, t1, nil, v)
-				if mejor == nil || z < mejorZ {
-					p := &Propuesta{
-						Temp1:      t1,
-						Velocidad:  v,
-						Z:          z,
-						Prediccion: pred,
-					}
-					mejor = p
-					mejorZ = z
-				}
+				mejorFactibleZ = z
 			}
 		}
 	}
@@ -223,7 +193,23 @@ func (o *Optimizer) Resolver(
 	if mejor == nil {
 		return nil, ErrSinPrediccion
 	}
+	if mejorFactible != nil {
+		return mejorFactible, nil
+	}
+	mejor.RestriccionRelajada = true
 	return mejor, nil
+}
+
+// cumpleUmbrales indica si la predicción respeta los umbrales de aceptación.
+// Un umbral <= 0 desactiva esa restricción.
+func cumpleUmbrales(pred PrediccionSalida, lim Limites) bool {
+	if lim.UmbralCrudo > 0 && pred.PctCrudos > lim.UmbralCrudo {
+		return false
+	}
+	if lim.UmbralQuem > 0 && pred.PctQuemados > lim.UmbralQuem {
+		return false
+	}
+	return true
 }
 
 // grillaTemp devuelve los valores de T a evaluar entre [centro-Δ, centro+Δ],
@@ -277,7 +263,7 @@ func (o *Optimizer) grillaVel(centro, delta, minimo, maximo float64) (valores []
 	return dedupe(out)
 }
 
-// objetivo calcula Z = wc·predC + wq·predQ - wo·predO + dt·(|ΔT1|+|ΔT2|) + dc·|ΔV|.
+// objetivo calcula Z = wc·predC + wq·predQ - wo·predO + dt·|ΔT1| + dc·|ΔV|.
 // Las predicciones vienen en [0, 100] (porcentajes). WO entra como recompensa
 // aditiva sobre %OK (F-B4, opción A): el término -wo·predO baja Z cuando el
 // candidato maximiza producto OK.
@@ -295,7 +281,6 @@ func (o *Optimizer) objetivo(
 	pesos Pesos,
 	pred PrediccionSalida,
 	t1 float64,
-	t2 *float64,
 	v float64,
 ) float64 {
 	z := ZCalidad(pesos, pred.PctCrudos, pred.PctOk, pred.PctQuemados)
@@ -306,9 +291,6 @@ func (o *Optimizer) objetivo(
 		if exceso := deltaT1 - lim.ToleranciaTempC; exceso > 0 {
 			dt += exceso * pesos.DT
 		}
-	}
-	if t2 != nil && estado.TempHorno2 != nil {
-		dt += math.Abs(*t2-*estado.TempHorno2) * pesos.DT
 	}
 	z += dt
 	dv := math.Abs(v-estado.VelObjetivo) * pesos.DC
@@ -347,15 +329,9 @@ func LimitesDe(p *producto.Producto, l *lote_sector.Lote) Limites {
 		VelMax:          p.VelocidadCintaMax,
 		DeltaTemp1:      p.DeltaTemp1MaxC,
 		DeltaVel:        p.DeltaVelMax,
-		Horno2Hab:       p.Horno2Habilitado,
 		UmbralCrudo:     umbralCrudo,
 		UmbralQuem:      umbralQuem,
 		ToleranciaTempC: tolerancia,
-	}
-	if p.Horno2Habilitado {
-		lim.Temp2Min = p.Temp2Min
-		lim.Temp2Max = p.Temp2Max
-		lim.DeltaTemp2 = p.DeltaTemp2MaxC
 	}
 	return lim
 }
@@ -368,14 +344,6 @@ func (l Limites) consistente() bool {
 	}
 	if l.DeltaTemp1 <= 0 || l.DeltaVel <= 0 {
 		return false
-	}
-	if l.Horno2Hab {
-		if l.Temp2Min == nil || l.Temp2Max == nil || l.DeltaTemp2 == nil {
-			return false
-		}
-		if *l.Temp2Min >= *l.Temp2Max || *l.DeltaTemp2 <= 0 {
-			return false
-		}
 	}
 	return true
 }

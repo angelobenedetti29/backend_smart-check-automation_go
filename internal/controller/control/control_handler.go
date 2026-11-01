@@ -5,15 +5,17 @@
 //	POST  /api/v1/lotes/{id}/control/stop          (Supervisor/Admin)
 //	PATCH /api/v1/lotes/{id}/modo                  (Supervisor/Admin)
 //	GET   /api/v1/lotes/{id}/consigna-propuesta     (Bearer dispositivo o JWT)
-//	POST  /api/v1/lotes/{id}/aplicar-consigna       (Operario mínimo)
+//	POST  /api/v1/lotes/{id}/aplicar-consigna       (Operario mínimo o Bearer dispositivo)
+//	POST  /api/v1/lotes/{id}/consigna/ack           (Bearer dispositivo)
 //	GET   /api/v1/lotes/{id}/decisiones             (JWT cookie)
 //	GET   /api/v1/lotes/{id}/control/estado         (JWT cookie)
 //	GET   /api/v1/lotes/{id}/confianza-clases       (JWT cookie)
 //
 // El start/stop manipula el Loop del lote en memoria (Registry). El
 // consigna-propuesta lo lee el ControlService de la Pi ENTRADA (que ya
-// tenemos para telemetría). aplicar-consigna acepta la confirmación
-// del operario en SUPERVISION.
+// tenemos para telemetría). aplicar-consigna aprueba la propuesta de
+// SUPERVISION (operario del panel o la propia Pi); consigna/ack confirma
+// que la Pi efectivamente aplicó el setpoint.
 package controller
 
 import (
@@ -25,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,9 +85,11 @@ type MetricasRepo interface {
 	GetUltimasParaLote(ctx context.Context, loteID string, limite int) ([]metricashorno.MetricaHorno, error)
 }
 
-// EventosRepo es el mínimo del repo de lote para contar eventos en la ventana.
+// EventosRepo es el mínimo del repo de lote para contar eventos y agregar la
+// confianza de detección en la ventana.
 type EventosRepo interface {
 	CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (ok, crudo, quemado int, err error)
+	ConfianzaPromedioEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (promedio float64, muestras int, err error)
 }
 
 // ConfianzaRepo es el mínimo del repo de lote para agregar la confianza del
@@ -195,7 +200,10 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 			response.Error(w, http.StatusConflict, "El lote está en modo MANUAL", nil)
 			return
 		}
-		if err := h.startLoopForLote(r.Context(), deps, lote); err != nil {
+		// Idempotente: si el loop ya está corriendo, no lo reiniciamos (un
+		// reinicio perdería la fase de precalentamiento y volvería a mandar
+		// velocidad 0).
+		if err := h.EnsureLoopForLote(r.Context(), lote); err != nil {
 			response.Error(w, http.StatusUnprocessableEntity, "Producto desconocido", nil)
 			return
 		}
@@ -208,8 +216,20 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 	}
 }
 
+// EnsureLoopForLote arranca el loop del lote si corresponde (ABIERTO y modo no
+// MANUAL) y todavía no hay uno registrado. Es idempotente.
+func (h *ControlHandler) EnsureLoopForLote(ctx context.Context, lote *lotesector.Lote) error {
+	if lote == nil || lote.Estado != lotesector.EstadoAbierto || lote.Modo == lotesector.ModoManual {
+		return nil
+	}
+	if _, ok := h.registry.GetLoop(lote.ID); ok {
+		return nil
+	}
+	return h.startLoopForLote(ctx, h.deps, lote)
+}
+
 // startLoopForLote arranca un Loop de control para el lote con la configuración
-// vigente (ventanas, pesos, horno 2, modo). El registro cancela cualquier loop
+// vigente (ventanas, pesos, modo). El registro cancela cualquier loop
 // previo del mismo lote. El contexto del loop es propio (no el de la request):
 // si se atara a r.Context(), el servidor lo cancelaría al responder y mataría
 // el control (regresión F-B2). Devuelve error si el producto del lote no existe.
@@ -236,10 +256,32 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps,
 		deps.Broker,
 	)
 	loop.Configurar(
-		prod.ID, lote.Modo, lote.Horno2Habilitado, hornoID,
+		prod.ID, lote.Modo, hornoID,
 		lote.VentanaEvaluacionSegundos, lote.VentanaActualizacionSegundos,
 		pesos, limites,
 	)
+	// Actuador: "pi" (default, la Pi hace pull) o "backend" (lab/debug).
+	actuador := os.Getenv("CONTROL_ACTUADOR")
+	if actuador == "" {
+		actuador = "pi"
+	}
+	loop.SetActuador(actuador)
+	// Umbral de confianza de detección; un valor inválido conserva el default.
+	confianzaMin := 0.5
+	if raw := os.Getenv("MPC_CONFIANZA_MIN"); raw != "" {
+		if v, perr := strconv.ParseFloat(raw, 64); perr == nil && v > 0 {
+			confianzaMin = v
+		}
+	}
+	loop.SetConfianzaMin(confianzaMin)
+	// Sólo para demos/tesis sin modelo entrenado: permite que AUTOMATICO
+	// opere con el placeholder. En producción queda bloqueado por default.
+	if permitir, perr := strconv.ParseBool(os.Getenv("MPC_PERMITIR_PLACEHOLDER")); perr == nil {
+		loop.SetPermitirPlaceholder(permitir)
+	}
+	if seg, perr := strconv.Atoi(os.Getenv("MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS")); perr == nil {
+		loop.SetPreheatTimeout(seg)
+	}
 	deps.LoopCancels.Register(lote.ID, loopCtx, cancel)
 	deps.LoopCancels.SetLoop(lote.ID, loop)
 	loop.Start(loopCtx, cancel)
@@ -517,15 +559,19 @@ func (h *ControlHandler) auditarCambioModo(ctx context.Context, lote *lotesector
 
 // consignaPropuestaResponse es el payload de GET /lotes/{id}/consigna-propuesta.
 type consignaPropuestaResponse struct {
-	DecisionID      string    `json:"decision_id"`
-	Temp1Objetivo   float64   `json:"temp1_objetivo"`
-	Temp2Objetivo   float64   `json:"temp2_objetivo"`
-	VelObjetivo     float64   `json:"vel_objetivo"`
-	GeneratedAt     time.Time `json:"generated_at"`
-	TTLSegundos     int       `json:"ttl_segundos"`
-	VentanaInicio   time.Time `json:"ventana_inicio"`
-	VentanaFin      time.Time `json:"ventana_fin"`
-	Temp2Disponible bool      `json:"temp2_disponible"`
+	DecisionID    string    `json:"decision_id"`
+	Temp1Objetivo float64   `json:"temp1_objetivo"`
+	VelObjetivo   float64   `json:"vel_objetivo"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	TTLSegundos   int       `json:"ttl_segundos"`
+	VentanaInicio time.Time `json:"ventana_inicio"`
+	VentanaFin    time.Time `json:"ventana_fin"`
+	// Autorizada indica si la Pi puede aplicar sin esperar aprobación
+	// (AUTOMATICO o propuesta de SUPERVISION ya aprobada).
+	Autorizada bool   `json:"autorizada"`
+	Fase       string `json:"fase,omitempty"`
+	// AprobadaPor identifica quién aprobó la propuesta en SUPERVISION.
+	AprobadaPor *string `json:"aprobada_por,omitempty"`
 }
 
 // propuestaProvider es la vista mínima del loop que expone la propuesta
@@ -534,16 +580,12 @@ type propuestaProvider interface {
 	PropuestaPendiente(ttlSegundos int) *control.PropuestaSnapshot
 }
 
-// prediccionPersistidaTemp2 lee el T2 propuesto del JSONB persistido en
-// decisiones_control.prediccion.
-type prediccionPersistidaTemp2 struct {
-	Temp2 *float64 `json:"temp2_pred"`
-}
-
 // HandleConsignaPropuesta expone GET /api/v1/lotes/{id}/consigna-propuesta.
 // Devuelve la propuesta pendiente del loop en memoria si existe; si no,
 // reintenta contra la última decisión pendiente persistida (pull-based para
-// redes poco confiables). Responde 204 cuando no hay nada pendiente.
+// redes poco confiables). Sirve tanto AUTOMATICO (autorizada=true, la Pi
+// aplica sola) como SUPERVISION (autorizada sólo tras la aprobación).
+// Responde 204 cuando no hay nada pendiente o el lote está cerrado/MANUAL.
 func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
@@ -568,21 +610,16 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 		if loopAny, ok := h.registry.GetLoop(loteID); ok {
 			if loop, ok := loopAny.(propuestaProvider); ok {
 				if snap := loop.PropuestaPendiente(ttl); snap != nil {
-					disponible := snap.Temp2 != nil
-					t2 := 0.0
-					if disponible {
-						t2 = *snap.Temp2
-					}
 					response.OK(w, "Consigna propuesta", consignaPropuestaResponse{
-						DecisionID:      snap.DecisionID,
-						Temp1Objetivo:   snap.Temp1,
-						Temp2Objetivo:   t2,
-						VelObjetivo:     snap.Velocidad,
-						GeneratedAt:     snap.CreatedAt,
-						TTLSegundos:     snap.TTLSegundos,
-						VentanaInicio:   snap.VentanaInicio,
-						VentanaFin:      snap.VentanaFin,
-						Temp2Disponible: disponible,
+						DecisionID:    snap.DecisionID,
+						Temp1Objetivo: snap.Temp1,
+						VelObjetivo:   snap.Velocidad,
+						GeneratedAt:   snap.CreatedAt,
+						TTLSegundos:   snap.TTLSegundos,
+						VentanaInicio: snap.VentanaInicio,
+						VentanaFin:    snap.VentanaFin,
+						Autorizada:    snap.Autorizada,
+						Fase:          snap.Fase,
 					})
 					return
 				}
@@ -590,7 +627,8 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 		}
 	}
 
-	// 2. Fallback: última decisión pendiente persistida (SUPERVISION no aprobada).
+	// 2. Fallback: última decisión pendiente persistida (SUPERVISION o
+	// AUTOMATICO con actuador "pi" esperando el ack del nodo).
 	if h.decisionesRepo == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -607,9 +645,11 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 	// Chequear que el lote está vivo y en modo compatible, y que la propuesta
 	// no esté vencida. Si no, respondemos 204 (mismo caso que sin propuesta):
 	// no se sirve una decisión NADIE de un lote cerrado, en MANUAL o vieja.
+	var lote *lotesector.Lote
 	if h.loteLookup != nil {
 		if l, lerr := h.loteLookup.GetByID(r.Context(), loteID); lerr == nil && l != nil {
-			if l.Estado != lotesector.EstadoAbierto || l.Modo != lotesector.ModoSupervision {
+			lote = l
+			if l.Estado != lotesector.EstadoAbierto || l.Modo == lotesector.ModoManual {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -619,75 +659,250 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	var pred prediccionPersistidaTemp2
-	if len(d.Prediccion) > 0 {
-		_ = json.Unmarshal(d.Prediccion, &pred)
-	}
-	disponible := pred.Temp2 != nil
-	t2 := 0.0
-	if disponible {
-		t2 = *pred.Temp2
+	// En AUTOMATICO la Pi aplica sin aprobación; en SUPERVISION hace falta que
+	// un operario (o la Pi local) haya aprobado la fila.
+	autorizada := d.AprobadaPor != nil
+	if lote != nil && lote.Modo == lotesector.ModoAutomatico {
+		autorizada = true
 	}
 	response.OK(w, "Consigna propuesta", consignaPropuestaResponse{
-		DecisionID:      d.ID,
-		Temp1Objetivo:   d.TempPropuesto,
-		Temp2Objetivo:   t2,
-		VelObjetivo:     d.VelPropuesto,
-		GeneratedAt:     d.CreatedAt,
-		TTLSegundos:     ttl,
-		VentanaInicio:   d.VentanaInicio,
-		VentanaFin:      d.VentanaFin,
-		Temp2Disponible: disponible,
+		DecisionID:    d.ID,
+		Temp1Objetivo: d.TempPropuesto,
+		VelObjetivo:   d.VelPropuesto,
+		GeneratedAt:   d.CreatedAt,
+		TTLSegundos:   ttl,
+		VentanaInicio: d.VentanaInicio,
+		VentanaFin:    d.VentanaFin,
+		Autorizada:    autorizada,
+		AprobadaPor:   d.AprobadaPor,
 	})
 }
 
-// HandleAplicarConsigna maneja POST /api/v1/lotes/{id}/aplicar-consigna.
-// El operario confirma la propuesta del modo SUPERVISION.
+// HandleAplicarConsigna maneja POST /api/v1/lotes/{id}/aplicar-consigna (y su
+// alias /aprobar-consigna). En SUPERVISION aprueba la propuesta pendiente: el
+// operario del panel (JWT) o la propia Pi (Bearer de dispositivo). Con el
+// actuador "backend" además despacha; con "pi" sólo autoriza y responde, y la
+// aplicación real llega después por /consigna/ack.
 func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
 			return
 		}
-		if !helpers.RolValido(r, user.RoleOperario, user.RoleSupervisor, user.RoleAdmin) {
+		principal, isDevice := deviceauth.PrincipalFromContext(r.Context())
+		if !isDevice && !helpers.RolValido(r, user.RoleOperario, user.RoleSupervisor, user.RoleAdmin) {
 			response.Error(w, http.StatusForbidden, "Rol insuficiente", nil)
 			return
 		}
-		loteID, err := helpers.ExtractLoteID(r.URL.Path, "/aplicar-consigna")
+		suffix := "/aplicar-consigna"
+		if strings.HasSuffix(r.URL.Path, "/aprobar-consigna") {
+			suffix = "/aprobar-consigna"
+		}
+		loteID, err := helpers.ExtractLoteID(r.URL.Path, suffix)
 		if err != nil {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
 		}
-		// Lookup el loop activo. La registry expone un getter tipado al Loop.
-		loopAny, ok := h.registry.GetLoop(loteID)
-		if !ok {
-			response.Error(w, http.StatusNotFound, "No hay loop de control para este lote", nil)
+		// decision_id es opcional (compatibilidad); si viene, la aprobación
+		// sólo vale si es la propuesta vigente. Evita aprobar una propuesta
+		// distinta de la que el operario está viendo.
+		var body struct {
+			DecisionID string `json:"decision_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		lote, err := deps.LoteLookup.GetByID(r.Context(), loteID)
+		if err != nil || lote == nil {
+			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
 		}
-		loop, isLoop := loopAny.(*control.Loop)
-		if !isLoop {
-			response.Error(w, http.StatusInternalServerError, "Registry corrupto", nil)
+		if lote.Estado != lotesector.EstadoAbierto {
+			response.Error(w, http.StatusConflict, "Lote no está abierto", nil)
 			return
 		}
-		// Identidad del operario desde el JWT, para la auditoría.
-		claims := authController.GetClaimsFromContext(r.Context())
+		if lote.Modo == lotesector.ModoManual {
+			response.Error(w, http.StatusConflict, "El lote está en modo MANUAL", nil)
+			return
+		}
+		if isDevice {
+			info, serr := deps.DeviceSector.SectorDelDispositivo(r.Context(), principal.DeviceID)
+			if serr != nil || info == nil {
+				response.Error(w, http.StatusForbidden, "El dispositivo no tiene sector asignado", nil)
+				return
+			}
+			if info.SectorID != lote.SectorID {
+				response.Error(w, http.StatusForbidden, "El dispositivo no pertenece al sector del lote", nil)
+				return
+			}
+		}
+		// En AUTOMATICO la Pi aplica sola: no hay nada que aprobar.
+		if lote.Modo == lotesector.ModoAutomatico {
+			response.Error(w, http.StatusConflict, "El modo automático no requiere aprobación", nil)
+			return
+		}
+		// Identidad que aprueba, para la auditoría.
 		usuario := ""
-		if claims != nil {
+		if claims := authController.GetClaimsFromContext(r.Context()); claims != nil {
 			usuario = claims.Email
+		} else if isDevice {
+			usuario = "dispositivo:" + principal.DeviceID
 		}
-		cons, err := loop.AplicarPropuesta(r.Context(), usuario)
+		d, err := deps.DecisionesRepo.GetUltimaPendiente(r.Context(), loteID)
 		if err != nil {
-			if errors.Is(err, control.ErrLoteNoAbierto) {
+			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
+			return
+		}
+		if d == nil {
+			response.Error(w, http.StatusConflict, "No hay propuesta pendiente", nil)
+			return
+		}
+		if body.DecisionID != "" && body.DecisionID != d.ID {
+			response.Error(w, http.StatusConflict, "La propuesta cambió; recargá antes de aprobar", nil)
+			return
+		}
+		loopAny, ok := h.registry.GetLoop(loteID)
+		loop, isLoop := loopAny.(*control.Loop)
+		if ok && isLoop && loop.Actuador() == "backend" {
+			// Lab/debug: el backend también despacha. Una fila ya aprobada no
+			// es un error: el dispatch sigue siendo idempotente por consigna.
+			if aerr := deps.DecisionesRepo.Aprobar(r.Context(), d.ID, usuario); aerr != nil && !errors.Is(aerr, decisiones_control.ErrSinPendiente) {
+				response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
+				return
+			}
+			cons, aerr := loop.AplicarPropuesta(r.Context(), usuario)
+			if aerr != nil {
+				if errors.Is(aerr, control.ErrLoteNoAbierto) {
+					response.Error(w, http.StatusConflict, "No hay propuesta pendiente", nil)
+					return
+				}
+				writeAplicarError(w, aerr)
+				return
+			}
+			response.OK(w, "Consigna aplicada", map[string]interface{}{
+				"lote_id":  loteID,
+				"aprobada": true,
+				"aplicada": true,
+				"consigna": cons,
+			})
+			return
+		}
+		// Actuador "pi" (o sin loop en memoria): sólo se autoriza la propuesta.
+		if err := deps.DecisionesRepo.Aprobar(r.Context(), d.ID, usuario); err != nil {
+			if errors.Is(err, decisiones_control.ErrSinPendiente) {
 				response.Error(w, http.StatusConflict, "No hay propuesta pendiente", nil)
 				return
 			}
-			writeAplicarError(w, err)
+			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
 			return
 		}
+		if ok && isLoop {
+			loop.AprobarPropuesta(d.ID)
+		}
+		response.OK(w, "Consigna aprobada", map[string]interface{}{
+			"lote_id":        loteID,
+			"aprobada":       true,
+			"aplicada":       false,
+			"decision_id":    d.ID,
+			"temp1_objetivo": d.TempPropuesto,
+			"vel_objetivo":   d.VelPropuesto,
+		})
+	}
+}
+
+// propuestaClearer es la vista mínima del loop para descartar la propuesta
+// aplicada por el nodo.
+type propuestaClearer interface {
+	ClearPropuesta(decisionID string)
+}
+
+// consignaAckRequest es el body de POST /api/v1/lotes/{id}/consigna/ack.
+type consignaAckRequest struct {
+	DecisionID   string   `json:"decision_id"`
+	TempAplicado *float64 `json:"temp_aplicado"`
+	VelAplicado  *float64 `json:"vel_aplicado"`
+}
+
+// HandleConsignaAck maneja POST /api/v1/lotes/{id}/consigna/ack: la Pi confirma
+// que aplicó la propuesta y con qué setpoints. Idempotente (un reenvío del ack
+// vuelve a responder 200).
+func (h *ControlHandler) HandleConsignaAck(deps ControlDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+			return
+		}
+		principal, isDevice := deviceauth.PrincipalFromContext(r.Context())
+		if !isDevice {
+			deviceauth.WriteInvalidToken(w)
+			return
+		}
+		loteID, err := helpers.ExtractLoteID(r.URL.Path, "/consigna/ack")
+		if err != nil {
+			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+			return
+		}
+		var body consignaAckRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			response.Error(w, http.StatusBadRequest, "Body inválido", nil)
+			return
+		}
+		if body.DecisionID == "" || body.TempAplicado == nil || body.VelAplicado == nil {
+			response.Error(w, http.StatusBadRequest, "Faltan decision_id, temp_aplicado o vel_aplicado", nil)
+			return
+		}
+		lote, err := deps.LoteLookup.GetByID(r.Context(), loteID)
+		if err != nil || lote == nil {
+			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
+			return
+		}
+		if lote.Estado != lotesector.EstadoAbierto {
+			response.Error(w, http.StatusConflict, "Lote no está abierto", nil)
+			return
+		}
+		info, serr := deps.DeviceSector.SectorDelDispositivo(r.Context(), principal.DeviceID)
+		if serr != nil || info == nil {
+			response.Error(w, http.StatusForbidden, "El dispositivo no tiene sector asignado", nil)
+			return
+		}
+		if info.SectorID != lote.SectorID {
+			response.Error(w, http.StatusForbidden, "El dispositivo no pertenece al sector del lote", nil)
+			return
+		}
+		d, err := deps.DecisionesRepo.GetByID(r.Context(), body.DecisionID)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
+			return
+		}
+		if d == nil || d.LoteID != loteID {
+			response.Error(w, http.StatusNotFound, "Decisión no encontrada", nil)
+			return
+		}
+		if lote.Modo == lotesector.ModoSupervision && d.AprobadaPor == nil {
+			response.Error(w, http.StatusConflict, "La propuesta no fue aprobada", nil)
+			return
+		}
+		aplicadoPor := decisiones_control.AplicadoPorOperario
+		if lote.Modo == lotesector.ModoAutomatico {
+			aplicadoPor = decisiones_control.AplicadoPorMPC
+		}
+		if err := deps.DecisionesRepo.MarcarAplicada(r.Context(), d.ID, *body.TempAplicado, *body.VelAplicado, aplicadoPor); err != nil {
+			// Sin sentinel de "no encontrada" en el repo: desambiguamos
+			// releyendo la fila.
+			if actual, _ := deps.DecisionesRepo.GetByID(r.Context(), d.ID); actual == nil {
+				response.Error(w, http.StatusNotFound, "Decisión no encontrada", nil)
+				return
+			}
+			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
+			return
+		}
+		if loopAny, ok := h.registry.GetLoop(loteID); ok {
+			if clearer, ok := loopAny.(propuestaClearer); ok {
+				clearer.ClearPropuesta(d.ID)
+			}
+		}
 		response.OK(w, "Consigna aplicada", map[string]interface{}{
-			"lote_id":  loteID,
-			"aplicado": true,
-			"consigna": cons,
+			"decision_id":  d.ID,
+			"aplicado":     true,
+			"aplicado_por": aplicadoPor,
 		})
 	}
 }
@@ -695,10 +910,6 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 // --- helpers ---
 
 func writeAplicarError(w http.ResponseWriter, err error) {
-	if errors.Is(err, consigna.ErrHorno2NoHabilitado) {
-		response.Error(w, http.StatusUnprocessableEntity, "El producto del lote no tiene el horno 2 habilitado", map[string]string{"code": "horno2_no_habilitado"})
-		return
-	}
 	if errors.Is(err, consigna.ErrFueraDeRango) {
 		response.Error(w, http.StatusUnprocessableEntity, "Setpoint fuera de rango del producto", nil)
 		return

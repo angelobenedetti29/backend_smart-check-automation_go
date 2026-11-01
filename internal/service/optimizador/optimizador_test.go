@@ -29,10 +29,10 @@ func (fakePredictor) Predict(_ context.Context, in optimizador.EntradasPredictor
 	}
 	pct_ok := 100 - pct_crudos - pct_quemados
 	return optimizador.PrediccionSalida{
-		PctCrudos:    pct_crudos,
-		PctOk:        pct_ok,
-		PctQuemados:  pct_quemados,
-		ModelVersion: "fake_v1",
+		PctCrudos:     pct_crudos,
+		PctOk:         pct_ok,
+		PctQuemados:   pct_quemados,
+		ModelVersion:  "fake_v1",
 		EsPlaceholder: false,
 	}, nil
 }
@@ -62,14 +62,6 @@ func limConsistente(l optimizador.Limites) bool {
 	if l.DeltaTemp1 <= 0 || l.DeltaVel <= 0 {
 		return false
 	}
-	if l.Horno2Hab {
-		if l.Temp2Min == nil || l.Temp2Max == nil || l.DeltaTemp2 == nil {
-			return false
-		}
-		if *l.Temp2Min >= *l.Temp2Max || *l.DeltaTemp2 <= 0 {
-			return false
-		}
-	}
 	return true
 }
 
@@ -86,8 +78,8 @@ func TestResolverEligeMejorCandidato(t *testing.T) {
 	lim := optimizador.LimitesDe(&producto.Producto{
 		TempMin: 150, TempMax: 250,
 		VelocidadCintaMin: 0.05, VelocidadCintaMax: 0.50,
-		DeltaTemp1MaxC:    10,
-		DeltaVelMax:       0.05,
+		DeltaTemp1MaxC: 10,
+		DeltaVelMax:    0.05,
 	}, nil)
 	pesos := optimizador.Pesos{WC: 1.0, WQ: 1.0, WO: 0.0, DT: 0.05, DC: 0.5}
 
@@ -128,21 +120,6 @@ func TestResolverRespetaDeltaMaxPorCiclo(t *testing.T) {
 	}
 	if math.Abs(p.Velocidad-estado.VelObjetivo) > lim.DeltaVel+1e-9 {
 		t.Errorf("ΔV=%.4f excede delta_max=%.4f", p.Velocidad-estado.VelObjetivo, lim.DeltaVel)
-	}
-}
-
-func TestResolverConHorno2InconsistenteDevuelveError(t *testing.T) {
-	opt := optimizador.NewOptimizer(fakePredictor{})
-	lim := optimizador.Limites{
-		TempMin: 100, TempMax: 300,
-		VelMin: 0.05, VelMax: 0.50,
-		DeltaTemp1: 10, DeltaVel: 0.05,
-		Horno2Hab: true,
-		// Temp2Min/Temp2Max/DeltaTemp2 nil → inconsistente
-	}
-	_, err := opt.Resolver(context.Background(), "p", optimizador.Estado{TempObjetivo: 200, VelObjetivo: 0.2}, lim, optimizador.Pesos{})
-	if err == nil {
-		t.Fatal("esperaba error por límites inconsistentes")
 	}
 }
 

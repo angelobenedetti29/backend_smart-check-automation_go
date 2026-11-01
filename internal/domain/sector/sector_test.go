@@ -42,7 +42,7 @@ func TestCreateSectorRequestValidate_NombreEnElMaximo(t *testing.T) {
 }
 
 func TestUpdateSectorRequestValidate_IgualQueCreate(t *testing.T) {
-	if err := (UpdateSectorRequest{Nombre: "Horno 2"}).Validate(); err != nil {
+	if err := (UpdateSectorRequest{Nombre: "Horno Principal"}).Validate(); err != nil {
 		t.Fatalf("expected valid update nombre, got: %v", err)
 	}
 	if err := (UpdateSectorRequest{Nombre: ""}).Validate(); err == nil {

@@ -377,7 +377,7 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	sectorID := "horno-1"
 
 	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
-		Nombre:   "  Raspberry Pi Horno 2  ",
+		Nombre:   "  Raspberry Pi Horno  ",
 		SectorID: &sectorID,
 		Tipo:     "ENTRADA_HORNO",
 	})
@@ -389,7 +389,7 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	if estado.Estado != dispositivo.EstadoOffline {
 		t.Fatalf("expected offline, got %q", estado.Estado)
 	}
-	if estado.Nombre != "Raspberry Pi Horno 2" || estado.SectorID == nil || *estado.SectorID != sectorID {
+	if estado.Nombre != "Raspberry Pi Horno" || estado.SectorID == nil || *estado.SectorID != sectorID {
 		t.Fatalf("expected trimmed metadata, got %+v", estado)
 	}
 	if estado.Tipo == nil || *estado.Tipo != "ENTRADA_HORNO" {
@@ -404,7 +404,7 @@ func TestCreate_PersistsAndRegistersOffline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected device persisted, got %v", err)
 	}
-	if persisted.Nombre != "Raspberry Pi Horno 2" || persisted.SectorID == nil || *persisted.SectorID != sectorID {
+	if persisted.Nombre != "Raspberry Pi Horno" || persisted.SectorID == nil || *persisted.SectorID != sectorID {
 		t.Fatalf("unexpected persisted device: %+v", persisted)
 	}
 	if persisted.Tipo == nil || *persisted.Tipo != "ENTRADA_HORNO" {
@@ -574,7 +574,7 @@ func TestUpdate_PreservaNombreYActualizaSector(t *testing.T) {
 
 	svc := NewDispositivoService(repo, store, broker, 0)
 
-	nuevoSector := "horno-2"
+	nuevoSector := "horno-b"
 	estado, err := svc.Update(context.Background(), dispositivo.UpdateDispositivoRequest{
 		DispositivoID: "d1",
 		SectorID:      &nuevoSector,
@@ -757,10 +757,10 @@ func TestCreate_PropagaWhepURL(t *testing.T) {
 	broker := sse.NewBroker()
 
 	svc := NewDispositivoService(repo, store, broker, 0)
-	whep := "https://camaras.example.com/whep/horno-2"
+	whep := "https://camaras.example.com/whep/horno-b"
 
 	estado, err := svc.Create(context.Background(), dispositivo.CreateDispositivoRequest{
-		Nombre:  "Raspberry Pi Horno 2",
+		Nombre:  "Raspberry Pi Horno",
 		WhepURL: whep,
 		Tipo:    "SALIDA_HORNO",
 	})

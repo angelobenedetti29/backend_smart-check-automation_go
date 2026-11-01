@@ -65,10 +65,8 @@ func (c *ClientePredictor) Predict(ctx context.Context, in optimizador.EntradasP
 	payload, err := json.Marshal(map[string]interface{}{
 		"producto_id":     in.ProductoID,
 		"temp_horno_1":    in.TempHorno1,
-		"temp_horno_2":    in.TempHorno2,
 		"velocidad_cinta": in.VelocidadCinta,
 		"temp_comb_1":     in.TempComb1,
-		"temp_comb_2":     in.TempComb2,
 		"humedad_horno":   in.HumedadHorno,
 	})
 	if err != nil {

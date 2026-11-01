@@ -160,6 +160,7 @@ func TestBeforeMuxProtectsSectorAndLoteEventEndpoints(t *testing.T) {
 		{http.MethodPost, "/api/v1/lotes/" + loteID + "/eventos"},
 		{http.MethodPost, "/api/v1/lotes/" + loteID + "/cierre"},
 		{http.MethodPost, "/api/v1/lotes/" + loteID + "/metricas-horno"},
+		{http.MethodPost, "/api/v1/lotes/" + loteID + "/consigna/ack"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -173,6 +174,35 @@ func TestBeforeMuxProtectsSectorAndLoteEventEndpoints(t *testing.T) {
 			assert.Equal(t, deviceauth.InvalidTokenBody, rec.Body.String())
 		})
 	}
+}
+
+// TestBeforeMuxConsignaAckRequiereBearer valida el ack del nodo: sin token da
+// 401 y con un Bearer válido inyecta el principal.
+func TestBeforeMuxConsignaAckRequiereBearer(t *testing.T) {
+	const path = "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/consigna/ack"
+
+	t.Run("sin-token-401", func(t *testing.T) {
+		next := &recordingHandler{}
+		r := httptest.NewRequest(http.MethodPost, path, nil)
+		rec := httptest.NewRecorder()
+		BeforeMux(newVerifier("dev-1"), nil, next).ServeHTTP(rec, r)
+
+		assert.False(t, next.called)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	t.Run("con-token-valido", func(t *testing.T) {
+		next := &recordingHandler{}
+		r := httptest.NewRequest(http.MethodPost, path, nil)
+		r.Header.Set("Authorization", "Bearer s3cr3t")
+		rec := httptest.NewRecorder()
+		BeforeMux(newVerifier("dev-42"), nil, next).ServeHTTP(rec, r)
+
+		require.True(t, next.called)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		require.True(t, next.hasPrin)
+		assert.Equal(t, "dev-42", next.principal.DeviceID)
+	})
 }
 
 // TestBeforeMuxPassesThroughNonDeviceLoteEndpoints verifica que el matcher no
@@ -212,6 +242,7 @@ func TestBeforeMuxIsProtectedTarget(t *testing.T) {
 		{"POST", "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/eventos"},
 		{"POST", "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/cierre"},
 		{"POST", "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/metricas-horno"},
+		{"POST", "/api/v1/lotes/6f1e6a2c-3b4d-4f5a-9c8e-1d2e3f4a5b6c/consigna/ack"},
 	}
 	for _, tc := range protected {
 		assert.True(t, isProtectedTarget(tc.method, tc.path, tc.path), "%s %s", tc.method, tc.path)

@@ -122,9 +122,9 @@ func (s *Service) SectorDelDispositivo(ctx context.Context, deviceID string) (*S
 // lote.creado sólo cuando el lote se crea realmente.
 //
 // Desde SCA-400 acepta un params opcional con los datos de operación del
-// control (modo, ventanas, tolerancias, umbrales, pesos, snapshot de horno2
-// y estado inicial). Si params es nil, defaults seguros: MANUAL, ventanas
-// 600/300 s, tolerancia 2 °C, umbrales 5%.
+// control (modo, ventanas, tolerancias, umbrales, pesos y estado inicial).
+// Si params es nil, defaults seguros: MANUAL, ventanas 600/300 s,
+// tolerancia 2 °C, umbrales 5%.
 func (s *Service) Abrir(ctx context.Context, deviceID, productoID, idempotencyKey string, params *lotesector.AbrirParams) (*lotesector.Lote, bool, error) {
 	sectorID, err := s.resolveSectorID(ctx, deviceID)
 	if err != nil {
@@ -139,17 +139,23 @@ func (s *Service) Abrir(ctx context.Context, deviceID, productoID, idempotencyKe
 		params = &lotesector.AbrirParams{}
 	}
 
-	// Snapshot del flag horno2_habilitado del producto. Se persiste en el lote
-	// para que el control sepa si T2 está activo sin tener que reconsultar el
-	// catálogo en cada tick.
-	params.Horno2Habilitado = prod.Horno2Habilitado
-
 	// Saneamiento del modo: el handler ya validó, pero por si llega directo.
 	modo, err := lotesector.ParseModo(params.Modo)
 	if err != nil {
 		return nil, false, err
 	}
 	params.Modo = modo
+
+	// Setpoints iniciales: en modo no manual se siembran desde la receta del
+	// producto (obligatoria). Un arranque manual conserva el EstadoInicial que
+	// envía la Pi; MANUAL no siembra nada.
+	if modo != lotesector.ModoManual && !params.IniciadoManualmente {
+		if prod.TempSetpoint == nil || prod.VelocidadCintaSetpoint == nil {
+			return nil, false, lotesector.ErrRecetaIncompleta
+		}
+		params.Temp1Objetivo = prod.TempSetpoint
+		params.VelObjetivo = prod.VelocidadCintaSetpoint
+	}
 
 	// Defaults de ventanas/tolerancias/umbrales (conservadores).
 	if params.VentanaEvaluacionSegundos <= 0 {

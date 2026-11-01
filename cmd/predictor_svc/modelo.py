@@ -172,8 +172,8 @@ def _features_de_request(producto: ProductoPlaceholder, req) -> list[float]:
     """Vector de features que consume el XGBoost. Orden estable.
 
     Features:
-      - temp_horno_1, temp_horno_2 (NaN si no hay), velocidad_cinta
-      - temp_comb_1 (opcional), temp_comb_2 (opcional), humedad_horno (opcional)
+      - temp_horno_1, velocidad_cinta
+      - temp_comb_1 (opcional), humedad_horno (opcional)
       - d_t = (temp_horno_1 - centro_t) / ancho_t
       - d_v = (velocidad_cinta - centro_v) / ancho_v
     """
@@ -189,10 +189,8 @@ def _features_de_request(producto: ProductoPlaceholder, req) -> list[float]:
     d_v = (req.velocidad_cinta - centro_v) / ancho_v
     return [
         req.temp_horno_1,
-        req.temp_horno_2 if req.temp_horno_2 is not None else float("nan"),
         req.velocidad_cinta,
         req.temp_comb_1 if req.temp_comb_1 is not None else float("nan"),
-        req.temp_comb_2 if req.temp_comb_2 is not None else float("nan"),
         req.humedad_horno if req.humedad_horno is not None else float("nan"),
         d_t,
         d_v,

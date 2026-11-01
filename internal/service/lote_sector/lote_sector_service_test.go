@@ -226,6 +226,57 @@ func TestAbrirEmiteLoteCreadoCuandoCrea(t *testing.T) {
 	assert.Equal(t, "lote-1", payload.ID)
 }
 
+func TestAbrirSiembraSetpointsDesdeReceta(t *testing.T) {
+	temp, vel := 190.0, 0.4
+	prodRepo := &fakeProductoRepo{getByID: func(context.Context, string) (*producto.Producto, error) {
+		return &producto.Producto{ID: "prod-1", TempSetpoint: &temp, VelocidadCintaSetpoint: &vel}, nil
+	}}
+	var got lotesector.AbrirParams
+	repo := &fakeLoteRepo{abrir: func(_ context.Context, p lotesector.AbrirParams) (*lotesector.Lote, bool, error) {
+		got = p
+		return &lotesector.Lote{ID: "lote-1", Estado: lotesector.EstadoAbierto}, true, nil
+	}}
+	svc, _ := newTestService(repo, sectorConDispositivo(), prodRepo, 0)
+
+	_, _, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1", &lotesector.AbrirParams{Modo: lotesector.ModoSupervision})
+	require.NoError(t, err)
+	require.NotNil(t, got.Temp1Objetivo)
+	require.NotNil(t, got.VelObjetivo)
+	assert.Equal(t, temp, *got.Temp1Objetivo)
+	assert.Equal(t, vel, *got.VelObjetivo)
+}
+
+func TestAbrirRecetaIncompleta(t *testing.T) {
+	called := false
+	repo := &fakeLoteRepo{abrir: func(context.Context, lotesector.AbrirParams) (*lotesector.Lote, bool, error) {
+		called = true
+		return nil, false, nil
+	}}
+	svc, _ := newTestService(repo, sectorConDispositivo(), productoExistente(), 0)
+
+	_, _, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1", &lotesector.AbrirParams{Modo: lotesector.ModoAutomatico})
+	assert.ErrorIs(t, err, lotesector.ErrRecetaIncompleta)
+	assert.False(t, called, "no debe persistir si falta la receta")
+}
+
+func TestAbrirManualNoRequiereReceta(t *testing.T) {
+	var got lotesector.AbrirParams
+	repo := &fakeLoteRepo{abrir: func(_ context.Context, p lotesector.AbrirParams) (*lotesector.Lote, bool, error) {
+		got = p
+		return &lotesector.Lote{ID: "lote-1", Estado: lotesector.EstadoAbierto}, true, nil
+	}}
+	svc, _ := newTestService(repo, sectorConDispositivo(), productoExistente(), 0)
+
+	_, _, err := svc.Abrir(context.Background(), "dev-1", "prod-1", "key-1", &lotesector.AbrirParams{
+		Modo:                lotesector.ModoSupervision,
+		IniciadoManualmente: true,
+		EstadoInicial:       &lotesector.EstadoInicialLote{TempObjetivo: 200, VelObjetivo: 0.3},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, got.Temp1Objetivo, "el arranque manual no pisa el EstadoInicial")
+	assert.Nil(t, got.VelObjetivo)
+}
+
 func TestAbrirNoEmiteCuandoAdjuntaAExistente(t *testing.T) {
 	repo := &fakeLoteRepo{abrir: func(context.Context, lotesector.AbrirParams) (*lotesector.Lote, bool, error) {
 		return &lotesector.Lote{ID: "lote-1", Estado: lotesector.EstadoAbierto}, false, nil

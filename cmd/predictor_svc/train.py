@@ -53,10 +53,8 @@ class MuestraLote:
 
     producto_id: str
     temp_horno_1: float
-    temp_horno_2: float | None
     velocidad_cinta: float
     temp_comb_1: float | None
-    temp_comb_2: float | None
     humedad_horno: float | None
     pct_crudos: float
     pct_ok: float
@@ -92,10 +90,8 @@ def _features_de_muestra(m: MuestraLote) -> list[float]:
     d_v = (m.velocidad_cinta - centro_v) / ancho_v
     return [
         m.temp_horno_1,
-        m.temp_horno_2 if m.temp_horno_2 is not None else float("nan"),
         m.velocidad_cinta,
         m.temp_comb_1 if m.temp_comb_1 is not None else float("nan"),
-        m.temp_comb_2 if m.temp_comb_2 is not None else float("nan"),
         m.humedad_horno if m.humedad_horno is not None else float("nan"),
         d_t,
         d_v,
@@ -138,10 +134,8 @@ def cargar_muestras(database_url: str) -> list[MuestraLote]:
     SELECT
       l.id, l.producto_id,
       AVG(m.temp_horno_1) AS temp_horno_1,
-      AVG(m.temp_horno_2) AS temp_horno_2,
       AVG(m.velocidad_cinta) AS velocidad_cinta,
       AVG(m.temp_comb_1) AS temp_comb_1,
-      AVG(m.temp_comb_2) AS temp_comb_2,
       AVG(m.humedad_horno) AS humedad_horno,
       100.0 * obs.n_crudos   / obs.total AS pct_crudos,
       100.0 * obs.n_ok       / obs.total AS pct_ok,
@@ -169,10 +163,8 @@ def cargar_muestras(database_url: str) -> list[MuestraLote]:
             MuestraLote(
                 producto_id=str(row["producto_id"]),
                 temp_horno_1=float(row["temp_horno_1"]),
-                temp_horno_2=_opt_float(row["temp_horno_2"]),
                 velocidad_cinta=float(row["velocidad_cinta"]),
                 temp_comb_1=_opt_float(row["temp_comb_1"]),
-                temp_comb_2=_opt_float(row["temp_comb_2"]),
                 humedad_horno=_opt_float(row["humedad_horno"]),
                 pct_crudos=float(row["pct_crudos"]),
                 pct_ok=float(row["pct_ok"]),

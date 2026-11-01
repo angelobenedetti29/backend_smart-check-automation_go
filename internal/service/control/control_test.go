@@ -22,6 +22,9 @@ type fakeEventosRepo struct {
 	okN, crudoN, quemadoN int
 	err                   error
 	calls                 int
+	confPromedio          float64
+	confMuestras          int
+	confErr               error
 }
 
 func (f *fakeEventosRepo) CountEventosEnVentana(
@@ -32,6 +35,15 @@ func (f *fakeEventosRepo) CountEventosEnVentana(
 		return 0, 0, 0, f.err
 	}
 	return f.okN, f.crudoN, f.quemadoN, nil
+}
+
+func (f *fakeEventosRepo) ConfianzaPromedioEnVentana(
+	_ context.Context, _ string, _, _ time.Time,
+) (float64, int, error) {
+	if f.confErr != nil {
+		return 0, 0, f.confErr
+	}
+	return f.confPromedio, f.confMuestras, nil
 }
 
 // TestCalcularZObservadoVentanaVacia verifica que cuando la ventana no tiene
@@ -150,9 +162,8 @@ func TestCalcularZObservadoSinRepo(t *testing.T) {
 // TestLoopPropuestaPendienteNoDestructivo verifica que PropuestaPendiente
 // devuelve un snapshot estable y NO consume el estado interno del loop.
 func TestLoopPropuestaPendienteNoDestructivo(t *testing.T) {
-	t2 := 170.0
 	l := &Loop{
-		propuestaPendiente: &optimizador.Propuesta{Temp1: 180, Temp2: &t2, Velocidad: 0.45},
+		propuestaPendiente: &optimizador.Propuesta{Temp1: 180, Velocidad: 0.45},
 		lastDecisionID:     "dec-1",
 		lastVentanaInicio:  time.Unix(100, 0).UTC(),
 		lastVentanaFin:     time.Unix(200, 0).UTC(),
@@ -169,9 +180,6 @@ func TestLoopPropuestaPendienteNoDestructivo(t *testing.T) {
 	}
 	if s1.Temp1 != 180 || s1.Velocidad != 0.45 || s1.DecisionID != "dec-1" {
 		t.Fatalf("snapshot incorrecto: %+v", s1)
-	}
-	if s1.Temp2 == nil || *s1.Temp2 != 170 {
-		t.Fatalf("Temp2 no propagado al snapshot: %+v", s1.Temp2)
 	}
 	if !s1.VentanaInicio.Equal(time.Unix(100, 0).UTC()) {
 		t.Fatalf("VentanaInicio incorrecta: %v", s1.VentanaInicio)
@@ -207,6 +215,7 @@ type fakeDecisionesRepo struct {
 	saveCalled      int
 	saveErr         error
 	lastAplicadoPor string
+	lastDecision    *decisiones_control.DecisionControl
 	marcarCalled    int
 	marcarArgs      struct {
 		decisionID  string
@@ -225,8 +234,15 @@ func (f *fakeDecisionesRepo) Save(_ context.Context, d *decisiones_control.Decis
 	}
 	d.ID = "dec-save-1"
 	d.CreatedAt = time.Now().UTC()
+	f.lastDecision = d
 	return nil
 }
+
+func (f *fakeDecisionesRepo) GetByID(_ context.Context, _ string) (*decisiones_control.DecisionControl, error) {
+	return nil, nil
+}
+
+func (f *fakeDecisionesRepo) Aprobar(_ context.Context, _, _ string) error { return nil }
 
 func (f *fakeDecisionesRepo) MarcarAplicada(_ context.Context, id string, t, v float64, ap string) error {
 	f.marcarCalled++
@@ -238,13 +254,15 @@ func (f *fakeDecisionesRepo) MarcarAplicada(_ context.Context, id string, t, v f
 // fakeConsignaSrv implementa ConsignaDispatchService y devuelve una consigna
 // de éxito con los setpoints configurados.
 type fakeConsignaSrv struct {
-	cons  *consigna.Consigna
-	err   error
-	calls int
+	cons    *consigna.Consigna
+	err     error
+	calls   int
+	lastReq consigna.ConsignaManualRequest
 }
 
-func (f *fakeConsignaSrv) Dispatch(_ context.Context, _ consigna.ConsignaManualRequest, _ consigna.Origen, _ *string) (*consigna.Consigna, error) {
+func (f *fakeConsignaSrv) Dispatch(_ context.Context, req consigna.ConsignaManualRequest, _ consigna.Origen, _ *string) (*consigna.Consigna, error) {
 	f.calls++
+	f.lastReq = req
 	return f.cons, f.err
 }
 
@@ -519,6 +537,8 @@ func TestTickAutoDespachaYNoPublica(t *testing.T) {
 	now := time.Now().UTC()
 	loop := newSupervisionLoop(now, repo, broker, fakePredictorControl{out: optimizador.PrediccionSalida{PctCrudos: 10, PctOk: 80, PctQuemados: 10}})
 	loop.modo = lote_sector.ModoAutomatico
+	loop.fase = FaseAdaptando
+	loop.actuador = "backend"
 	loop.consigna = &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 205, VelocidadCintaObjetivo: 0.22}}
 
 	loop.tick(context.Background())
@@ -617,6 +637,8 @@ func TestRunTresTicksModoAutomaticoDespacha(t *testing.T) {
 
 	loop := newSupervisionLoop(now, repo, broker, propuestaOK())
 	loop.modo = lote_sector.ModoAutomatico
+	loop.fase = FaseAdaptando
+	loop.actuador = "backend"
 	loop.ventanaEvalSeg = 1
 	loop.ventanaActSeg = 1
 	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
@@ -714,5 +736,356 @@ func TestRunTresTicksModoSupervisionPublicaPropuesta(t *testing.T) {
 	}
 	if loop.propuestaPendiente == nil {
 		t.Fatalf("SUPERVISION debe dejar propuesta pendiente en memoria")
+	}
+}
+
+// TestAprobarYLimpiarPropuesta verifica la aprobación y el descarte por
+// decisionID, incluido el caso de un id que ya no está pendiente.
+func TestAprobarYLimpiarPropuesta(t *testing.T) {
+	l := &Loop{
+		propuestaPendiente: &optimizador.Propuesta{Temp1: 180, Velocidad: 0.4},
+		lastDecisionID:     "dec-1",
+		fase:               FaseCalentando,
+	}
+
+	if l.AprobarPropuesta("otra") {
+		t.Fatalf("no debe aprobar una decisión distinta")
+	}
+	if !l.AprobarPropuesta("dec-1") {
+		t.Fatalf("debe aprobar la decisión pendiente")
+	}
+	snap := l.PropuestaPendiente(30)
+	if snap == nil || !snap.Autorizada {
+		t.Fatalf("snapshot debe reflejar autorización: %+v", snap)
+	}
+	if snap.Fase != FaseCalentando {
+		t.Fatalf("snapshot.Fase = %q, want %q", snap.Fase, FaseCalentando)
+	}
+
+	l.ClearPropuesta("otra")
+	if l.propuestaPendiente == nil {
+		t.Fatalf("un id distinto no debe limpiar la propuesta")
+	}
+	l.ClearPropuesta("dec-1")
+	if l.propuestaPendiente != nil || l.lastDecisionID != "" || l.propuestaAprobada {
+		t.Fatalf("ClearPropuesta debe limpiar propuesta, id y autorización")
+	}
+}
+
+// TestTickAutomaticoActuadorPiPublicaSinDespachar verifica el default "pi":
+// AUTOMATICO publica una propuesta ya autorizada y NO despacha al horno.
+func TestTickAutomaticoActuadorPiPublicaSinDespachar(t *testing.T) {
+	repo := &fakeDecisionesRepo{}
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	now := time.Now().UTC()
+	loop := newSupervisionLoop(now, repo, broker, fakePredictorControl{out: optimizador.PrediccionSalida{PctCrudos: 10, PctOk: 80, PctQuemados: 10}})
+	loop.modo = lote_sector.ModoAutomatico
+	loop.fase = FaseAdaptando
+	loop.actuador = "pi"
+	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 205, VelocidadCintaObjetivo: 0.22}}
+	loop.consigna = cons
+
+	loop.tick(context.Background())
+
+	if cons.calls != 0 {
+		t.Fatalf("actuador=pi no debe despachar; calls=%d", cons.calls)
+	}
+	if loop.propuestaPendiente == nil {
+		t.Fatalf("AUTOMATICO con actuador=pi debe dejar propuesta pendiente")
+	}
+	snap := loop.PropuestaPendiente(30)
+	if snap == nil || !snap.Autorizada {
+		t.Fatalf("la propuesta de AUTOMATICO debe estar autorizada: %+v", snap)
+	}
+	if got := drainBroadcasts(client); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1", got)
+	}
+	if repo.lastAplicadoPor != decisiones_control.AplicadoPorNadie {
+		t.Fatalf("aplicado_por = %q, want NADIE", repo.lastAplicadoPor)
+	}
+}
+
+// fakePredictorCapturaControl registra las entradas que recibe del MPC.
+type fakePredictorCapturaControl struct {
+	out    optimizador.PrediccionSalida
+	called bool
+	last   optimizador.EntradasPredictor
+}
+
+func (p *fakePredictorCapturaControl) Predict(_ context.Context, in optimizador.EntradasPredictor) (optimizador.PrediccionSalida, error) {
+	p.called = true
+	p.last = in
+	return p.out, nil
+}
+
+// TestTickPasaCombustionYHumedadAlPredictor verifica que estadoDesdeMetricas y
+// Resolver propagan las features opcionales hasta el predictor.
+func TestTickPasaCombustionYHumedadAlPredictor(t *testing.T) {
+	now := time.Now().UTC()
+	comb := 55.5
+	hum := 7.25
+	pred := &fakePredictorCapturaControl{out: optimizador.PrediccionSalida{PctCrudos: 10, PctOk: 80, PctQuemados: 10}}
+	loop := newSupervisionLoop(now, &fakeDecisionesRepo{}, sse.NewBroker(), pred)
+	loop.clienteMet = &fakeMetricasRepoControl{metricas: []metricashorno.MetricaHorno{{
+		ReceivedAt:     now.Add(-time.Second),
+		TempHorno1:     floatPtr(120),
+		TempComb1:      &comb,
+		HumedadHorno:   &hum,
+		VelocidadCinta: floatPtr(0.2),
+		TempObjetivo:   floatPtr(120),
+		VelObjetivo:    floatPtr(0.2),
+	}}}
+
+	loop.tick(context.Background())
+
+	if !pred.called {
+		t.Fatalf("el predictor no fue invocado")
+	}
+	if pred.last.TempComb1 == nil || *pred.last.TempComb1 != comb {
+		t.Fatalf("TempComb1 = %+v, want %v", pred.last.TempComb1, comb)
+	}
+	if pred.last.HumedadHorno == nil || *pred.last.HumedadHorno != hum {
+		t.Fatalf("HumedadHorno = %+v, want %v", pred.last.HumedadHorno, hum)
+	}
+}
+
+// TestTickConfianzaBajaPersisteSkip verifica que la confianza reportada por los
+// eventos (Pi SALIDA) gatea el tick aunque la telemetría del horno tenga una
+// confianza alta: la fuente es el evento, no la métrica.
+func TestTickConfianzaBajaPersisteSkip(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	loop := newSupervisionLoop(now, repo, broker, propuestaOK())
+	loop.confianzaMin = 0.5
+	loop.clienteMet = &fakeMetricasRepoControl{metricas: []metricashorno.MetricaHorno{{
+		ReceivedAt:         now.Add(-time.Second),
+		TempHorno1:         floatPtr(120),
+		VelocidadCinta:     floatPtr(0.2),
+		TempObjetivo:       floatPtr(120),
+		VelObjetivo:        floatPtr(0.2),
+		ConfianzaDeteccion: floatPtr(0.9),
+	}}}
+	loop.eventos = &fakeEventosRepo{okN: 8, crudoN: 1, quemadoN: 1, confPromedio: 0.2, confMuestras: 5}
+
+	loop.tick(context.Background())
+
+	if repo.saveCalled != 1 || repo.lastDecision == nil {
+		t.Fatalf("se esperaba una decisión persistida")
+	}
+	if repo.lastDecision.RazonSkipped == nil || *repo.lastDecision.RazonSkipped != "confianza_baja" {
+		t.Fatalf("razon_skipped = %v, want confianza_baja", repo.lastDecision.RazonSkipped)
+	}
+	if math.Abs(repo.lastDecision.ConfPromedio-0.2) > 1e-9 {
+		t.Fatalf("ConfPromedio = %v, want 0.2 (promedio de eventos)", repo.lastDecision.ConfPromedio)
+	}
+	if loop.propuestaPendiente != nil {
+		t.Fatalf("no debe publicar propuesta con confianza baja")
+	}
+	if got := drainBroadcasts(client); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0", got)
+	}
+}
+
+// TestTickConfPromedioPersisteEventos verifica que con muestras de confianza en
+// los eventos, la decisión persiste el promedio de eventos.
+func TestTickConfPromedioPersisteEventos(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	loop := newSupervisionLoop(now, repo, sse.NewBroker(), propuestaOK())
+	loop.eventos = &fakeEventosRepo{okN: 8, crudoN: 1, quemadoN: 1, confPromedio: 0.73, confMuestras: 10}
+
+	loop.tick(context.Background())
+
+	if repo.lastDecision == nil {
+		t.Fatalf("se esperaba una decisión persistida")
+	}
+	if math.Abs(repo.lastDecision.ConfPromedio-0.73) > 1e-9 {
+		t.Fatalf("ConfPromedio = %v, want 0.73 (promedio de eventos)", repo.lastDecision.ConfPromedio)
+	}
+}
+
+// TestTickPlaceholderAutomaticoNoPublicaNiDespacha verifica que en AUTOMATICO
+// un modelo placeholder no se aplica ni se publica.
+func TestTickPlaceholderAutomaticoNoPublicaNiDespacha(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	pred := fakePredictorControl{out: optimizador.PrediccionSalida{PctCrudos: 10, PctOk: 80, PctQuemados: 10, EsPlaceholder: true}}
+	loop := newSupervisionLoop(now, repo, broker, pred)
+	loop.modo = lote_sector.ModoAutomatico
+	loop.fase = FaseAdaptando
+	loop.actuador = "pi"
+	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 205, VelocidadCintaObjetivo: 0.22}}
+	loop.consigna = cons
+
+	loop.tick(context.Background())
+
+	if cons.calls != 0 {
+		t.Fatalf("placeholder no debe despachar; calls=%d", cons.calls)
+	}
+	if repo.lastDecision == nil || repo.lastDecision.RazonSkipped == nil || *repo.lastDecision.RazonSkipped != "modelo_no_entrenado" {
+		t.Fatalf("se esperaba skip modelo_no_entrenado; got=%+v", repo.lastDecision)
+	}
+	if loop.propuestaPendiente != nil {
+		t.Fatalf("AUTOMATICO no debe publicar un placeholder")
+	}
+	if got := drainBroadcasts(client); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0", got)
+	}
+}
+
+// TestTickPlaceholderSupervisionPublica verifica que en SUPERVISION el
+// placeholder se publica para que el operario vea el warning.
+func TestTickPlaceholderSupervisionPublica(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	pred := fakePredictorControl{out: optimizador.PrediccionSalida{PctCrudos: 10, PctOk: 80, PctQuemados: 10, EsPlaceholder: true}}
+	loop := newSupervisionLoop(now, repo, broker, pred)
+
+	loop.tick(context.Background())
+
+	if repo.saveCalled != 1 {
+		t.Fatalf("saveCalled = %d, want 1", repo.saveCalled)
+	}
+	if loop.propuestaPendiente == nil {
+		t.Fatalf("SUPERVISION debe publicar el placeholder")
+	}
+	if got := drainBroadcasts(client); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1", got)
+	}
+}
+
+// newPreheatLoop arma un Loop AUTOMATICO en fase CALENTANDO con la receta y
+// telemetría dadas.
+func newPreheatLoop(now time.Time, repo *fakeDecisionesRepo, broker *sse.Broker, pred optimizador.Predictor, target, vel, tol float64, metricas []metricashorno.MetricaHorno) *Loop {
+	loop := newSupervisionLoop(now, repo, broker, pred)
+	loop.modo = lote_sector.ModoAutomatico
+	loop.fase = FaseCalentando
+	loop.actuador = "pi"
+	loop.preheatPollSeg = 15
+	loop.confianzaMin = 0.5
+	loop.clienteLote = &fakeLoteLookupControl{lote: &lote_sector.Lote{
+		ID: "lote-1", Estado: lote_sector.EstadoAbierto, Modo: lote_sector.ModoAutomatico,
+		Temp1Objetivo: floatPtr(target), VelObjetivo: floatPtr(vel), ToleranciaTempC: tol,
+	}}
+	loop.clienteMet = &fakeMetricasRepoControl{metricas: metricas}
+	return loop
+}
+
+// TestPreheatSecuenciaTempLuegoVelocidad verifica que primero se sostiene T1
+// con V=0 y, tras 3 muestras en tolerancia, se entrega la transición con V.
+func TestPreheatSecuenciaTempLuegoVelocidad(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	defer broker.Unsubscribe(client)
+
+	target := 200.0
+	metrics := []metricashorno.MetricaHorno{{
+		ReceivedAt:     now.Add(-time.Second),
+		TempHorno1:     floatPtr(target),
+		VelocidadCinta: floatPtr(0.1),
+		TempObjetivo:   floatPtr(target),
+	}}
+	loop := newPreheatLoop(now, repo, broker, propuestaOK(), target, 0.35, 2.0, metrics)
+
+	for i := 0; i < 2; i++ {
+		repo.lastDecision = nil
+		loop.tick(context.Background())
+		if loop.fase != FaseCalentando {
+			t.Fatalf("tick %d: fase = %q, want CALENTANDO", i+1, loop.fase)
+		}
+		if loop.propuestaPendiente == nil || loop.propuestaPendiente.Temp1 != target || loop.propuestaPendiente.Velocidad != 0 {
+			t.Fatalf("tick %d: preheat debe proponer T=%.1f V=0; got=%+v", i+1, target, loop.propuestaPendiente)
+		}
+		if repo.lastDecision == nil || repo.lastDecision.RazonSkipped == nil || *repo.lastDecision.RazonSkipped != "precalentando" {
+			t.Fatalf("tick %d: se esperaba decisión precalentando", i+1)
+		}
+	}
+
+	repo.lastDecision = nil
+	loop.tick(context.Background())
+
+	if loop.fase != FaseAdaptando {
+		t.Fatalf("fase = %q, want ADAPTANDO tras 3 muestras", loop.fase)
+	}
+	if loop.muestrasEnTolerancia != 0 {
+		t.Fatalf("contador no se reseteó: %d", loop.muestrasEnTolerancia)
+	}
+	if loop.propuestaPendiente == nil || loop.propuestaPendiente.Velocidad != 0.35 {
+		t.Fatalf("transición debe llevar V=0.35; got=%+v", loop.propuestaPendiente)
+	}
+	if repo.lastDecision == nil || repo.lastDecision.RazonSkipped != nil {
+		t.Fatalf("la transición no debe llevar razon_skipped; got=%+v", repo.lastDecision)
+	}
+	if got := drainBroadcasts(client); got != 4 {
+		t.Fatalf("broadcasts = %d, want 4 (3 preheat + 1 transición)", got)
+	}
+}
+
+// TestPreheatSinTelemetriaPersisteSkip verifica que sin TempHorno1 no se
+// propone nada y se registra el skip.
+func TestPreheatSinTelemetriaPersisteSkip(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	loop := newPreheatLoop(now, repo, sse.NewBroker(), propuestaOK(), 200, 0.35, 2.0, []metricashorno.MetricaHorno{{
+		ReceivedAt: now.Add(-time.Second),
+		HumedadHorno: func() *float64 {
+			v := 5.0
+			return &v
+		}(),
+	}})
+
+	loop.tick(context.Background())
+
+	if repo.saveCalled != 1 || repo.lastDecision == nil {
+		t.Fatalf("se esperaba una decisión skip persistida")
+	}
+	if repo.lastDecision.RazonSkipped == nil || *repo.lastDecision.RazonSkipped != "ventana_sin_muestras" {
+		t.Fatalf("razon_skipped = %v, want ventana_sin_muestras", repo.lastDecision.RazonSkipped)
+	}
+	if loop.propuestaPendiente != nil {
+		t.Fatalf("no debe publicar propuesta sin telemetría")
+	}
+	if loop.fase != FaseCalentando {
+		t.Fatalf("fase = %q, want CALENTANDO", loop.fase)
+	}
+}
+
+// TestPreheatTimeoutAborta verifica que un horno que nunca llega a la
+// tolerancia no deja el loop esperando para siempre.
+func TestPreheatTimeoutAborta(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeDecisionesRepo{}
+	loop := newPreheatLoop(now, repo, sse.NewBroker(), propuestaOK(), 200, 0.35, 2.0, nil)
+	loop.preheatInicio = now.Add(-time.Hour)
+	loop.preheatTimeoutSeg = 1800
+
+	loop.tick(context.Background())
+
+	if !loop.shouldExit {
+		t.Fatalf("el loop debe abortar tras el timeout")
+	}
+	if repo.lastDecision == nil || repo.lastDecision.RazonSkipped == nil ||
+		*repo.lastDecision.RazonSkipped != "precalentamiento_timeout" {
+		t.Fatalf("razon_skipped = %v, want precalentamiento_timeout", repo.lastDecision)
+	}
+	if loop.propuestaPendiente != nil {
+		t.Fatalf("no debe publicar propuesta al abortar")
 	}
 }

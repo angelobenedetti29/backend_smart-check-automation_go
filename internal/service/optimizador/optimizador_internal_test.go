@@ -50,8 +50,8 @@ func TestObjetivoIncluyeWO(t *testing.T) {
 	zOk80 := constante
 	zOk80.PctOk = 80
 
-	zBajo := o.objetivo(estado, lim, pesos, zOk0, 200, nil, 0.2)
-	zAlto := o.objetivo(estado, lim, pesos, zOk80, 200, nil, 0.2)
+	zBajo := o.objetivo(estado, lim, pesos, zOk0, 200, 0.2)
+	zAlto := o.objetivo(estado, lim, pesos, zOk80, 200, 0.2)
 
 	if zAlto >= zBajo {
 		t.Fatalf("con WO=1 Z debe decrecer al crecer pred.Ok: Z(ok=0)=%.4f Z(ok=80)=%.4f", zBajo, zAlto)
@@ -97,9 +97,9 @@ func TestObjetivoAplicaTolerancia(t *testing.T) {
 	pesos := Pesos{DT: 1.0}
 	constante := PrediccionSalida{}
 
-	zCentro := o.objetivo(estado, lim, pesos, constante, 200, nil, 0.2)
-	zCerca := o.objetivo(estado, lim, pesos, constante, 201, nil, 0.2)
-	zLejos := o.objetivo(estado, lim, pesos, constante, 205, nil, 0.2)
+	zCentro := o.objetivo(estado, lim, pesos, constante, 200, 0.2)
+	zCerca := o.objetivo(estado, lim, pesos, constante, 201, 0.2)
+	zLejos := o.objetivo(estado, lim, pesos, constante, 205, 0.2)
 
 	// Dentro de la tolerancia no hay penalty extra: Z = |ΔT|·DT.
 	if zCentro != 0 || zCerca != 1.0 {
@@ -125,37 +125,157 @@ func TestObjetivoSinToleranciaCompatibilidad(t *testing.T) {
 	pesos := Pesos{DT: 1.0}
 	constante := PrediccionSalida{}
 
-	if got := o.objetivo(estado, lim, pesos, constante, 205, nil, 0.2); got != 5.0 {
+	if got := o.objetivo(estado, lim, pesos, constante, 205, 0.2); got != 5.0 {
 		t.Fatalf("sin tolerancia Z(actual+5) = %.3f, want 5 (sólo base)", got)
 	}
 }
 
-// TestLimitesDeConHorno2Habilitado valida que LimitesDe propaga el rango T2 y el
-// ΔT2 máximo cuando el producto habilita el horno 2.
-func TestLimitesDeConHorno2Habilitado(t *testing.T) {
-	temp2Min, temp2Max, deltaTemp2 := 150.0, 200.0, 8.0
-	prod := &producto.Producto{
+// predictorPorTemp permite definir la salida en función de T1 para ejercitar
+// las restricciones de calidad del optimizador.
+type predictorPorTemp func(t1 float64) PrediccionSalida
+
+func (f predictorPorTemp) Predict(_ context.Context, in EntradasPredictor) (PrediccionSalida, error) {
+	return f(in.TempHorno1), nil
+}
+
+// TestResolverPrefiereCandidatoFactible verifica que un candidato que cumple
+// los umbrales gana aunque su Z sea peor que el mejor Z absoluto (infeasible).
+func TestResolverPrefiereCandidatoFactible(t *testing.T) {
+	pred := predictorPorTemp(func(t1 float64) PrediccionSalida {
+		switch t1 {
+		case 210:
+			// Mejor Z absoluto pero quemados por encima del umbral.
+			return PrediccionSalida{PctCrudos: 0, PctOk: 100, PctQuemados: 20}
+		case 190:
+			// Z peor pero factible.
+			return PrediccionSalida{PctCrudos: 10, PctOk: 0, PctQuemados: 0}
+		default:
+			return PrediccionSalida{PctCrudos: 100, PctOk: 0, PctQuemados: 0}
+		}
+	})
+	opt := NewOptimizer(pred)
+	estado := Estado{TempObjetivo: 200, VelObjetivo: 0.2}
+	lim := Limites{
 		TempMin: 100, TempMax: 300,
-		VelocidadCintaMin: 0.05, VelocidadCintaMax: 0.5,
-		DeltaTemp1MaxC: 10, DeltaVelMax: 0.05,
-		Horno2Habilitado: true,
-		Temp2Min:         &temp2Min,
-		Temp2Max:         &temp2Max,
-		DeltaTemp2MaxC:   &deltaTemp2,
+		VelMin: 0.05, VelMax: 0.5,
+		DeltaTemp1: 10, DeltaVel: 0.05,
+		UmbralCrudo: 10, UmbralQuem: 10,
 	}
-	lim := LimitesDe(prod, nil)
-	if !lim.Horno2Hab {
-		t.Fatalf("Horno2Hab = false, want true")
+	pesos := Pesos{WC: 1, WQ: 0, WO: 1, DT: 0}
+
+	p, err := opt.Resolver(context.Background(), "prod-x", estado, lim, pesos)
+	if err != nil {
+		t.Fatalf("Resolver: %v", err)
 	}
-	if lim.Temp2Min == nil || *lim.Temp2Min != 150 {
-		t.Fatalf("Temp2Min = %v, want 150", lim.Temp2Min)
+	if p.Temp1 != 190 {
+		t.Fatalf("Temp1 = %.2f, want 190 (factible)", p.Temp1)
 	}
-	if lim.Temp2Max == nil || *lim.Temp2Max != 200 {
-		t.Fatalf("Temp2Max = %v, want 200", lim.Temp2Max)
+	if p.RestriccionRelajada {
+		t.Fatalf("no debe marcarse relajada cuando hay candidato factible")
 	}
-	if lim.DeltaTemp2 == nil || *lim.DeltaTemp2 != 8 {
-		t.Fatalf("DeltaTemp2 = %v, want 8", lim.DeltaTemp2)
+}
+
+// TestResolverRelajaSiNingunoEsFactible verifica que sin candidatos factibles
+// se devuelve el mejor Z absoluto con la bandera de restricción relajada.
+func TestResolverRelajaSiNingunoEsFactible(t *testing.T) {
+	pred := predictorPorTemp(func(t1 float64) PrediccionSalida {
+		if t1 == 210 {
+			return PrediccionSalida{PctCrudos: 0, PctOk: 100, PctQuemados: 20}
+		}
+		return PrediccionSalida{PctCrudos: 20, PctOk: 0, PctQuemados: 20}
+	})
+	opt := NewOptimizer(pred)
+	estado := Estado{TempObjetivo: 200, VelObjetivo: 0.2}
+	lim := Limites{
+		TempMin: 100, TempMax: 300,
+		VelMin: 0.05, VelMax: 0.5,
+		DeltaTemp1: 10, DeltaVel: 0.05,
+		UmbralCrudo: 10, UmbralQuem: 10,
 	}
+	pesos := Pesos{WC: 1, WQ: 0, WO: 1, DT: 0}
+
+	p, err := opt.Resolver(context.Background(), "prod-x", estado, lim, pesos)
+	if err != nil {
+		t.Fatalf("Resolver: %v", err)
+	}
+	if p.Temp1 != 210 {
+		t.Fatalf("Temp1 = %.2f, want 210 (mejor Z absoluto)", p.Temp1)
+	}
+	if !p.RestriccionRelajada {
+		t.Fatalf("debe marcarse RestriccionRelajada cuando no hay factibles")
+	}
+}
+
+// TestResolverUmbralesCeroDesactivanRestriccion verifica que umbrales <= 0
+// desactivan las restricciones de calidad.
+func TestResolverUmbralesCeroDesactivanRestriccion(t *testing.T) {
+	pred := predictorPorTemp(func(t1 float64) PrediccionSalida {
+		if t1 == 210 {
+			return PrediccionSalida{PctCrudos: 0, PctOk: 100, PctQuemados: 20}
+		}
+		return PrediccionSalida{PctCrudos: 10, PctOk: 0, PctQuemados: 0}
+	})
+	opt := NewOptimizer(pred)
+	estado := Estado{TempObjetivo: 200, VelObjetivo: 0.2}
+	lim := Limites{
+		TempMin: 100, TempMax: 300,
+		VelMin: 0.05, VelMax: 0.5,
+		DeltaTemp1: 10, DeltaVel: 0.05,
+		// UmbralCrudo/UmbralQuem = 0: sin restricción.
+	}
+	pesos := Pesos{WC: 1, WQ: 0, WO: 1, DT: 0}
+
+	p, err := opt.Resolver(context.Background(), "prod-x", estado, lim, pesos)
+	if err != nil {
+		t.Fatalf("Resolver: %v", err)
+	}
+	if p.Temp1 != 210 {
+		t.Fatalf("Temp1 = %.2f, want 210 (mejor Z sin restricción)", p.Temp1)
+	}
+	if p.RestriccionRelajada {
+		t.Fatalf("umbrales <= 0 no deben marcar la propuesta como relajada")
+	}
+}
+
+// TestResolverPasaCombustionYHumedadAlPredictor verifica que las features
+// opcionales del estado llegan al predictor.
+func TestResolverPasaCombustionYHumedadAlPredictor(t *testing.T) {
+	comb := 55.5
+	hum := 7.25
+	var capturado EntradasPredictor
+	opt := NewOptimizer(predictorPorTemp(func(float64) PrediccionSalida { return PrediccionSalida{} }))
+	// Envolvemos el predictor con captura.
+	opt.predictor = predictorCaptura{fn: func(in EntradasPredictor) (PrediccionSalida, error) {
+		capturado = in
+		return PrediccionSalida{}, nil
+	}}
+
+	estado := Estado{
+		TempObjetivo: 200, VelObjetivo: 0.2,
+		TempComb1: &comb, HumedadHorno: &hum,
+	}
+	lim := Limites{
+		TempMin: 100, TempMax: 300,
+		VelMin: 0.05, VelMax: 0.5,
+		DeltaTemp1: 10, DeltaVel: 0.05,
+	}
+	if _, err := opt.Resolver(context.Background(), "prod-x", estado, lim, Pesos{}); err != nil {
+		t.Fatalf("Resolver: %v", err)
+	}
+	if capturado.TempComb1 == nil || *capturado.TempComb1 != comb {
+		t.Fatalf("TempComb1 no llegó al predictor: %+v", capturado.TempComb1)
+	}
+	if capturado.HumedadHorno == nil || *capturado.HumedadHorno != hum {
+		t.Fatalf("HumedadHorno no llegó al predictor: %+v", capturado.HumedadHorno)
+	}
+}
+
+type predictorCaptura struct {
+	fn func(EntradasPredictor) (PrediccionSalida, error)
+}
+
+func (p predictorCaptura) Predict(_ context.Context, in EntradasPredictor) (PrediccionSalida, error) {
+	return p.fn(in)
 }
 
 // TestLimitesDeConToleranciaCero verifica que una tolerancia 0 del lote se
@@ -176,7 +296,7 @@ func TestLimitesDeConToleranciaCero(t *testing.T) {
 	estado := Estado{TempObjetivo: 200, VelObjetivo: 0.2}
 	pesos := Pesos{DT: 1.0}
 	// |ΔT| = 10 con tolerancia 0 → sólo la base = 10, sin penalty extra.
-	if got := o.objetivo(estado, lim, pesos, PrediccionSalida{}, 210, nil, 0.2); got != 10.0 {
+	if got := o.objetivo(estado, lim, pesos, PrediccionSalida{}, 210, 0.2); got != 10.0 {
 		t.Fatalf("Z(actual+10) = %.3f, want 10 (sin penalty extra)", got)
 	}
 }

@@ -28,13 +28,9 @@ class PredictRequest(BaseModel):
     model_config = _CAMEL
 
     producto_id: str = Field(..., description="UUID del producto")
-    temp_horno_1: float = Field(..., ge=0, le=600, description="°C del horno 1")
-    temp_horno_2: float | None = Field(
-        default=None, ge=0, le=600, description="°C del horno 2 (opcional)"
-    )
+    temp_horno_1: float = Field(..., ge=0, le=600, description="°C del horno")
     velocidad_cinta: float = Field(..., ge=0, le=10, description="m/s")
     temp_comb_1: float | None = Field(default=None, ge=0, le=1500)
-    temp_comb_2: float | None = Field(default=None, ge=0, le=1500)
     humedad_horno: float | None = Field(default=None, ge=0, le=100)
 
 

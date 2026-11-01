@@ -22,6 +22,8 @@ func nuevoProductoDePrueba(nombre string) *producto.Producto {
 		TempMax:               220.0,
 		VelocidadCintaMin:     0.1,
 		VelocidadCintaMax:     0.3,
+		DeltaTemp1MaxC:        10.0,
+		DeltaVelMax:           0.05,
 	}
 }
 

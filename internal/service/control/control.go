@@ -1,18 +1,13 @@
 // Package control orquesta el loop automático / supervisión por lote
 // (SCA-400). Una instancia por lote activo; se cancela con el contexto.
 //
-// Loop (modo AUTOMATICO):
+// Loop (modo AUTOMATICO): calienta hasta el setpoint de receta y después corre
+// el MPC por ventana. Publica la propuesta para que la Raspberry Pi la haga
+// pull (ya autorizada); sólo el actuador "backend" (lab/debug) despacha desde
+// el servidor.
 //
-//	cada ventana_evaluacion_segundos:
-//	  1. lee metricas_horno y eventos_lote de la ventana
-//	  2. agrega (%C, %O, %Q, conf_promedio)
-//	  3. llama al optimizador
-//	  4. si hay propuesta → ConsignaService.Dispatch (origen AUTOMATICO)
-//	  5. persiste decision_control (aplicado_por=MPC o NADIE)
-//	  6. espera ventana_actualizacion_segundos y repite
-//
-// Loop (modo SUPERVISION): igual pero el paso 4 NO despacha; sólo publica
-// la propuesta por SSE. La aplica un operario desde /aplicar-consigna.
+// Loop (modo SUPERVISION): publica la propuesta por SSE sin autorizarla. La
+// aprueba/aplica un operario desde /aplicar-consigna.
 package control
 
 import (
@@ -38,16 +33,22 @@ var ErrLoteNoAbierto = errors.New("control: el lote no está abierto")
 
 // PrediccionPersistida es la salida cruda del XGBoost que se guarda como
 // JSONB en decisiones_control.prediccion. Sólo se persiste el subconjunto
-// relevante: pctCrudos/pctOk/pctQuemados/modelVersion/esPlaceholder, más el
-// T2 propuesto (temp2_pred) cuando la línea tiene horno 2.
+// relevante: pctCrudos/pctOk/pctQuemados/modelVersion/esPlaceholder.
 type PrediccionPersistida struct {
-	PctCrudos     float64  `json:"pctCrudos"`
-	PctOk         float64  `json:"pctOk"`
-	PctQuemados   float64  `json:"pctQuemados"`
-	ModelVersion  string   `json:"modelVersion"`
-	EsPlaceholder bool     `json:"esPlaceholder"`
-	Temp2         *float64 `json:"temp2_pred,omitempty"`
+	PctCrudos           float64 `json:"pctCrudos"`
+	PctOk               float64 `json:"pctOk"`
+	PctQuemados         float64 `json:"pctQuemados"`
+	ModelVersion        string  `json:"modelVersion"`
+	EsPlaceholder       bool    `json:"esPlaceholder"`
+	RestriccionRelajada bool    `json:"restriccionRelajada,omitempty"`
 }
+
+// Fases del control automático: CALENTANDO espera que el horno alcance la
+// temperatura de receta; ADAPTANDO corre el MPC normal.
+const (
+	FaseCalentando = "CALENTANDO"
+	FaseAdaptando  = "ADAPTANDO"
+)
 
 // Loop es el ciclo de control de un lote activo. Vive en memoria y emite
 // propuestas / decisiones por SSE.
@@ -55,7 +56,6 @@ type Loop struct {
 	loteID         string
 	productoID     string
 	modo           string // MANUAL | SUPERVISION | AUTOMATICO
-	horno2Hab      bool
 	hornoID        string // horno físico destino del despacho (MPC_HORNO_ID, default "horno-01")
 	ventanaEvalSeg int
 	ventanaActSeg  int
@@ -76,16 +76,33 @@ type Loop struct {
 	// toca la goroutine de run/tick, no necesita mutex.
 	shouldExit bool
 
-	// propuestaPendiente es el último setpoint propuesto en modo SUPERVISION
-	// que aún no fue aplicado por el operario. Los metadatos de auditoría de la
-	// última decisión persistida (id, ventana y timestamp) se guardan junto a
-	// ella para poder exponer un snapshot no-destructivo por HTTP.
+	// propuestaPendiente es el último setpoint propuesto que aún no fue
+	// aplicado. Los metadatos de auditoría de la última decisión persistida
+	// (id, ventana y timestamp) se guardan junto a ella para poder exponer un
+	// snapshot no-destructivo por HTTP.
 	muPropuesta        sync.Mutex
 	propuestaPendiente *optimizador.Propuesta
 	lastDecisionID     string
 	lastVentanaInicio  time.Time
 	lastVentanaFin     time.Time
 	lastCreatedAt      time.Time
+	propuestaAprobada  bool
+
+	// fase y muestrasEnTolerancia sólo los toca la goroutine del loop.
+	fase                 string // CALENTANDO | ADAPTANDO ("" hasta que run inicializa)
+	muestrasEnTolerancia int
+	preheatInicio        time.Time
+	preheatTimeoutSeg    int
+	// sinMetricas evita esperar una ventana completa cuando el lote recién
+	// arranca y la Pi todavía no publicó telemetría.
+	sinMetricas    bool
+	actuador       string  // "pi" (default) | "backend" (lab/debug)
+	confianzaMin   float64 // umbral de confianza de detección; 0 = desconocida
+	preheatPollSeg int
+	// permitirPlaceholder habilita AUTOMATICO sin modelo entrenado. Default
+	// false: el placeholder no debe mover el horno en producción. Se usa sólo
+	// para demos/tesis con MPC_PERMITIR_PLACEHOLDER=true.
+	permitirPlaceholder bool
 }
 
 // PropuestaSnapshot es una vista no-destructiva de la propuesta pendiente de
@@ -93,12 +110,13 @@ type Loop struct {
 type PropuestaSnapshot struct {
 	DecisionID    string
 	Temp1         float64
-	Temp2         *float64
 	Velocidad     float64
 	VentanaInicio time.Time
 	VentanaFin    time.Time
 	CreatedAt     time.Time
 	TTLSegundos   int
+	Autorizada    bool
+	Fase          string
 }
 
 // PropuestaPendiente devuelve un snapshot no-destructivo de la propuesta
@@ -114,13 +132,96 @@ func (loop *Loop) PropuestaPendiente(ttlSegundos int) *PropuestaSnapshot {
 	return &PropuestaSnapshot{
 		DecisionID:    loop.lastDecisionID,
 		Temp1:         p.Temp1,
-		Temp2:         p.Temp2,
 		Velocidad:     p.Velocidad,
 		VentanaInicio: loop.lastVentanaInicio,
 		VentanaFin:    loop.lastVentanaFin,
 		CreatedAt:     loop.lastCreatedAt,
 		TTLSegundos:   ttlSegundos,
+		Autorizada:    loop.propuestaAprobada,
+		Fase:          loop.fase,
 	}
+}
+
+// SetActuador define quién aplica la consigna: "pi" (default) o "backend"
+// (sólo para laboratorio/debug). Cualquier otro valor cae a "pi".
+func (loop *Loop) SetActuador(actuador string) {
+	if actuador != "pi" && actuador != "backend" {
+		actuador = "pi"
+	}
+	loop.actuador = actuador
+}
+
+// Actuador devuelve el destino de aplicación de consignas.
+func (loop *Loop) Actuador() string {
+	if loop.actuador == "" {
+		return "pi"
+	}
+	return loop.actuador
+}
+
+// SetConfianzaMin ajusta el umbral de confianza de detección. Valores <= 0
+// conservan el default (0.5): 0 significa "desconocida" y no debe gatear.
+func (loop *Loop) SetConfianzaMin(v float64) {
+	if v <= 0 {
+		return
+	}
+	loop.confianzaMin = v
+}
+
+// SetPermitirPlaceholder define si AUTOMATICO puede operar con el predictor
+// placeholder (sin modelo entrenado). Default false.
+func (loop *Loop) SetPermitirPlaceholder(permitir bool) {
+	loop.permitirPlaceholder = permitir
+}
+
+// SetPreheatTimeout ajusta el máximo de espera de precalentamiento. Un valor
+// <= 0 conserva el default (1800 s).
+func (loop *Loop) SetPreheatTimeout(segundos int) {
+	if segundos > 0 {
+		loop.preheatTimeoutSeg = segundos
+	}
+}
+
+// AprobarPropuesta marca como aprobada la propuesta pendiente indicada.
+func (loop *Loop) AprobarPropuesta(decisionID string) bool {
+	loop.muPropuesta.Lock()
+	defer loop.muPropuesta.Unlock()
+	if decisionID == "" || loop.lastDecisionID != decisionID {
+		return false
+	}
+	loop.propuestaAprobada = true
+	return true
+}
+
+// ClearPropuesta descarta la propuesta pendiente indicada.
+func (loop *Loop) ClearPropuesta(decisionID string) {
+	loop.muPropuesta.Lock()
+	defer loop.muPropuesta.Unlock()
+	if decisionID == "" || loop.lastDecisionID != decisionID {
+		return
+	}
+	loop.propuestaPendiente = nil
+	loop.lastDecisionID = ""
+	loop.propuestaAprobada = false
+}
+
+// publicarPropuesta guarda el snapshot y sus metadatos bajo mutex y emite el
+// evento SSE de propuesta.
+func (loop *Loop) publicarPropuesta(prop *optimizador.Propuesta, decision *decisiones_control.DecisionControl, autorizada bool) {
+	loop.muPropuesta.Lock()
+	loop.propuestaPendiente = prop
+	loop.lastDecisionID = decision.ID
+	loop.lastVentanaInicio = decision.VentanaInicio
+	loop.lastVentanaFin = decision.VentanaFin
+	loop.lastCreatedAt = decision.CreatedAt
+	loop.propuestaAprobada = autorizada
+	loop.muPropuesta.Unlock()
+	loop.broker.Broadcast("control.propuesta", mustJSON(map[string]interface{}{
+		"lote_id":     loop.loteID,
+		"propuesta":   prop,
+		"decision_id": decision.ID,
+		"ventana":     decision.VentanaInicio,
+	}))
 }
 
 // Interface mínima que el loop necesita del lote_sector service.
@@ -138,10 +239,12 @@ type productoLookupService interface {
 	GetByID(ctx context.Context, id string) (*producto.Producto, error)
 }
 
-// Interface mínima para contar eventos del lote en una ventana temporal.
+// Interface mínima para contar eventos del lote en una ventana temporal y
+// agregar la confianza de detección reportada por la Pi SALIDA.
 // La implementación real vive en internal/repository/lote_sector_repo.go.
 type eventosRepo interface {
 	CountEventosEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (ok, crudo, quemado int, err error)
+	ConfianzaPromedioEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (promedio float64, muestras int, err error)
 }
 
 // Interface mínima para despachar la consigna (reusa ConsignaService).
@@ -157,7 +260,7 @@ type decisionesRepo interface {
 	MarcarAplicada(ctx context.Context, decisionID string, tempAplicada, velAplicada float64, aplicadoPor string) error
 }
 
-// NewLoop crea un Loop configurado. La verificación de modo/horno2 se hace
+// NewLoop crea un Loop configurado. La verificación de modo se hace
 // en Start para no entrar al loop si el lote no califica.
 func NewLoop(
 	loteID string,
@@ -171,16 +274,20 @@ func NewLoop(
 	broker *sse.Broker,
 ) *Loop {
 	return &Loop{
-		loteID:      loteID,
-		clienteLote: clienteLote,
-		clienteMet:  clienteMet,
-		eventos:     eventos,
-		producto:    producto,
-		optimizer:   optimizer,
-		consigna:    consignaSrv,
-		decisiones:  decisiones,
-		broker:      broker,
-		now:         time.Now,
+		loteID:            loteID,
+		clienteLote:       clienteLote,
+		clienteMet:        clienteMet,
+		eventos:           eventos,
+		producto:          producto,
+		optimizer:         optimizer,
+		consigna:          consignaSrv,
+		decisiones:        decisiones,
+		broker:            broker,
+		now:               time.Now,
+		actuador:          "pi",
+		confianzaMin:      0.5,
+		preheatPollSeg:    15,
+		preheatTimeoutSeg: 1800,
 	}
 }
 
@@ -190,7 +297,6 @@ func NewLoop(
 func (loop *Loop) Configurar(
 	productoID string,
 	modo string,
-	horno2Hab bool,
 	hornoID string,
 	ventanaEvalSeg int,
 	ventanaActSeg int,
@@ -199,7 +305,6 @@ func (loop *Loop) Configurar(
 ) {
 	loop.productoID = productoID
 	loop.modo = modo
-	loop.horno2Hab = horno2Hab
 	loop.hornoID = hornoID
 	loop.ventanaEvalSeg = ventanaEvalSeg
 	loop.ventanaActSeg = ventanaActSeg
@@ -224,30 +329,35 @@ func (loop *Loop) run(ctx context.Context) {
 	if loop.ventanaEvalSeg <= 0 {
 		loop.ventanaEvalSeg = 600
 	}
-	// Si un tick previo ya marcó salida (lote cerrado), no esperamos la ventana
-	// inicial: salimos de inmediato.
+	if loop.preheatPollSeg <= 0 {
+		loop.preheatPollSeg = 15
+	}
+	if loop.preheatTimeoutSeg <= 0 {
+		loop.preheatTimeoutSeg = 1800
+	}
+	// Si un tick previo ya marcó salida (lote cerrado), salimos de inmediato.
 	if loop.shouldExit {
 		return
 	}
-	// Esperar la primera ventana antes de la primera evaluación: queremos
-	// histórico suficiente para una decisión informada. Pero si el lote se
-	// cierra durante esa ventana, salimos de inmediato (no esperamos 10 min).
-	deadline := time.NewTimer(time.Duration(loop.ventanaEvalSeg) * time.Second)
-	defer deadline.Stop()
-	poll := time.NewTicker(15 * time.Second)
-	defer poll.Stop()
-	esperando := true
-	for esperando {
-		select {
-		case <-ctx.Done():
-			return
-		case <-deadline.C:
-			esperando = false
-		case <-poll.C:
-			if loop.debeTerminar(ctx) {
-				return
+	// Fase inicial: un horno automático que arranca frío calienta primero; un
+	// lote enganchado manualmente (o supervisado) ya está adaptando.
+	if loop.fase == "" {
+		loop.fase = FaseAdaptando
+		if loop.modo == lote_sector.ModoAutomatico {
+			loop.fase = FaseCalentando
+		}
+		if loop.clienteLote != nil {
+			if lote, err := loop.clienteLote.GetByID(ctx, loop.loteID); err == nil && lote != nil {
+				if loop.modo == lote_sector.ModoAutomatico && !lote.IniciadoManualmente {
+					loop.fase = FaseCalentando
+				} else {
+					loop.fase = FaseAdaptando
+				}
 			}
 		}
+	}
+	if loop.fase == FaseCalentando && loop.preheatInicio.IsZero() {
+		loop.preheatInicio = loop.now()
 	}
 
 	for {
@@ -272,10 +382,14 @@ func (loop *Loop) run(ctx context.Context) {
 			return
 		}
 
+		espera := loop.ventanaActSeg
+		if loop.fase == FaseCalentando || loop.sinMetricas {
+			espera = loop.preheatPollSeg
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Duration(loop.ventanaActSeg) * time.Second):
+		case <-time.After(time.Duration(espera) * time.Second):
 		}
 	}
 }
@@ -314,16 +428,25 @@ func (loop *Loop) tick(ctx context.Context) {
 
 	// Releer el modo y estado vigentes: si pasó a MANUAL desde el panel o el
 	// lote se cerró, este loop ya no aplica y termina la goroutine.
-	if lote, err := loop.clienteLote.GetByID(ctx, loop.loteID); err == nil && lote != nil {
-		if lote.Modo == lote_sector.ModoManual {
-			loop.modo = lote_sector.ModoManual
-			log.Printf("[control] lote %s pasó a MANUAL; loop termina", loop.loteID)
-			return
-		}
-		if lote.Estado != lote_sector.EstadoAbierto {
-			log.Printf("[control] lote %s estado=%s; loop termina", loop.loteID, lote.Estado)
-			loop.shouldExit = true
-			return
+	var loteActual *lote_sector.Lote
+	if loop.clienteLote != nil {
+		if lote, err := loop.clienteLote.GetByID(ctx, loop.loteID); err == nil && lote != nil {
+			loteActual = lote
+			if lote.Modo == lote_sector.ModoManual {
+				loop.modo = lote_sector.ModoManual
+				log.Printf("[control] lote %s pasó a MANUAL; loop termina", loop.loteID)
+				return
+			}
+			if lote.Estado != lote_sector.EstadoAbierto {
+				log.Printf("[control] lote %s estado=%s; loop termina", loop.loteID, lote.Estado)
+				loop.shouldExit = true
+				return
+			}
+			// Si el operario arrancó el horno manualmente, ya está caliente:
+			// saltamos la espera de precalentamiento.
+			if lote.IniciadoManualmente && loop.fase == FaseCalentando {
+				loop.fase = FaseAdaptando
+			}
 		}
 	}
 
@@ -333,8 +456,18 @@ func (loop *Loop) tick(ctx context.Context) {
 	metricas, err := loop.clienteMet.GetUltimasParaLote(ctx, loop.loteID, 200)
 	if err != nil {
 		log.Printf("[control] GetUltimasParaLote: %v", err)
+		loop.sinMetricas = true
 		return
 	}
+	// Reintentar rápido mientras no haya telemetría (arranque manual o
+	// backend recién levantado); con métricas se vuelve a la ventana normal.
+	loop.sinMetricas = len(metricas) == 0
+
+	if loop.fase == FaseCalentando {
+		loop.tickPreheat(ctx, metricas, loteActual)
+		return
+	}
+
 	// Filtrar a la ventana real (el repo devuelve las últimas N, no por rango).
 	filtradas := filtrarPorVentana(metricas, ventanaInicio, now)
 	if len(filtradas) == 0 {
@@ -349,9 +482,77 @@ func (loop *Loop) tick(ctx context.Context) {
 	zObs, zObsSet := loop.calcularZObservado(ctx, ventanaInicio, now, &pctCrudos, &pctOk, &pctQuemados)
 
 	estado := loop.estadoDesdeMetricas(filtradas)
+	// La confianza de detección llega con los eventos de la Pi SALIDA; la
+	// telemetría del horno queda como fallback cuando la ventana no trae
+	// muestras de confianza.
+	conf := confianzaPromedio(filtradas)
+	if loop.eventos != nil {
+		prom, muestras, cerr := loop.eventos.ConfianzaPromedioEnVentana(ctx, loop.loteID, ventanaInicio, now)
+		if cerr != nil {
+			log.Printf("[control] ConfianzaPromedioEnVentana: %v", cerr)
+		} else if muestras > 0 {
+			conf = prom
+		}
+	}
+
+	// Confianza desconocida (0) no gatea: la Pi todavía no la reporta.
+	if conf > 0 && conf < loop.confianzaMin {
+		skipped := "confianza_baja"
+		d := &decisiones_control.DecisionControl{
+			LoteID:         loop.loteID,
+			VentanaInicio:  ventanaInicio,
+			VentanaFin:     now,
+			Muestras:       len(filtradas),
+			TempActual:     estado.TempHorno1,
+			VelActual:      &estado.VelocidadCinta,
+			PctCrudosObs:   pctCrudos,
+			PctOkObs:       pctOk,
+			PctQuemadosObs: pctQuemados,
+			ConfPromedio:   conf,
+			TempPropuesto:  estado.TempObjetivo,
+			VelPropuesto:   estado.VelObjetivo,
+			ZObservado:     zObs,
+			AplicadoPor:    decisiones_control.AplicadoPorNadie,
+			RazonSkipped:   &skipped,
+		}
+		if err := loop.decisiones.Save(ctx, d); err != nil {
+			log.Printf("[control] Save decision (confianza_baja): %v", err)
+		}
+		return
+	}
+
 	predXGB, err := loop.optimizer.Resolver(ctx, loop.productoID, estado, loop.limites, loop.pesos)
 	if err != nil {
 		loop.skipError(ctx, ventanaInicio, now, err, filtradas)
+		return
+	}
+
+	// En AUTOMATICO no se aplica una propuesta del placeholder: primero hay que
+	// entrenar el modelo. En SUPERVISION se publica igual para que el operario
+	// vea el warning.
+	if predXGB.Prediccion.EsPlaceholder && loop.modo == lote_sector.ModoAutomatico && !loop.permitirPlaceholder {
+		skipped := "modelo_no_entrenado"
+		d := &decisiones_control.DecisionControl{
+			LoteID:         loop.loteID,
+			VentanaInicio:  ventanaInicio,
+			VentanaFin:     now,
+			Muestras:       len(filtradas),
+			TempActual:     estado.TempHorno1,
+			VelActual:      &estado.VelocidadCinta,
+			PctCrudosObs:   pctCrudos,
+			PctOkObs:       pctOk,
+			PctQuemadosObs: pctQuemados,
+			ConfPromedio:   conf,
+			TempPropuesto:  estado.TempObjetivo,
+			VelPropuesto:   estado.VelObjetivo,
+			ZObservado:     zObs,
+			AplicadoPor:    decisiones_control.AplicadoPorNadie,
+			Prediccion:     serializarPrediccion(predXGB.Prediccion, predXGB.RestriccionRelajada),
+			RazonSkipped:   &skipped,
+		}
+		if err := loop.decisiones.Save(ctx, d); err != nil {
+			log.Printf("[control] Save decision (modelo_no_entrenado): %v", err)
+		}
 		return
 	}
 
@@ -366,19 +567,29 @@ func (loop *Loop) tick(ctx context.Context) {
 		PctCrudosObs:   pctCrudos,
 		PctOkObs:       pctOk,
 		PctQuemadosObs: pctQuemados,
-		ConfPromedio:   confianzaPromedio(filtradas),
+		ConfPromedio:   conf,
 		TempPropuesto:  predXGB.Temp1,
 		VelPropuesto:   predXGB.Velocidad,
 		ZObservado:     zObs, // nil cuando la ventana no tuvo eventos
 		ZPredicho:      &predXGB.Z,
 		AplicadoPor:    decisiones_control.AplicadoPorNadie,
-		Prediccion:     serializarPrediccion(predXGB.Prediccion, predXGB.Temp2),
+		Prediccion:     serializarPrediccion(predXGB.Prediccion, predXGB.RestriccionRelajada),
 	}
 	_ = zObsSet // sólo para documentar el set en tests / debug
 
-	if loop.modo == lote_sector.ModoAutomatico {
+	switch {
+	case loop.modo == lote_sector.ModoAutomatico && loop.Actuador() == "backend":
+		// Lab/debug: el backend sigue despachando directo al horno.
 		loop.aplicarComoMPC(ctx, predXGB, decision, estado)
-	} else {
+	case loop.modo == lote_sector.ModoAutomatico:
+		// AUTOMATICO normal: la Pi hace pull de la propuesta ya autorizada.
+		decision.AplicadoPor = decisiones_control.AplicadoPorNadie
+		if err := loop.decisiones.Save(ctx, decision); err != nil {
+			log.Printf("[control] Save decision (automatico): %v", err)
+			return
+		}
+		loop.publicarPropuesta(predXGB, decision, true)
+	default:
 		// SUPERVISION: persistir primero, publicar después. Si Save falla, NO
 		// publicamos nada: el endpoint /consigna-propuesta tampoco la verá.
 		decision.AplicadoPor = decisiones_control.AplicadoPorNadie
@@ -386,21 +597,182 @@ func (loop *Loop) tick(ctx context.Context) {
 			log.Printf("[control] Save decision (supervision): %v", err)
 			return
 		}
-		// Publicar propuesta + metadatos atómicamente bajo el mismo lock: evita
-		// que un GET concurrente vea propuesta sin decisión persistida (torn read).
-		loop.muPropuesta.Lock()
-		loop.propuestaPendiente = predXGB
-		loop.lastDecisionID = decision.ID
-		loop.lastVentanaInicio = decision.VentanaInicio
-		loop.lastVentanaFin = decision.VentanaFin
-		loop.lastCreatedAt = decision.CreatedAt
-		loop.muPropuesta.Unlock()
-		loop.broker.Broadcast("control.propuesta", mustJSON(map[string]interface{}{
-			"lote_id":   loop.loteID,
-			"propuesta": predXGB,
-			"ventana":   ventanaInicio,
-		}))
+		loop.publicarPropuesta(predXGB, decision, false)
 	}
+}
+
+// tickPreheat mantiene T1 en el setpoint de receta sin correr el MPC. Cuando
+// la temperatura se mantiene en tolerancia durante 3 muestras, arranca la
+// adaptación y entrega un único setpoint de transición (T + V de receta).
+func (loop *Loop) tickPreheat(ctx context.Context, metricas []metricashorno.MetricaHorno, lote *lote_sector.Lote) {
+	now := loop.now().UTC()
+
+	var ultima *metricashorno.MetricaHorno
+	for i := range metricas {
+		if metricas[i].TempHorno1 != nil {
+			ultima = &metricas[i]
+			break
+		}
+	}
+	if !loop.preheatInicio.IsZero() &&
+		now.Sub(loop.preheatInicio) > time.Duration(loop.preheatTimeoutSeg)*time.Second {
+		skipped := "precalentamiento_timeout"
+		d := &decisiones_control.DecisionControl{
+			LoteID:        loop.loteID,
+			VentanaInicio: now,
+			VentanaFin:    now,
+			Muestras:      0,
+			TempActual:    0,
+			VelActual:     floatPtr(0),
+			AplicadoPor:   decisiones_control.AplicadoPorNadie,
+			RazonSkipped:  &skipped,
+		}
+		if ultima != nil {
+			if ultima.TempHorno1 != nil {
+				d.TempActual = *ultima.TempHorno1
+			}
+			if ultima.VelocidadCinta != nil {
+				d.VelActual = ultima.VelocidadCinta
+			}
+			d.ConfPromedio = confianzaPromedio(metricas)
+		}
+		if err := loop.decisiones.Save(ctx, d); err != nil {
+			log.Printf("[control] Save decision (precalentamiento_timeout): %v", err)
+		}
+		log.Printf("[control] precalentamiento agotó %ds; loop abortado", loop.preheatTimeoutSeg)
+		loop.shouldExit = true
+		return
+	}
+
+	if ultima == nil {
+		loop.skipSinMuestras(ctx, now, now)
+		return
+	}
+
+	target, velReceta, ok := loop.objetivoReceta(ctx, lote)
+	if !ok {
+		skipped := "receta_sin_setpoint"
+		d := &decisiones_control.DecisionControl{
+			LoteID:        loop.loteID,
+			VentanaInicio: now,
+			VentanaFin:    now,
+			Muestras:      1,
+			TempActual:    *ultima.TempHorno1,
+			VelActual:     ultima.VelocidadCinta,
+			ConfPromedio:  confianzaPromedio(metricas),
+			AplicadoPor:   decisiones_control.AplicadoPorNadie,
+			RazonSkipped:  &skipped,
+		}
+		if err := loop.decisiones.Save(ctx, d); err != nil {
+			log.Printf("[control] Save decision (receta_sin_setpoint): %v", err)
+		}
+		return
+	}
+
+	actual := *ultima.TempHorno1
+	if absFloat(actual-target) <= lote.ToleranciaTempC {
+		loop.muestrasEnTolerancia++
+	} else {
+		loop.muestrasEnTolerancia = 0
+	}
+
+	inicio := ultima.ReceivedAt
+	if inicio.IsZero() {
+		inicio = now
+	}
+	prop := &optimizador.Propuesta{Temp1: target, Velocidad: 0}
+	skipped := "precalentando"
+	decision := &decisiones_control.DecisionControl{
+		LoteID:        loop.loteID,
+		VentanaInicio: inicio,
+		VentanaFin:    inicio,
+		Muestras:      1,
+		TempActual:    actual,
+		VelActual:     ultima.VelocidadCinta,
+		ConfPromedio:  confianzaPromedio(metricas),
+		TempPropuesto: target,
+		VelPropuesto:  0,
+		AplicadoPor:   decisiones_control.AplicadoPorNadie,
+		Prediccion:    serializarPrediccion(optimizador.PrediccionSalida{}, false),
+		RazonSkipped:  &skipped,
+	}
+	if err := loop.decisiones.Save(ctx, decision); err != nil {
+		log.Printf("[control] Save decision (precalentando): %v", err)
+		return
+	}
+	loop.entregar(ctx, prop, decision)
+
+	if loop.muestrasEnTolerancia < 3 {
+		return
+	}
+
+	loop.fase = FaseAdaptando
+	loop.muestrasEnTolerancia = 0
+	vel := velReceta
+	trans := &optimizador.Propuesta{Temp1: target, Velocidad: vel}
+	transDecision := &decisiones_control.DecisionControl{
+		LoteID:        loop.loteID,
+		VentanaInicio: inicio,
+		VentanaFin:    inicio,
+		Muestras:      1,
+		TempActual:    actual,
+		VelActual:     ultima.VelocidadCinta,
+		ConfPromedio:  confianzaPromedio(metricas),
+		TempPropuesto: target,
+		VelPropuesto:  vel,
+		AplicadoPor:   decisiones_control.AplicadoPorNadie,
+		Prediccion:    serializarPrediccion(optimizador.PrediccionSalida{}, false),
+	}
+	if err := loop.decisiones.Save(ctx, transDecision); err != nil {
+		log.Printf("[control] Save decision (transicion): %v", err)
+		return
+	}
+	loop.entregar(ctx, trans, transDecision)
+}
+
+// objetivoReceta resuelve la temperatura/velocidad de arranque. Prefiere los
+// setpoints persistidos del lote y cae a la receta del producto cuando el lote
+// se abrió en MANUAL y luego se cambió a AUTOMATICO (en ese caso el lote no
+// tiene temp1_objetivo/vel_objetivo sembrados).
+func (loop *Loop) objetivoReceta(ctx context.Context, lote *lote_sector.Lote) (temp, vel float64, ok bool) {
+	if lote != nil && lote.Temp1Objetivo != nil {
+		vel = 0
+		if lote.VelObjetivo != nil {
+			vel = *lote.VelObjetivo
+		}
+		return *lote.Temp1Objetivo, vel, true
+	}
+	if loop.producto == nil {
+		return 0, 0, false
+	}
+	prod, err := loop.producto.GetByID(ctx, loop.productoID)
+	if err != nil || prod == nil || prod.TempSetpoint == nil {
+		return 0, 0, false
+	}
+	vel = 0
+	if prod.VelocidadCintaSetpoint != nil {
+		vel = *prod.VelocidadCintaSetpoint
+	}
+	return *prod.TempSetpoint, vel, true
+}
+
+// entregar aplica la consigna según el actuador configurado. En "backend"
+// despacha y marca la decisión; en "pi" publica la propuesta para que la Pi la
+// haga pull (autorizada=true en las consignas de precalentamiento).
+func (loop *Loop) entregar(ctx context.Context, prop *optimizador.Propuesta, decision *decisiones_control.DecisionControl) {
+	if loop.Actuador() == "backend" {
+		if _, err := loop.aplicarConsigna(ctx, prop, consigna.OrigenAutomatico, ""); err != nil {
+			log.Printf("[control] dispatch precalentamiento: %v", err)
+			return
+		}
+		actx, cancel := auditCtx(ctx)
+		defer cancel()
+		if err := loop.decisiones.MarcarAplicada(actx, decision.ID, prop.Temp1, prop.Velocidad, decisiones_control.AplicadoPorMPC); err != nil {
+			log.Printf("[control] marcando decisión %s como aplicada: %v", decision.ID, err)
+		}
+		return
+	}
+	loop.publicarPropuesta(prop, decision, true)
 }
 
 // calcularZObservado cuenta los eventos del lote en la ventana y devuelve:
@@ -502,27 +874,17 @@ func (loop *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuest
 // solo); en modo MANUAL el handler lo carga desde el JWT del operario.
 //
 // HornoID proviene de la env MPC_HORNO_ID (default "horno-01") y representa
-// el horno físico destino del despacho. Si el lote tiene horno2_habilitado
-// pero el horno configurado no lo soporta físicamente, se loggea warning y se
-// despacha sólo T1 (el horno receptor rechazará silenciosamente T2 si no
-// corresponde).
+// el horno físico destino del despacho.
 func (loop *Loop) aplicarConsigna(ctx context.Context, prop *optimizador.Propuesta, origen consigna.Origen, usuario string) (*consigna.Consigna, error) {
 	hornoID := loop.hornoID
 	if hornoID == "" {
 		hornoID = "horno-01"
-	}
-	if loop.horno2Hab && prop.Temp2 != nil {
-		// Defensa preventiva: el horno configurado podría no tener T2 físico.
-		// El log ayuda a diagnosticar; el backend rechazará el setpoint si
-		// el horno no lo tiene cargado (ConsignaService.ErrHorno2NoHabilitado).
-		log.Printf("[control] despacho T2 a horno %s (producto %s); verificar soporte físico", hornoID, loop.productoID)
 	}
 	req := consigna.ConsignaManualRequest{
 		HornoID:                hornoID,
 		ProductoID:             loop.productoID,
 		TemperaturaObjetivo:    prop.Temp1,
 		VelocidadCintaObjetivo: prop.Velocidad,
-		TempHorno2Objetivo:     prop.Temp2,
 	}
 	var u *string
 	if usuario != "" {
@@ -582,10 +944,6 @@ func (loop *Loop) estadoDesdeMetricas(m []metricashorno.MetricaHorno) optimizado
 	if last.TempHorno1 != nil {
 		estado.TempHorno1 = *last.TempHorno1
 	}
-	if last.TempHorno2 != nil {
-		t2 := *last.TempHorno2
-		estado.TempHorno2 = &t2
-	}
 	if last.VelocidadCinta != nil {
 		estado.VelocidadCinta = *last.VelocidadCinta
 	}
@@ -599,6 +957,8 @@ func (loop *Loop) estadoDesdeMetricas(m []metricashorno.MetricaHorno) optimizado
 	} else {
 		estado.VelObjetivo = estado.VelocidadCinta
 	}
+	estado.TempComb1 = last.TempComb1
+	estado.HumedadHorno = last.HumedadHorno
 	return estado
 }
 
@@ -632,16 +992,23 @@ func confianzaPromedio(m []metricashorno.MetricaHorno) float64 {
 	return sum / float64(n)
 }
 
-func serializarPrediccion(p optimizador.PrediccionSalida, temp2 *float64) []byte {
+func serializarPrediccion(p optimizador.PrediccionSalida, restriccionRelajada bool) []byte {
 	b, _ := json.Marshal(PrediccionPersistida{
-		PctCrudos:     p.PctCrudos,
-		PctOk:         p.PctOk,
-		PctQuemados:   p.PctQuemados,
-		ModelVersion:  p.ModelVersion,
-		EsPlaceholder: p.EsPlaceholder,
-		Temp2:         temp2,
+		PctCrudos:           p.PctCrudos,
+		PctOk:               p.PctOk,
+		PctQuemados:         p.PctQuemados,
+		ModelVersion:        p.ModelVersion,
+		EsPlaceholder:       p.EsPlaceholder,
+		RestriccionRelajada: restriccionRelajada,
 	})
 	return b
+}
+
+func absFloat(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func mustJSON(v interface{}) []byte {

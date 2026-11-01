@@ -33,7 +33,6 @@ type OvenController interface {
 //	OVEN_MODBUS_SLAVE_ID         byte (default 1)
 //	OVEN_MODBUS_REG_TEMP1        uint16 (default 100)
 //	OVEN_MODBUS_REG_VEL          uint16 (default 102)
-//	OVEN_MODBUS_REG_TEMP2        uint16 (default 104; 0 = deshabilitado)
 //	OVEN_MODBUS_READ_BACK_TOL    float64 (default 0.1)
 //
 // Si OVEN_DRIVER=="modbus" y falla el Connect inicial, retorna error (no hace
@@ -56,7 +55,6 @@ func NewOvenControllerFromEnv() (OvenController, io.Closer, error) {
 			Timeout:           getEnvDurationOrDefault("OVEN_MODBUS_TIMEOUT", 2*time.Second),
 			RegTemp1:          getEnvUint16OrDefault("OVEN_MODBUS_REG_TEMP1", 100),
 			RegVelocidad:      getEnvUint16OrDefault("OVEN_MODBUS_REG_VEL", 102),
-			RegTemp2:          getEnvUint16OrDefault("OVEN_MODBUS_REG_TEMP2", 104),
 			ReadBackTolerance: getEnvFloatOrDefault("OVEN_MODBUS_READ_BACK_TOL", 0.1),
 		}
 		c, err := NewModbusOvenController(cfg)
