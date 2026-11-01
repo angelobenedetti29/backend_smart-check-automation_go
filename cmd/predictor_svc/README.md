@@ -47,13 +47,31 @@ heterogéneas. Por eso hay un XGBoost por `producto_id`.
 
 ## Entrenamiento
 
+Hay dos caminos. El histórico completo (BD) agrega **una muestra por lote**
+(promedio de la telemetría y etiquetas de todos los eventos del lote). El
+export por ventanas replica lo que el MPC ve en inferencia: una muestra
+punto-en-el-tiempo por ventana, con features "as of" el fin de la ventana y
+etiquetas de los eventos de esa ventana. El corte `--split-temporal` es por
+lote: todas las ventanas de un lote caen del mismo lado para no filtrar datos.
+
 ```bash
+# 1) Exportar lotes cerrados a ventanas (CSV o JSONL + manifest.json).
+DATABASE_URL='postgres://user:pass@host/db' \
+python -m cmd.predictor_svc.export_dataset --out data/windows --split-temporal 0.8
+
+# 2) Entrenar con las ventanas exportadas (sin DATABASE_URL).
+python -m cmd.predictor_svc.train --dataset data/windows/train.csv
+python -m cmd.predictor_svc.train --dataset data/windows/train.csv --producto <uuid>
+
+# O el camino histórico de siempre (una muestra por lote):
 DATABASE_URL='postgres://user:pass@host/db' \
 python -m cmd.predictor_svc.train
 # o para un solo producto:
 DATABASE_URL='...' python -m cmd.predictor_svc.train --producto <uuid>
 ```
 
+`export_dataset.py` documenta la política de ventanas y etiquetas en su
+docstring (ventanas solapadas, `estado IS NULL` fuera del denominador).
 El script entrena por producto si hay ≥ N muestras (default 30). Guarda
 en `models_xgb/`. El próximo `/predict` levanta el modelo nuevo.
 

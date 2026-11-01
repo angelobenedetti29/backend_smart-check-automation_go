@@ -9,6 +9,11 @@ Lee el dataset desde el backend Go (vía DATABASE_URL): agrega por lote el
 Uso:
     DATABASE_URL=postgres://... python -m cmd.predictor_svc.train
     DATABASE_URL=postgres://... python -m cmd.predictor_svc.train --producto a1b2...
+    python -m cmd.predictor_svc.train --dataset data/windows/train.csv
+
+La ruta con `--dataset` entrena con las ventanas exportadas por
+`export_dataset.py` (una fila = una muestra punto-en-el-tiempo). Sin
+`--dataset` se mantiene el agregado por lote histórico.
 
 Este script es batch: se corre bajo demanda cuando se acumula histórico
 suficiente (default: ≥30 muestras por producto). El MPC sigue funcionando
@@ -20,6 +25,7 @@ Si xgboost no está instalado, el script degrada a "skip" sin entrenar.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -27,8 +33,9 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 try:
     import xgboost as xgb  # type: ignore
@@ -184,6 +191,98 @@ def _opt_float(x: object) -> float | None:
     return float(x)
 
 
+def _leer_filas_dataset(path: Path) -> list[dict[str, Any]]:
+    if path.suffix.lower() == ".csv":
+        with path.open(encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            return list(reader)
+    filas: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as fh:
+        for linea in fh:
+            if linea.strip():
+                filas.append(json.loads(linea))
+    return filas
+
+
+def _numero(valor: object) -> float | None:
+    if valor is None or valor == "":
+        return None
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _inicio_at(valor: object) -> datetime | None:
+    if not isinstance(valor, str) or not valor:
+        return None
+    try:
+        return datetime.fromisoformat(valor)
+    except ValueError:
+        return None
+
+
+_CAMPOS_DATASET = (
+    "producto_id",
+    "temp_horno_1",
+    "velocidad_cinta",
+    "pct_crudos",
+    "pct_ok",
+    "pct_quemados",
+    "temp_min",
+    "temp_max",
+    "vel_min",
+    "vel_max",
+)
+
+
+def cargar_muestras_dataset(path: Path) -> list[MuestraLote]:
+    """Lee las ventanas exportadas por `export_dataset.py` (csv o jsonl).
+
+    Una fila = una muestra. Se ordena por `inicio_at` cuando está presente
+    para que el split sin shuffle (el de siempre) sea cronológico.
+    """
+    filas = _leer_filas_dataset(path)
+    if not filas:
+        return []
+    faltantes = [c for c in _CAMPOS_DATASET if c not in filas[0]]
+    if faltantes:
+        raise ValueError(
+            f"{path}: faltan columnas del dataset: {', '.join(faltantes)}"
+        )
+
+    salida: list[tuple[datetime | None, MuestraLote]] = []
+    for fila in filas:
+        numeros = [_numero(fila.get(c)) for c in _CAMPOS_DATASET[1:]]
+        if any(v is None for v in numeros):
+            logger.warning("fila descartada (valor no numérico): %s", fila)
+            continue
+        temp, vel, crudos, ok, quemados, tmin, tmax, vmin, vmax = numeros
+        salida.append(
+            (
+                _inicio_at(fila.get("inicio_at")),
+                MuestraLote(
+                    producto_id=str(fila["producto_id"]),
+                    temp_horno_1=temp,
+                    velocidad_cinta=vel,
+                    temp_comb_1=_numero(fila.get("temp_comb_1")),
+                    humedad_horno=_numero(fila.get("humedad_horno")),
+                    pct_crudos=crudos,
+                    pct_ok=ok,
+                    pct_quemados=quemados,
+                    temp_min=tmin,
+                    temp_max=tmax,
+                    vel_min=vmin,
+                    vel_max=vmax,
+                ),
+            )
+        )
+
+    if salida and all(inicio is not None for inicio, _ in salida):
+        salida.sort(key=lambda par: par[0])
+    return [muestra for _, muestra in salida]
+
+
 def agrupar_por_producto(muestras: list[MuestraLote]) -> dict[str, list[MuestraLote]]:
     out: dict[str, list[MuestraLote]] = defaultdict(list)
     for m in muestras:
@@ -194,7 +293,7 @@ def agrupar_por_producto(muestras: list[MuestraLote]) -> dict[str, list[MuestraL
 def _split_train_test(
     items: list[MuestraLote], test_size: float
 ) -> tuple[list[MuestraLote], list[MuestraLote]]:
-    """Split simple sin shuffle (los lotes son i.i.d. en el tiempo)."""
+    """Split simple sin shuffle (con `--dataset` el orden es cronológico)."""
     if not items:
         return [], []
     corte = max(1, int(len(items) * (1 - test_size)))
@@ -299,6 +398,10 @@ def main(argv: list[str] | None = None) -> int:
         "--test-size", type=float, default=DEFAULT_TEST_SIZE,
         help="Proporción de test (default 0.2)",
     )
+    parser.add_argument(
+        "--dataset",
+        help="Entrenar desde ventanas exportadas (csv o jsonl) en vez de la BD",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -306,12 +409,14 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        logger.error("DATABASE_URL no está seteada")
-        return 1
-
-    muestras = cargar_muestras(db_url)
+    if args.dataset:
+        muestras = cargar_muestras_dataset(Path(args.dataset))
+    else:
+        db_url = os.environ.get("DATABASE_URL")
+        if not db_url:
+            logger.error("DATABASE_URL no está seteada")
+            return 1
+        muestras = cargar_muestras(db_url)
     if not muestras:
         logger.warning("sin muestras: nada que entrenar")
         return 0
