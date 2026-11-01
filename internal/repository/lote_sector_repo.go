@@ -53,7 +53,8 @@ const loteSectorSelect = `
 		lp.umbral_aceptacion_crudo, lp.umbral_aceptacion_quemado,
 		lp.pesos_objetivo,
 		lp.temp1_objetivo, lp.vel_objetivo,
-		lp.delta_temp1_max_c, lp.delta_vel_max
+		lp.delta_temp1_max_c, lp.delta_vel_max,
+		lp.confianza_promedio
 	FROM lotes_productivos lp
 	JOIN productos pr ON pr.id = lp.producto_id
 	LEFT JOIN dispositivos d ON d.id = lp.abierto_por
@@ -84,6 +85,7 @@ func scanLoteSector(row pgx.Row) (*lotesector.Lote, error) {
 		&pesosJSON,
 		&l.Temp1Objetivo, &l.VelObjetivo,
 		&l.DeltaTemp1MaxC, &l.DeltaVelMax,
+		&l.ConfianzaPromedio,
 	); err != nil {
 		return nil, err
 	}
@@ -566,6 +568,10 @@ func (r *LoteSectorPostgresRepository) Cerrar(ctx context.Context, params lotese
 		    fin_at = now(),
 		    motivo_cierre = $5,
 		    cerrar_idempotency_key = COALESCE($6, cerrar_idempotency_key),
+		    confianza_promedio = (
+		        SELECT AVG(confianza) FROM eventos_lote
+		        WHERE lote_id = $7 AND confianza IS NOT NULL
+		    ),
 		    updated_at = now()
 		WHERE id = $7`,
 		params.Conteos.OK, params.Conteos.Crudo, params.Conteos.Quemado,

@@ -1004,7 +1004,8 @@ ALTER TABLE lotes_productivos
     ADD COLUMN IF NOT EXISTS temp1_objetivo             NUMERIC(6,2),
     ADD COLUMN IF NOT EXISTS vel_objetivo               NUMERIC(6,3),
     ADD COLUMN IF NOT EXISTS delta_temp1_max_c          NUMERIC(6,3),
-    ADD COLUMN IF NOT EXISTS delta_vel_max              NUMERIC(6,4);
+    ADD COLUMN IF NOT EXISTS delta_vel_max              NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS confianza_promedio         NUMERIC(4,3);
 
 DO $$
 BEGIN
@@ -1039,6 +1040,10 @@ BEGIN
         ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_delta_vel_pos
             CHECK (delta_vel_max > 0);
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_confianza_promedio') THEN
+        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_confianza_promedio
+            CHECK (confianza_promedio IS NULL OR (confianza_promedio >= 0 AND confianza_promedio <= 1));
+    END IF;
 END $$;
 
 COMMENT ON COLUMN lotes_productivos.modo                       IS 'Modo de operación: MANUAL/SUPERVISION/AUTOMATICO (default MANUAL para no romper lotes existentes)';
@@ -1053,6 +1058,7 @@ COMMENT ON COLUMN lotes_productivos.temp1_objetivo             IS 'Último setpo
 COMMENT ON COLUMN lotes_productivos.vel_objetivo               IS 'Último setpoint de velocidad de cinta aplicado por el control';
 COMMENT ON COLUMN lotes_productivos.delta_temp1_max_c          IS 'Override de tuning del ΔT1 máximo por ciclo (°C); NULL = usa el valor del producto';
 COMMENT ON COLUMN lotes_productivos.delta_vel_max              IS 'Override de tuning del ΔV máximo por ciclo (m/s); NULL = usa el valor del producto';
+COMMENT ON COLUMN lotes_productivos.confianza_promedio         IS 'Confianza media de las detecciones del lote, fijada al cerrarlo desde eventos_lote.confianza; NULL si el lote no tuvo detecciones con confianza';
 
 -- ----------------------------------------------------------------------------
 -- 3) metricas_horno: telemetría cruda del horno reportada por la Pi ENTRADA.

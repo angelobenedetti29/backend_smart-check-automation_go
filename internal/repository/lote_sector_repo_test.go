@@ -428,6 +428,69 @@ func TestLoteSectorRepository_CerrarIdempotente(t *testing.T) {
 	require.Equal(t, 5, again.Conteos.Total)
 }
 
+// TestLoteSectorRepository_CerrarPersisteConfianzaPromedio verifica que el
+// cierre fije la media de confianza de los eventos del lote y que el lote
+// devuelto (y su relectura) la expongan. Sin detecciones con confianza queda
+// NULL, nunca 0.
+func TestLoteSectorRepository_CerrarPersisteConfianzaPromedio(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := setupLoteSectorRepo(t)
+
+	t.Run("promedia las confianzas", func(t *testing.T) {
+		lote := abrirLote(t, ctx, repo)
+		_, _, _, err := repo.RegistrarEventos(ctx, lote.ID, testSectorID, testSalidaDevID, []lotesector.Evento{
+			{EventoID: "31313131-0000-0000-0000-000000000001", ProductoID: testProductoID, Estado: ptr("ok"), Confianza: ptr(0.8)},
+			{EventoID: "31313131-0000-0000-0000-000000000002", ProductoID: testProductoID, Estado: ptr("quemado"), Confianza: ptr(0.6)},
+		})
+		require.NoError(t, err)
+
+		closed, yaCerrado, err := repo.Cerrar(ctx, lotesector.CerrarParams{
+			LoteID:   lote.ID,
+			SectorID: testSectorID,
+			Conteos:  lotesector.Conteos{Total: 2},
+			Motivo:   "manual",
+		})
+		require.NoError(t, err)
+		require.False(t, yaCerrado)
+		require.NotNil(t, closed.ConfianzaPromedio)
+		require.InDelta(t, 0.7, *closed.ConfianzaPromedio, 1e-9)
+
+		got, err := repo.GetByID(ctx, lote.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.ConfianzaPromedio)
+		require.InDelta(t, 0.7, *got.ConfianzaPromedio, 1e-9)
+	})
+
+	t.Run("sin eventos queda NULL", func(t *testing.T) {
+		lote := abrirLote(t, ctx, repo)
+		closed, _, err := repo.Cerrar(ctx, lotesector.CerrarParams{
+			LoteID:   lote.ID,
+			SectorID: testSectorID,
+			Conteos:  lotesector.Conteos{Total: 0},
+			Motivo:   "sin_detecciones",
+		})
+		require.NoError(t, err)
+		require.Nil(t, closed.ConfianzaPromedio)
+	})
+
+	t.Run("eventos sin confianza quedan NULL", func(t *testing.T) {
+		lote := abrirLote(t, ctx, repo)
+		_, _, _, err := repo.RegistrarEventos(ctx, lote.ID, testSectorID, testSalidaDevID, []lotesector.Evento{
+			{EventoID: "31313131-0000-0000-0000-000000000003", ProductoID: testProductoID, Estado: ptr("ok")},
+		})
+		require.NoError(t, err)
+
+		closed, _, err := repo.Cerrar(ctx, lotesector.CerrarParams{
+			LoteID:   lote.ID,
+			SectorID: testSectorID,
+			Conteos:  lotesector.Conteos{Total: 1},
+			Motivo:   "manual",
+		})
+		require.NoError(t, err)
+		require.Nil(t, closed.ConfianzaPromedio)
+	})
+}
+
 // TestLoteSectorRepository_BucketSinEventosQuedaNull verifica que un estado sin
 // eventos permanezca NULL, nunca 0, y que los recibidos sean no nulos.
 func TestLoteSectorRepository_BucketSinEventosQuedaNull(t *testing.T) {

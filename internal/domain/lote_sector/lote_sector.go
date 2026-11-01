@@ -173,6 +173,9 @@ type Lote struct {
 	// Overrides de tuning del lote; nil = usar el valor del producto.
 	DeltaTemp1MaxC *float64 `json:"delta_temp1_max_c,omitempty"`
 	DeltaVelMax    *float64 `json:"delta_vel_max,omitempty"`
+	// Confianza media de las detecciones, fijada al cerrar el lote; nil si no
+	// hubo detecciones con confianza.
+	ConfianzaPromedio *float64 `json:"confianza_promedio,omitempty"`
 }
 
 // TurnoDe clasifica el momento de apertura de un lote en el turno de
