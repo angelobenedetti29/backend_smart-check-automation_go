@@ -25,7 +25,7 @@ Hay dos esquemas de credencial, mutuamente excluyentes:
 - **Usuarios del panel (OAuth):** cookie HttpOnly `session_token` emitida por `/api/v1/auth/login` o `/api/v1/auth/google`. El proxy del frontend debe reenviar esa cookie, también en las conexiones SSE.
 - **Nodos Raspberry Pi:** header `Authorization: Bearer <secret>`, donde `<secret>` es el secreto por dispositivo enrolado.
 
-Algunos endpoints son **dual-auth**: aceptan el Bearer de dispositivo o la cookie JWT. Si la petición trae cualquier header `Authorization`, se resuelve exclusivamente como intento de dispositivo (un Bearer inválido es 401 plano, sin degradar a la cookie). Sin `Authorization`, se valida la cookie. Son dual-auth: `GET /api/v1/productos`, `GET /api/v1/lotes/abierto` y `GET /api/v1/lotes`.
+Algunos endpoints son **dual-auth**: aceptan el Bearer de dispositivo o la cookie JWT. Si la petición trae cualquier header `Authorization`, se resuelve exclusivamente como intento de dispositivo (un Bearer inválido es 401 plano, sin degradar a la cookie). Sin `Authorization`, se valida la cookie. Son dual-auth: `GET /api/v1/productos`, `GET /api/v1/lotes/abierto`, `GET /api/v1/lotes`, `GET /api/v1/lotes/{id}/metricas-horno`, `GET /api/v1/lotes/{id}/consigna-propuesta`, `POST /api/v1/lotes/{id}/aplicar-consigna` y `POST /api/v1/lotes/{id}/aprobar-consigna`. `PUT /api/v1/lotes/{id}/modo` también usa dual-auth: el `PUT` es el push de la Pi y el `PATCH` es del panel.
 
 ### Errores de validación
 
@@ -56,12 +56,23 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 17 | `GET /api/v1/dispositivos/events` | SSE: telemetría de dispositivos en tiempo real |
 | 18 | `GET /api/v1/horno/events` | SSE: consignas despachadas al horno |
 | 19 | `GET /health`, `GET /healthz`, `GET /` | Salud del servicio / info |
+| 20 | `GET /api/v1/lotes/{id}/control/estado` | Estado runtime del loop de control del lote |
+| 21 | `PATCH`/`PUT /api/v1/lotes/{id}/modo` | Cambiar el modo MANUAL/SUPERVISION/AUTOMATICO |
+| 22 | `POST /api/v1/lotes/{id}/control/start` y `/stop` | Arrancar o detener el loop del MPC |
+| 23 | `PATCH /api/v1/lotes/{id}/control/parametros` | Ajustar tolerancia, umbrales y Δmáx del lote |
+| 24 | `GET /api/v1/lotes/{id}/consigna-propuesta` | Propuesta pendiente del MPC u override manual |
+| 25 | `POST /api/v1/lotes/{id}/aplicar-consigna` (alias `/aprobar-consigna`) | Aprobar/aplicar una propuesta en SUPERVISION |
+| 26 | `POST /api/v1/lotes/{id}/consigna/ack` | Confirmar que la Pi aplicó la consigna |
+| 27 | `GET /api/v1/lotes/{id}/decisiones` | Audit del MPC del lote |
+| 28 | `GET /api/v1/lotes/{id}/confianza-clases` | Confianza media/desvío por clase |
+| 29 | `POST`/`GET /api/v1/lotes/{id}/metricas-horno` | Telemetría cruda del horno |
+| 30 | `GET /api/v1/lotes/{id}/control/events` | SSE: propuestas `control.propuesta` del lote |
 
 ---
 
 ## 1. `GET /api/v1/horno` — Consultar estado del horno
 
-Devuelve el estado activo del horno (temperatura, velocidad de cinta, producto/lote en curso) más sus alertas recientes. Internamente también dispara una inspección visual simulada de la cinta transportadora (IA de defectos).
+Devuelve el estado activo del horno (temperatura, velocidad de cinta, producto/lote en curso) más sus alertas recientes. El horno vive en memoria en el backend; su estado se actualiza con las consignas aplicadas exitosamente. La telemetría real del horno llega por `POST /api/v1/lotes/{id}/metricas-horno`.
 
 **Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `id` (requerido).
 
@@ -81,7 +92,6 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno?id=horno-01"
       "estado": "ACTIVO", "ultimo_check": "2026-08-06T12:00:00Z"
     },
     "alertas_recientes": [],
-    "conveyor_checked": true,
     "saludo": "Hola Mundo desde el controlador de Horno en Arquitectura de Capas Go!"
   }
 }
@@ -340,7 +350,7 @@ curl -X POST -b "session_token=$JWT" -H "Content-Type: application/json" \
 
 ## 6. `POST /api/v1/lotes/inicio` — Abrir lote del sector
 
-Lo llama la Raspberry Pi (ENTRADA_HORNO) al identificar el producto. **Abre y persiste** el lote abierto del sector; si ya hay uno, se adjunta (get-or-create). Es idempotente por `idempotency_key`. **No dispara consigna automática** (ese despacho ya no ocurre desde este endpoint).
+Lo llama la Raspberry Pi (ENTRADA_HORNO) al identificar el producto. **Abre y persiste** el lote abierto del sector; si ya hay uno, se adjunta (get-or-create). Es idempotente por `idempotency_key`. **No dispara la consigna automática de SCA-142**; si el lote nace en modo no manual, el backend arranca el loop del MPC (SCA-400).
 
 **Auth:** `Authorization: Bearer <secret>` (device-only). `Content-Type: application/json` obligatorio. Body máx. 1 MB.
 
@@ -349,6 +359,14 @@ curl -X POST http://localhost:8080/api/v1/lotes/inicio \
   -H "Authorization: Bearer $DEVICE_SECRET" -H "Content-Type: application/json" \
   -d '{"idempotency_key":"0f8fad5b-d9cb-469f-a165-70867728950e","producto_id":"a1b2c3d4-5678-90ab-cdef-1234567890ab","momento":"2026-08-06T12:00:00Z"}'
 ```
+
+Desde SCA-400 el body acepta además los parámetros de operación del lote:
+`modo` (`MANUAL`/`SUPERVISION`/`AUTOMATICO`, default `MANUAL`),
+`iniciado_manualmente`, `ventana_evaluacion_segundos`,
+`ventana_actualizacion_segundos`, `tolerancia_temp_c`,
+`umbral_aceptacion_crudo`, `umbral_aceptacion_quemado`, `pesos_objetivo` y
+`estado_inicial` (foto del horno cuando la Pi se engancha a un horno ya
+encendido).
 
 `momento` es informativo: el servidor usa su propio reloj. Respuesta `201 Created` cuando el lote se crea y `200 OK` cuando se adjunta a uno existente:
 
@@ -566,7 +584,7 @@ curl -b "session_token=$JWT" http://localhost:8080/api/v1/dispositivos
 }
 ```
 
-El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #14. El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: es opcional y nullable; se omite cuando el dispositivo no tiene cámara configurada. El campo `sectorId` es el sector al que pertenece el dispositivo (nullable); la columna legacy `ubicacion` fue eliminada y sus valores migrados a sectores.
+El objeto `ultimaMetrica` usa el contrato de telemetría descrito en #11. El campo `whepUrl` es la fuente de verdad de la cámara/stream WHEP del dispositivo: es opcional y nullable; se omite cuando el dispositivo no tiene cámara configurada. El campo `sectorId` es el sector al que pertenece el dispositivo (nullable); la columna legacy `ubicacion` fue eliminada y sus valores migrados a sectores.
 
 **Modificación (`PUT`):** el body acepta únicamente `dispositivoId` (requerido; debe ser un UUID válido, 422 en caso contrario), `sectorId` (string o `null`) y `whepUrl` (string opcional). El `nombre` es **inmutable desde el ruta del panel**: el decoder estricto rechaza campos desconocidos (incluido `nombre`), y solo el rename autenticado puede cambiarlo. El panel lo hace en `PUT /api/v1/dispositivos/{id}/nombre` (ver subsección más abajo), y la propia Raspberry en `PUT /api/v1/dispositivos/nombre` (ver #14). **Semántica de `sectorId`:** al ser un PUT de reemplazo, **omitir la clave equivale a enviar `null`** (desasigna el dispositivo del sector); el frontend siempre la envía explícitamente para no desasignar al editar solo WHEP. Un `sectorId` inexistente → 400; violar el índice único `uq_dispositivos_sector_tipo` → 409. Si `whepUrl` se omite o se envía vacío, el dispositivo queda sin stream (`NULL`); si se informa, debe ser una URL absoluta `http`/`https` de hasta 500 caracteres; en caso contrario 422.
 
@@ -675,7 +693,9 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos/metricas
 
 ## 14. `POST /api/v1/horno/consigna` — Envío manual de consigna térmica — SCA-320
 
-Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual).
+Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual). El despacho se audita en `historial_consignas` con `origen=MANUAL` y actualiza el estado del horno en memoria. El backend no escribe el PLC: el despacho va a un stub interno (`SimulatedOvenController`); la Pi ENTRADA es la única que aplica el setpoint real en el PLC.
+
+Si el lote está en modo **MANUAL**, está abierto y `CONTROL_ACTUADOR=pi`, además se encola una decisión ya aprobada (`muestras=0`) para que la Pi la aplique como `manual_override` (ver §24). En **AUTOMATICO**/**SUPERVISION** el envío manual se despacha y audita igual, pero el loop del MPC sigue gobernando las propuestas siguientes.
 
 **Auth:** cookie JWT `session_token` con rol Operario, Supervisor o Administrador. `Content-Type: application/json` obligatorio.
 
@@ -716,14 +736,17 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
 | 400 | JSON inválido |
 | 422 | Validación de forma falló, el producto no tiene parámetros cargados, o los valores están fuera del rango seguro |
 | 404 | El horno indicado no existe |
-| 502 | El controlador físico rechazó la consigna (queda auditado; el horno pasa a `CONTROL_MANUAL` + se genera una alerta CRITICAL) |
+| 502 | El controlador interno (stub) rechazó la consigna (queda auditado; el horno pasa a `CONTROL_MANUAL` + se genera una alerta CRITICAL). El backend no escribe el PLC |
 | 500 | Error interno |
+
+Un despacho exitoso posterior restaura el horno a `ACTIVO`. La vía manual sigue
+disponible aunque el horno esté en `CONTROL_MANUAL`.
 
 ---
 
 ## 15. `GET /api/v1/horno/consigna/historial` — Historial de auditoría por lote
 
-Devuelve todas las consignas asociadas a un `loteId`, ordenadas de más reciente a más antigua. `origen='AUTOMATICO'` solo aparece en registros históricos: el despacho automático (SCA-142) fue retirado.
+Devuelve todas las consignas asociadas a un `loteId`, ordenadas de más reciente a más antigua. `origen='MANUAL'` corresponde al envío del panel (SCA-320); `origen='AUTOMATICO'` corresponde al despacho del loop del MPC (SCA-400) cuando el lote está en AUTOMATICO con actuador `backend`, o a registros históricos de SCA-142.
 
 **Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `loteId` (requerido).
 
@@ -802,6 +825,543 @@ Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database un
 
 ---
 
+## 20. `GET /api/v1/lotes/{id}/control/estado` — Estado del control
+
+Devuelve el modo persistido del lote y el estado runtime del loop en memoria.
+`started_at` viaja `null` cuando no hay loop activo.
+
+**Auth:** cookie JWT `session_token` (Administrador, Supervisor u Operario).
+
+```bash
+curl -b "session_token=$JWT" \
+  http://localhost:8080/api/v1/lotes/$LOTE/control/estado
+```
+
+```json
+{
+  "success": true, "message": "Estado del control",
+  "data": {
+    "lote_id": "d1a2b3c4-...",
+    "modo": "SUPERVISION",
+    "loop_activo": true,
+    "started_at": "2026-11-03T12:00:00Z"
+  }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente |
+| 404 | `{id}` no es un lote válido o no existe |
+| 500 | Error interno |
+
+---
+
+## 21. `PATCH`/`PUT /api/v1/lotes/{id}/modo` — Cambiar modo de operación
+
+Cambia el modo de un lote **ABIERTO** entre `MANUAL`, `SUPERVISION` y
+`AUTOMATICO`. Cancela el loop vigente, persiste el modo, arranca un loop nuevo si
+el modo lo requiere y deja una fila de auditoría en `decisiones_control`.
+
+- `PATCH` es la vía del panel (cookie JWT, Supervisor/Admin).
+- `PUT` es el push de la Pi (Bearer de dispositivo); sólo puede afectar lotes de
+  su propio sector. La ruta usa dual-auth, así que un `PUT` con cookie JWT
+  también se acepta si el usuario tiene rol suficiente.
+
+```bash
+curl -X PATCH http://localhost:8080/api/v1/lotes/$LOTE/modo \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
+  -d '{"modo":"SUPERVISION"}'
+```
+
+```json
+{
+  "success": true, "message": "Modo actualizado",
+  "data": {
+    "lote_id": "d1a2b3c4-...",
+    "modo_anterior": "MANUAL",
+    "modo_nuevo": "SUPERVISION",
+    "cambiado": true,
+    "loop_activo": true
+  }
+}
+```
+
+Si el modo enviado es igual al vigente, responde `200` con `cambiado: false` y
+`modo`.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de PATCH/PUT |
+| 401 | Bearer de dispositivo inválido, o falta la cookie JWT |
+| 403 | Rol insuficiente (JWT) o dispositivo sin sector / de otro sector |
+| 400 | JSON inválido o `modo` inválido |
+| 404 | Lote no encontrado |
+| 409 | El lote no está ABIERTO |
+| 422 | Producto desconocido, receta incompleta (sin setpoint de temperatura/velocidad) o modelo XGBoost no entrenado |
+| 503 | El predictor no está disponible al validar AUTOMATICO |
+| 500 | Error interno |
+
+---
+
+## 22. `POST /api/v1/lotes/{id}/control/start` y `/stop`
+
+`start` crea el loop del MPC si el lote está ABIERTO y su modo no es `MANUAL`.
+Es idempotente: si el loop ya existe, no lo reinicia.
+
+**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador.
+
+```bash
+curl -X POST -b "session_token=$JWT" \
+  http://localhost:8080/api/v1/lotes/$LOTE/control/start
+```
+
+```json
+{
+  "success": true, "message": "Control iniciado",
+  "data": {
+    "lote_id": "d1a2b3c4-...",
+    "modo": "SUPERVISION",
+    "ventana_evaluacion_segundos": 600,
+    "ventana_actualizacion_segundos": 300
+  }
+}
+```
+
+`stop` cancela el loop en memoria; el lote sigue abierto.
+
+```bash
+curl -X POST -b "session_token=$JWT" \
+  http://localhost:8080/api/v1/lotes/$LOTE/control/stop
+```
+
+```json
+{
+  "success": true, "message": "Control detenido",
+  "data": { "lote_id": "d1a2b3c4-...", "stopped": true }
+}
+```
+
+Si no había loop activo, `stop` responde `200` con `stopped: false` y
+`motivo: "no_loop_activo"`.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de POST |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente |
+| 404 | Lote no encontrado |
+| 409 | `start` sobre un lote cerrado o en modo MANUAL |
+| 422 | `start` con producto desconocido |
+| 500 | Error interno |
+
+---
+
+## 23. `PATCH /api/v1/lotes/{id}/control/parametros` — Tuning del lote
+
+Ajusta la tolerancia de temperatura, los umbrales de aceptación y los Δmáx por
+ciclo del lote. Todos los campos son opcionales; ausente = no cambiar. El loop
+vivo relee los límites en cada tick, así que no hace falta reiniciarlo.
+
+**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador.
+
+```bash
+curl -X PATCH http://localhost:8080/api/v1/lotes/$LOTE/control/parametros \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
+  -d '{
+    "tolerancia_temp_c": 2.5,
+    "umbral_aceptacion_crudo": 5,
+    "umbral_aceptacion_quemado": 5,
+    "delta_temp1_max_c": 8,
+    "delta_vel_max": 0.04
+  }'
+```
+
+```json
+{
+  "success": true, "message": "Parámetros actualizados",
+  "data": {
+    "lote_id": "d1a2b3c4-...",
+    "tolerancia_temp_c": 2.5,
+    "umbral_aceptacion_crudo": 5,
+    "umbral_aceptacion_quemado": 5,
+    "delta_temp1_max_c": 8,
+    "delta_vel_max": 0.04
+  }
+}
+```
+
+Rangos: `tolerancia_temp_c` en `(0,20]`, umbrales en `[0,100]`,
+`delta_temp1_max_c` en `(0,50]` y `delta_vel_max` en `(0,2]`.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de PATCH |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente |
+| 400 | JSON inválido, sin parámetros o valor fuera de rango |
+| 404 | Lote no encontrado |
+| 409 | El lote no está ABIERTO |
+| 500 | Error interno |
+
+---
+
+## 24. `GET /api/v1/lotes/{id}/consigna-propuesta` — Propuesta pendiente
+
+La Pi (o el panel) consulta la propuesta pendiente del lote. El endpoint es
+pull-based y no destructivo: leerlo no consume la propuesta.
+
+**Auth:** dual-auth (Bearer de dispositivo o cookie JWT).
+
+```bash
+curl -H "Authorization: Bearer $DEVICE_SECRET" \
+  http://localhost:8080/api/v1/lotes/$LOTE/consigna-propuesta
+```
+
+```json
+{
+  "success": true, "message": "Consigna propuesta",
+  "data": {
+    "decision_id": "8f14e45f-...",
+    "temp1_objetivo": 196,
+    "vel_objetivo": 0.22,
+    "generated_at": "2026-11-03T12:00:00Z",
+    "ttl_segundos": 300,
+    "ventana_inicio": "2026-11-03T11:55:00Z",
+    "ventana_fin": "2026-11-03T12:00:00Z",
+    "autorizada": true,
+    "fase": "ADAPTANDO",
+    "limites": {
+      "temp_min": 180, "temp_max": 220,
+      "vel_min": 0.1, "vel_max": 0.3,
+      "delta_temp1_max_c": 10, "delta_vel_max": 0.05,
+      "tolerancia_temp_c": 2
+    }
+  }
+}
+```
+
+Semántica:
+
+- **AUTOMATICO:** `autorizada: true`; la Pi aplica sin aprobación.
+- **SUPERVISION:** `autorizada: false` hasta que se apruebe; después pasa a
+  `true`.
+- **MANUAL:** no hay MPC, pero si existe un override manual encolado se sirve
+  con `manual_override: true` y `autorizada: true`; la Pi lo aplica sin el clamp
+  de Δ por ciclo.
+- Sin propuesta pendiente, lote cerrado, propuesta vencida o MPC en MANUAL sin
+  override: **`204 No Content`**.
+
+En MANUAL con override encolado, la respuesta es la decisión persistida y se
+marca explícitamente:
+
+```json
+{
+  "decision_id": "8f14e45f-...",
+  "temp1_objetivo": 195,
+  "vel_objetivo": 0.22,
+  "autorizada": true,
+  "manual_override": true,
+  "aprobada_por": "operario@fermar.com.ar"
+}
+```
+
+`manual_override` y `aprobada_por` sólo aparecen cuando tienen valor.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Bearer inválido o cookie JWT ausente/expirada |
+| 404 | Lote no encontrado |
+| 204 | No hay propuesta pendiente |
+| 500 | Error interno |
+
+---
+
+## 25. `POST /api/v1/lotes/{id}/aplicar-consigna` (alias `/aprobar-consigna`)
+
+Aprueba la propuesta pendiente en modo SUPERVISION. Puede hacerlo un operario
+del panel (JWT) o la propia Pi (Bearer de dispositivo, sólo para lotes de su
+sector). Con `CONTROL_ACTUADOR=backend` (solo laboratorio) además despacha al
+stub interno; con `pi` (default) sólo autoriza y la aplicación real en el PLC la
+hace la Pi ENTRADA, confirmada después por `/consigna/ack`.
+
+**Auth:** dual-auth. Con JWT se requiere rol Operario, Supervisor o
+Administrador.
+
+Body opcional:
+
+```json
+{ "decision_id": "8f14e45f-..." }
+```
+
+Si `decision_id` viene y no coincide con la propuesta vigente, se rechaza para
+evitar aprobar una propuesta distinta de la que el operario está viendo.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/lotes/$LOTE/aplicar-consigna \
+  -b "session_token=$JWT" -H "Content-Type: application/json" \
+  -d '{"decision_id":"8f14e45f-..."}'
+```
+
+Con actuador `pi`:
+
+```json
+{
+  "success": true, "message": "Consigna aprobada",
+  "data": {
+    "lote_id": "d1a2b3c4-...",
+    "aprobada": true,
+    "aplicada": false,
+    "decision_id": "8f14e45f-...",
+    "temp1_objetivo": 196,
+    "vel_objetivo": 0.22
+  }
+}
+```
+
+Con actuador `backend`, `aplicada: true` y `consigna` con el registro de
+auditoría.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de POST |
+| 401 | Bearer inválido o cookie JWT ausente/expirada |
+| 403 | Rol insuficiente, dispositivo sin sector o de otro sector |
+| 404 | Lote no encontrado |
+| 409 | Lote cerrado, modo MANUAL, modo AUTOMATICO (no requiere aprobación), sin propuesta pendiente o propuesta cambiada |
+| 422 | Setpoint fuera del rango seguro del producto |
+| 502 | El controlador interno (stub) rechazó la consigna; el backend no escribe el PLC |
+| 500 | Error interno |
+
+---
+
+## 26. `POST /api/v1/lotes/{id}/consigna/ack` — ACK de la Pi
+
+La Pi confirma que aplicó la propuesta y con qué setpoints. Es idempotente: un
+reenvío del mismo ACK vuelve a responder `200`.
+
+**Auth:** `Authorization: Bearer <secret>` (device-only).
+
+```bash
+curl -X POST http://localhost:8080/api/v1/lotes/$LOTE/consigna/ack \
+  -H "Authorization: Bearer $DEVICE_SECRET" -H "Content-Type: application/json" \
+  -d '{"decision_id":"8f14e45f-...","temp_aplicado":196,"vel_aplicado":0.22}'
+```
+
+```json
+{
+  "success": true, "message": "Consigna aplicada",
+  "data": {
+    "decision_id": "8f14e45f-...",
+    "aplicado": true,
+    "aplicado_por": "OPERARIO"
+  }
+}
+```
+
+`aplicado_por` es `MPC` en AUTOMATICO y `OPERARIO` en SUPERVISION. El ACK
+también actualiza los setpoints aplicados del lote.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de POST |
+| 401 | Token de dispositivo inválido |
+| 400 | JSON inválido o faltan `decision_id`, `temp_aplicado` o `vel_aplicado` |
+| 403 | Dispositivo sin sector o de otro sector |
+| 404 | Lote o decisión no encontrados |
+| 409 | Lote cerrado o propuesta de SUPERVISION no aprobada |
+| 500 | Error interno |
+
+---
+
+## 27. `GET /api/v1/lotes/{id}/decisiones` — Audit del MPC
+
+Devuelve las últimas 100 decisiones del lote, más recientes primero. Cada fila
+incluye la observación, la predicción XGBoost (`prediccion`), la propuesta, los
+valores aplicados, `razon_skipped`, `aplicado_por` y la aprobación
+(`aprobada_por`/`aprobada_at`).
+
+**Auth:** cookie JWT `session_token` (cualquier rol).
+
+```bash
+curl -b "session_token=$JWT" \
+  http://localhost:8080/api/v1/lotes/$LOTE/decisiones
+```
+
+```json
+{
+  "success": true, "message": "Decisiones del lote",
+  "data": {
+    "lote_id": "d1a2b3c4-...",
+    "decisiones": [
+      {
+        "id": "8f14e45f-...", "lote_id": "d1a2b3c4-...",
+        "ventana_inicio": "...", "ventana_fin": "...",
+        "muestras": 120, "temp_actual": 195, "vel_actual": 0.22,
+        "pct_crudos_obs": 1.2, "pct_ok_obs": 96.5, "pct_quemados_obs": 2.3,
+        "conf_promedio": 0.93,
+        "temp_propuesto": 196, "vel_propuesto": 0.22,
+        "prediccion": { "pctCrudos": 1.1, "pctOk": 96.8, "pctQuemados": 2.1, "modelVersion": "v3", "esPlaceholder": false },
+        "z_observado": 0.04, "z_predicho": 0.03,
+        "aplicado_por": "OPERARIO",
+        "aprobada_por": "operario@fermar.com.ar",
+        "created_at": "..."
+      }
+    ],
+    "total": 1
+  }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente |
+| 404 | Lote no encontrado |
+| 500 | Error interno |
+
+---
+
+## 28. `GET /api/v1/lotes/{id}/confianza-clases` — Confianza por clase
+
+Agrega la confianza media y el desvío por clase (`ok`, `crudo`, `quemado`)
+sobre las últimas N detecciones del lote. Sirve para detectar un modelo
+degradado por clase.
+
+**Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `limite`
+(default `200`, máximo `2000`; fuera de rango se clampea).
+
+```bash
+curl -b "session_token=$JWT" \
+  "http://localhost:8080/api/v1/lotes/$LOTE/confianza-clases?limite=200"
+```
+
+```json
+{
+  "success": true, "message": "Confianza por clase",
+  "data": {
+    "lote_id": "d1a2b3c4-...",
+    "clases": [
+      { "clase": "ok", "confianza_media": 0.93, "confianza_stddev": 0.04, "muestras": 180 },
+      { "clase": "quemado", "confianza_media": 0.88, "confianza_stddev": null, "muestras": 1 }
+    ],
+    "total": 2
+  }
+}
+```
+
+`confianza_stddev` es `null` con menos de dos muestras.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol insuficiente |
+| 404 | Lote no encontrado |
+| 500 | Error interno |
+
+---
+
+## 29. `POST`/`GET /api/v1/lotes/{id}/metricas-horno` — Telemetría del horno
+
+La Pi ENTRADA envía heartbeats con las lecturas reales del horno. El servidor
+completa `lote_id` (de la URL), `dispositivo_id` (del principal autenticado) y
+`sector_id` (del dispositivo), valida que el lote esté ABIERTO y pertenezca al
+sector, y persiste append-only en `metricas_horno`.
+
+**POST — Auth:** `Authorization: Bearer <secret>` (device-only).
+`Content-Type: application/json` obligatorio.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/lotes/$LOTE/metricas-horno \
+  -H "Authorization: Bearer $DEVICE_SECRET" -H "Content-Type: application/json" \
+  -d '{
+    "temp_horno_1": 195.5,
+    "temp_comb_1": 800.0,
+    "humedad_horno": 12.0,
+    "temp_ambiente": 28.0,
+    "humedad_ambiente": 45.0,
+    "velocidad_cinta": 0.22,
+    "temp_objetivo": 196.0,
+    "vel_objetivo": 0.22,
+    "confianza_deteccion": 0.93
+  }'
+```
+
+```json
+{
+  "success": true, "message": "Métrica registrada",
+  "data": { "id": "b1c2d3e4-...", "received_at": "2026-11-03T12:00:00Z" }
+}
+```
+
+`received_at` es opcional; si se omite, se usa el reloj del servidor.
+`confianza_deteccion`, si viene, debe estar en `[0,1]`.
+
+**GET — Auth:** dual-auth. Devuelve las últimas N lecturas (default `1`,
+máximo `200`) para telemetría en vivo.
+
+```bash
+curl -H "Authorization: Bearer $DEVICE_SECRET" \
+  "http://localhost:8080/api/v1/lotes/$LOTE/metricas-horno?limite=10"
+```
+
+```json
+{
+  "success": true, "message": "Métricas del horno",
+  "data": { "metricas": [ { "id": "...", "temp_horno_1": 195.5, "received_at": "..." } ] }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de POST/GET |
+| 401 | Token de dispositivo inválido (POST) o credencial dual inválida (GET) |
+| 400 | JSON inválido o `confianza_deteccion` fuera de `[0,1]` |
+| 403 | POST: el lote pertenece a otro sector (`lote_ajeno`) |
+| 404 | Lote no encontrado; POST además devuelve `sin_sector` si el dispositivo no tiene sector |
+| 409 | POST: el lote no está ABIERTO (`lote_no_abierto`) |
+| 500 | Error interno |
+
+---
+
+## 30. `GET /api/v1/lotes/{id}/control/events` — SSE de propuestas del MPC
+
+Stream `text/event-stream` con los eventos `control.propuesta` del lote
+indicado. El broker es global y el handler filtra por `lote_id`.
+
+**Auth:** cookie JWT `session_token` (cualquier rol autenticado). El proxy del
+frontend debe reenviar la cookie también en SSE.
+
+```bash
+curl -N -b "session_token=$JWT" \
+  http://localhost:8080/api/v1/lotes/$LOTE/control/events
+```
+
+```
+: connected lote=d1a2b3c4-...
+
+event: control.propuesta
+data: {"lote_id":"d1a2b3c4-...","propuesta":{"temp1":196,"velocidad":0.22,"z":0.03,"prediccion":{"pctCrudos":1.1,"pctOk":96.8,"pctQuemados":2.1,"modelVersion":"v3","esPlaceholder":false}},"decision_id":"8f14e45f-...","autorizada":true,"ventana":"2026-11-03T11:55:00Z"}
+
+: heartbeat
+```
+
+`autorizada` es `true` en AUTOMATICO y `false` en SUPERVISION hasta la
+aprobación. Se manda `: heartbeat` cada 30s.
+
+| Código | Motivo |
+|---|---|
+| 405 (texto plano) | Método distinto de GET |
+| 401 (JSON) | Falta la cookie JWT o la sesión es inválida/expirada |
+| 500 (texto plano) | El cliente HTTP no soporta streaming |
+
+---
+
 ## Tabla resumen: auth y validaciones por endpoint
 
 | Endpoint | Auth | Content-Type obligatorio | Límite body 1MB |
@@ -825,5 +1385,18 @@ Si la DB no responde: `503` con `{ "status": "unhealthy", "reason": "database un
 | `POST /api/v1/horno/consigna` | JWT cookie, Operario/Supervisor/Admin | ✅ | ✅ |
 | `GET /api/v1/dispositivos` | JWT cookie (`session_token`) | — | — |
 | `GET /api/v1/dispositivos/metricas` | JWT cookie (`session_token`) | — | — |
-| `GET /*/events` (los 3 SSE) | JWT cookie (`session_token`) | — | — |
+| `GET /api/v1/lotes/{id}/control/estado` | JWT cookie | — | — |
+| `PATCH /api/v1/lotes/{id}/modo` | JWT cookie, Supervisor/Admin | ✅ | ✅ |
+| `PUT /api/v1/lotes/{id}/modo` | Bearer de dispositivo (dual-auth) | ✅ | ✅ |
+| `POST /api/v1/lotes/{id}/control/start` y `/stop` | JWT cookie, Supervisor/Admin | ❌ | ❌ |
+| `PATCH /api/v1/lotes/{id}/control/parametros` | JWT cookie, Supervisor/Admin | ✅ | ✅ |
+| `GET /api/v1/lotes/{id}/consigna-propuesta` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
+| `POST /api/v1/lotes/{id}/aplicar-consigna` | Dual (Bearer de dispositivo o JWT Operario+) | ✅ | ✅ |
+| `POST /api/v1/lotes/{id}/consigna/ack` | Bearer de dispositivo | ✅ | ✅ |
+| `GET /api/v1/lotes/{id}/decisiones` | JWT cookie | — | — |
+| `GET /api/v1/lotes/{id}/confianza-clases` | JWT cookie | — | — |
+| `POST /api/v1/lotes/{id}/metricas-horno` | Bearer de dispositivo | ✅ | ✅ |
+| `GET /api/v1/lotes/{id}/metricas-horno` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
+| `GET /api/v1/lotes/{id}/control/events` | JWT cookie (`session_token`) | — | — |
+| `GET /*/events` (los SSE) | JWT cookie (`session_token`) | — | — |
 | Otros `GET` | Según la sección del endpoint | — | — |

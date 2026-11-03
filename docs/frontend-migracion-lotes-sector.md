@@ -1,5 +1,12 @@
 # Migración del frontend — lotes por sector
 
+> ⚠️ **HISTÓRICO.** Este documento es el plan de migración original del panel
+> Next.js al contrato sector/lotes. Se conserva como registro; **no describe
+> todo el backend actual**. Después de esta migración se agregaron el control
+> MPC (SCA-400), `metricas-horno`, `decisiones`, `consigna-propuesta`,
+> `aplicar-consigna` y `consigna/ack`. Para el estado vigente usá
+> [`api-endpoints.md`](api-endpoints.md) y [`consigna-horno.md`](consigna-horno.md).
+
 El backend reemplazó el flujo de lotes legacy por el contrato **sector/lotes**
 (`docs/backend-go-lotes-sector.md`). Este documento es el plan de migración del
 panel Next.js (`frontend_smart-check-automation`).
@@ -9,7 +16,8 @@ panel Next.js (`frontend_smart-check-automation`).
 - `POST /api/v1/lotes` (alta de lote finalizado) → **eliminado** (405).
 - `GET /api/v1/lotes-productivos` (historial global) → **eliminado**.
 - `GET /api/v1/lotes-productivos/events` (SSE `lote.created`) → **eliminado**.
-- Auto-consigna (SCA-142) → eliminada; queda solo la consigna manual.
+- Auto-consigna (SCA-142) → eliminada. La consigna manual (SCA-320) quedó como
+  vía del panel; más tarde SCA-400 agregó el control MPC por lote.
 
 > Consecuencia: mientras el frontend no migre, el panel de lotes queda sin datos.
 > La migración del frontend es **obligatoria**, no opcional.

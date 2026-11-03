@@ -144,7 +144,16 @@ Lote abierto del sector, o `null`.
             "abierto_por": { "device_id": "f3e331e4-...", "type": "ENTRADA_HORNO" },
             "conteos": { "ok": 12, "crudo": null, "quemado": 2, "total": 14 },
             "ultimo_evento_en": "2026-09-23T10:20:00.000-03:00",
-            "inactividad_segundos": 12.5
+            "inactividad_segundos": 12.5,
+            "modo": "MANUAL",
+            "iniciado_manualmente": false,
+            "ventana_evaluacion_segundos": 600,
+            "ventana_actualizacion_segundos": 300,
+            "tolerancia_temp_c": 2.0,
+            "umbral_aceptacion_crudo": 5.0,
+            "umbral_aceptacion_quemado": 5.0,
+            "temp1_objetivo": null,
+            "vel_objetivo": null
         }
     },
     "errors": null
@@ -176,6 +185,14 @@ Request:
     "momento": "2026-09-23T10:15:30.123-03:00"
 }
 ```
+
+Desde SCA-400 el request acepta además los parámetros de operación del lote:
+`modo` (`MANUAL`/`SUPERVISION`/`AUTOMATICO`, default `MANUAL`),
+`iniciado_manualmente`, `ventana_evaluacion_segundos`,
+`ventana_actualizacion_segundos`, `tolerancia_temp_c`,
+`umbral_aceptacion_crudo`, `umbral_aceptacion_quemado`, `pesos_objetivo` y
+`estado_inicial`. Si el lote nace en modo no manual, el backend arranca el loop
+del MPC.
 
 Semántica **get-or-create por sector**, con máximo un lote `ABIERTO`:
 
@@ -255,7 +272,7 @@ Request:
 }
 ```
 
-`motivo` ∈ `sin_detecciones | manual | apagado` (el backend puede agregar `seguridad`).
+`motivo` ∈ `sin_detecciones | manual | apagado | seguridad`.
 
 - `conteos` es el **conteo final autoritativo** que envía la salida. Los estados que el
   modelo no produce van `null`. El backend puede compararlo con lo recibido en vivo y
@@ -424,8 +441,9 @@ El backend contaba con:
   `inicioAt`, `finAt`, `totalUnidades`, `correctos`, `quemados`, `crudas`, kg, etc.
   **Hoy responde `405 Method Not Allowed`.**
 - `POST /api/v1/lotes/inicio` — disparaba consigna automática al identificar el producto.
-  **Hoy abre/persiste el lote abierto del sector y ya no dispara consigna** (SCA-142
-  retirado; la consigna es manual-only vía `POST /api/v1/horno/consigna`).
+  **Hoy abre/persiste el lote abierto del sector y ya no dispara consigna**
+  (SCA-142 retirado; la consigna manual sigue en
+  `POST /api/v1/horno/consigna` y SCA-400 agregó el MPC por lote).
 - El listado global de lotes paginado — **eliminado**; el historial ahora es
   `GET /api/v1/lotes` por sector (§8).
 

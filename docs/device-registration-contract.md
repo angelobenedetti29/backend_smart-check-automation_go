@@ -65,8 +65,10 @@ Errores de aprobación: `404` solicitud inexistente, `409` no está `PENDING`,
 
 Endpoints device-only: `POST /api/v1/dispositivos/ping`,
 `POST /api/v1/lotes/inicio`, `POST /api/v1/lotes/{id}/eventos`,
-`POST /api/v1/lotes/{id}/cierre`, `GET /api/v1/dispositivos/sector` y
-`PUT /api/v1/dispositivos/nombre`. El middleware `internal/controller/devicetoken` corre
+`POST /api/v1/lotes/{id}/cierre`, `POST /api/v1/lotes/{id}/metricas-horno`,
+`POST /api/v1/lotes/{id}/consigna/ack`, `GET /api/v1/dispositivos/sector` y
+`PUT /api/v1/dispositivos/nombre`. `PUT /api/v1/lotes/{id}/modo` también acepta
+el Bearer de la Pi (dual-auth con cookie JWT). El middleware `internal/controller/devicetoken` corre
 antes del `ServeMux`, exige exactamente un header `Authorization: Bearer <token>`,
 hashea el token y resuelve el dispositivo activo por `secret_hash`. El principal
 (`deviceauth.Principal{DeviceID}`) se inyecta en el contexto: los handlers y

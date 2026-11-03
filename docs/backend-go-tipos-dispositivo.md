@@ -43,7 +43,9 @@ Reglas:
   (rename del nodo) tocan `tipo`. Si una Raspberry necesita otro tipo, se registra de
   nuevo con el nuevo tipo; eso crea una fila de dispositivo nueva.
 - Compatibilidad: la columna admite `NULL` para dispositivos legados creados antes de
-  este cambio. Las altas nuevas (registro y panel) siempre exigen tipo.
+  este cambio. Las altas nuevas por el flujo de registro siempre exigen tipo; el
+  alta manual por panel no está expuesta (`POST /api/v1/dispositivos` responde
+  `405`).
 
 ## 3. Consulta de la solicitud — devolver `type`
 
