@@ -35,7 +35,7 @@ ni clave pública.
    el `secret` y no se repite en pickups posteriores):
    `{"status":"APPROVED","device_id":"<uuid>","secret":"<secret>","rename_token":"<hex>","type":"ENTRADA_HORNO"}`.
    El `rename_token` es la credencial Bearer que el backend usa para empujar el
-   renombre al nodo (`PUT {rename_url}/api/v1/dispositivos/nombre`). La
+   renombre al nodo (`PUT {rename_url}/api/v1/dispositivos/{id}/nombre`). La
    `rename_url` NO viaja en el pickup: el nodo ya conoce su propia URL.
 6. **El nodo ya está registrado** — envía `Authorization: Bearer <secret>`. El
    backend hashea el secret y busca el dispositivo activo por `secret_hash`, así
@@ -67,7 +67,7 @@ Endpoints device-only: `POST /api/v1/dispositivos/ping`,
 `POST /api/v1/lotes/inicio`, `POST /api/v1/lotes/{id}/eventos`,
 `POST /api/v1/lotes/{id}/cierre`, `POST /api/v1/lotes/{id}/metricas-horno`,
 `POST /api/v1/lotes/{id}/consigna/ack`, `GET /api/v1/dispositivos/sector` y
-`PUT /api/v1/dispositivos/nombre`. `PUT /api/v1/lotes/{id}/modo` también acepta
+`PUT /api/v1/dispositivos/{id}/nombre`. `PUT /api/v1/lotes/{id}/modo` también acepta
 el Bearer de la Pi (dual-auth con cookie JWT). El middleware `internal/controller/devicetoken` corre
 antes del `ServeMux`, exige exactamente un header `Authorization: Bearer <token>`,
 hashea el token y resuelve el dispositivo activo por `secret_hash`. El principal
