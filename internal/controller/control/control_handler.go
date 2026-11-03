@@ -51,11 +51,6 @@ import (
 
 // ControlHandler agrupa los handlers del control.
 type ControlHandler struct {
-	registry       *LoopRegistry
-	decisionesRepo decisiones_control.Repository
-	loteLookup     LoteLookupService
-	// deps conserva el set completo de dependencias para los handlers que no
-	// reciben deps por parámetro (p.ej. HandleModeChange, que arranca un Loop).
 	deps ControlDeps
 }
 
@@ -174,17 +169,12 @@ func NewControlHandler(deps ControlDeps) *ControlHandler {
 			panic(fmt.Errorf("NewControlHandler: required dep %s is nil", r.name))
 		}
 	}
-	return &ControlHandler{
-		registry:       deps.LoopCancels,
-		decisionesRepo: deps.DecisionesRepo,
-		loteLookup:     deps.LoteLookup,
-		deps:           deps,
-	}
+	return &ControlHandler{deps: deps}
 }
 
 // HandleControlStart maneja POST /api/v1/lotes/{id}/control/start.
 // Crea un Loop en memoria si el modo != MANUAL y el horno lo requiere.
-func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
+func (h *ControlHandler) HandleControlStart() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
@@ -200,7 +190,7 @@ func (h *ControlHandler) HandleControlStart(deps ControlDeps) http.HandlerFunc {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
 		}
-		lote, err := deps.LoteLookup.GetByID(r.Context(), loteID)
+		lote, err := h.deps.LoteLookup.GetByID(r.Context(), loteID)
 		if err != nil {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
@@ -241,10 +231,10 @@ func (h *ControlHandler) EnsureLoopForLoteEnFase(ctx context.Context, lote *lote
 	if lote == nil || lote.Estado != lotesector.EstadoAbierto || lote.Modo == lotesector.ModoManual {
 		return nil
 	}
-	if _, ok := h.registry.GetLoop(lote.ID); ok {
+	if _, ok := h.deps.LoopCancels.GetLoop(lote.ID); ok {
 		return nil
 	}
-	return h.startLoopForLote(ctx, h.deps, lote, fase)
+	return h.startLoopForLote(ctx, lote, fase)
 }
 
 // startLoopForLote arranca un Loop de control para el lote con la configuración
@@ -252,8 +242,8 @@ func (h *ControlHandler) EnsureLoopForLoteEnFase(ctx context.Context, lote *lote
 // previo del mismo lote. El contexto del loop es propio (no el de la request):
 // si se atara a r.Context(), el servidor lo cancelaría al responder y mataría
 // el control (regresión F-B2). Devuelve error si el producto del lote no existe.
-func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps, lote *lotesector.Lote, faseInicial string) error {
-	prod, err := deps.ProductoRepo.GetByID(ctx, lote.ProductoID)
+func (h *ControlHandler) startLoopForLote(ctx context.Context, lote *lotesector.Lote, faseInicial string) error {
+	prod, err := h.deps.ProductoRepo.GetByID(ctx, lote.ProductoID)
 	if err != nil {
 		return err
 	}
@@ -265,14 +255,14 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps,
 	limites := optimizador.LimitesDe(prod, lote)
 	loopCtx, cancel := context.WithCancel(context.Background())
 	loop := control.NewLoop(
-		lote.ID, deps.LoteLookup,
-		deps.MetricasRepo,
-		deps.EventosRepo,
-		deps.ProductoRepo,
-		deps.Optimizer,
-		deps.Consigna,
-		deps.DecisionesRepo,
-		deps.Broker,
+		lote.ID, h.deps.LoteLookup,
+		h.deps.MetricasRepo,
+		h.deps.EventosRepo,
+		h.deps.ProductoRepo,
+		h.deps.Optimizer,
+		h.deps.Consigna,
+		h.deps.DecisionesRepo,
+		h.deps.Broker,
 	)
 	loop.Configurar(
 		prod.ID, lote.Modo, hornoID,
@@ -306,12 +296,12 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, deps ControlDeps,
 	if seg, perr := strconv.Atoi(os.Getenv("MPC_PREHEAT_POLL_SEGUNDOS")); perr == nil {
 		loop.SetPreheatPoll(seg)
 	}
-	loop.SetAlertas(deps.Alertas)
+	loop.SetAlertas(h.deps.Alertas)
 	if faseInicial != "" {
 		loop.SetFaseInicial(faseInicial)
 	}
-	deps.LoopCancels.Register(lote.ID, loopCtx, cancel)
-	deps.LoopCancels.SetLoop(lote.ID, loop)
+	h.deps.LoopCancels.Register(lote.ID, loopCtx, cancel)
+	h.deps.LoopCancels.SetLoop(lote.ID, loop)
 	loop.Start(loopCtx, cancel)
 	return nil
 }
@@ -331,7 +321,7 @@ func (h *ControlHandler) ResumeLotesAbiertos(ctx context.Context) {
 		if lote.Modo == lotesector.ModoManual {
 			continue
 		}
-		if _, ok := h.registry.GetLoop(lote.ID); ok {
+		if _, ok := h.deps.LoopCancels.GetLoop(lote.ID); ok {
 			continue
 		}
 		if err := h.EnsureLoopForLoteEnFase(ctx, lote, control.FaseAdaptando); err != nil {
@@ -359,7 +349,7 @@ func (h *ControlHandler) auditarReanudacion(ctx context.Context, lote *lotesecto
 		AplicadoPor:  decisiones_control.AplicadoPorNadie,
 		RazonSkipped: &skipped,
 	}
-	if err := h.decisionesRepo.Save(ctx, decision); err != nil {
+	if err := h.deps.DecisionesRepo.Save(ctx, decision); err != nil {
 		log.Printf("[control] audit reanudación lote %s: %v", lote.ID, err)
 	}
 }
@@ -382,7 +372,7 @@ func (h *ControlHandler) HandleControlStop() http.HandlerFunc {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
 		}
-		if !h.registry.StopLoop(loteID) {
+		if !h.deps.LoopCancels.StopLoop(loteID) {
 			response.OK(w, "Sin loop activo", map[string]interface{}{"lote_id": loteID, "stopped": false, "motivo": "no_loop_activo"})
 			return
 		}
@@ -407,13 +397,13 @@ func (h *ControlHandler) HandleControlEstado(w http.ResponseWriter, r *http.Requ
 		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 		return
 	}
-	lote, err := h.loteLookup.GetByID(r.Context(), loteID)
+	lote, err := h.deps.LoteLookup.GetByID(r.Context(), loteID)
 	if err != nil || lote == nil {
 		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 		return
 	}
 	var startedAt *time.Time
-	if t, ok := h.registry.StartedAt(loteID); ok {
+	if t, ok := h.deps.LoopCancels.StartedAt(loteID); ok {
 		startedAt = &t
 	}
 	response.OK(w, "Estado del control", controlEstadoData{
@@ -472,7 +462,7 @@ func (h *ControlHandler) HandleConfianzaClases(w http.ResponseWriter, r *http.Re
 		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 		return
 	}
-	if lote, lerr := h.loteLookup.GetByID(r.Context(), loteID); lerr != nil || lote == nil {
+	if lote, lerr := h.deps.LoteLookup.GetByID(r.Context(), loteID); lerr != nil || lote == nil {
 		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 		return
 	}
@@ -539,7 +529,7 @@ func (h *ControlHandler) HandleModeChange(w http.ResponseWriter, r *http.Request
 		response.Error(w, http.StatusBadRequest, "Modo inválido", nil)
 		return
 	}
-	lote, err := h.loteLookup.GetByID(r.Context(), loteID)
+	lote, err := h.deps.LoteLookup.GetByID(r.Context(), loteID)
 	if err != nil || lote == nil {
 		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 		return
@@ -612,12 +602,12 @@ func (h *ControlHandler) HandleModeChange(w http.ResponseWriter, r *http.Request
 	lote.Modo = nuevo
 	// Cancelar el loop viejo si existe, en todos los casos: MANUAL no levanta
 	// loop nuevo y SUPERVISION/AUTOMATICO lo levantan a continuación.
-	h.registry.StopLoop(loteID)
+	h.deps.LoopCancels.StopLoop(loteID)
 	// Auditoría secundaria: un fallo de Save no bloquea el cambio de modo.
 	h.auditarCambioModo(r.Context(), lote, anterior, nuevo)
 	loopActivo := false
 	if nuevo != lotesector.ModoManual {
-		if err := h.startLoopForLote(r.Context(), h.deps, lote, ""); err != nil {
+		if err := h.startLoopForLote(r.Context(), lote, ""); err != nil {
 			log.Printf("[control] arrancando loop tras cambio de modo lote %s: %v", loteID, err)
 		} else {
 			loopActivo = true
@@ -651,7 +641,7 @@ func (h *ControlHandler) auditarCambioModo(ctx context.Context, lote *lotesector
 		AplicadoPor:   decisiones_control.AplicadoPorNadie,
 		RazonSkipped:  &skipped,
 	}
-	if err := h.decisionesRepo.Save(ctx, decision); err != nil {
+	if err := h.deps.DecisionesRepo.Save(ctx, decision); err != nil {
 		log.Printf("[control] audit cambio de modo lote %s (%s→%s): %v", lote.ID, anterior, nuevo, err)
 	}
 }
@@ -712,7 +702,7 @@ func (h *ControlHandler) HandleTuning(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lote, err := h.loteLookup.GetByID(r.Context(), loteID)
+	lote, err := h.deps.LoteLookup.GetByID(r.Context(), loteID)
 	if err != nil || lote == nil {
 		response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 		return
@@ -856,8 +846,8 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 	// resolver, se sirve la propuesta con TTL 0 sin bloquear el endpoint.
 	ttl := 0
 	var lote *lotesector.Lote
-	if h.loteLookup != nil {
-		if l, err := h.loteLookup.GetByID(r.Context(), loteID); err == nil && l != nil {
+	if h.deps.LoteLookup != nil {
+		if l, err := h.deps.LoteLookup.GetByID(r.Context(), loteID); err == nil && l != nil {
 			lote = l
 			ttl = lote.VentanaActualizacionSegundos
 		}
@@ -865,8 +855,8 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 	limites := h.limitesDe(r.Context(), lote)
 
 	// 1. Propuesta en memoria del loop activo (lectura no destructiva).
-	if h.registry != nil {
-		if loopAny, ok := h.registry.GetLoop(loteID); ok {
+	if h.deps.LoopCancels != nil {
+		if loopAny, ok := h.deps.LoopCancels.GetLoop(loteID); ok {
 			if loop, ok := loopAny.(propuestaProvider); ok {
 				if snap := loop.PropuestaPendiente(ttl); snap != nil {
 					response.OK(w, "Consigna propuesta", consignaPropuestaResponse{
@@ -889,11 +879,11 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 
 	// 2. Fallback: última decisión pendiente persistida (SUPERVISION o
 	// AUTOMATICO con actuador "pi" esperando el ack del nodo).
-	if h.decisionesRepo == nil {
+	if h.deps.DecisionesRepo == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	d, err := h.decisionesRepo.GetUltimaPendiente(r.Context(), loteID)
+	d, err := h.deps.DecisionesRepo.GetUltimaPendiente(r.Context(), loteID)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
 		return
@@ -949,7 +939,7 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 // operario del panel (JWT) o la propia Pi (Bearer de dispositivo). Con el
 // actuador "backend" además despacha; con "pi" sólo autoriza y responde, y la
 // aplicación real llega después por /consigna/ack.
-func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFunc {
+func (h *ControlHandler) HandleAplicarConsigna() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
@@ -976,7 +966,7 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 			DecisionID string `json:"decision_id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		lote, err := deps.LoteLookup.GetByID(r.Context(), loteID)
+		lote, err := h.deps.LoteLookup.GetByID(r.Context(), loteID)
 		if err != nil || lote == nil {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
@@ -990,7 +980,7 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 			return
 		}
 		if isDevice {
-			info, serr := deps.DeviceSector.SectorDelDispositivo(r.Context(), principal.DeviceID)
+			info, serr := h.deps.DeviceSector.SectorDelDispositivo(r.Context(), principal.DeviceID)
 			if serr != nil || info == nil {
 				response.Error(w, http.StatusForbidden, "El dispositivo no tiene sector asignado", nil)
 				return
@@ -1012,7 +1002,7 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 		} else if isDevice {
 			usuario = "dispositivo:" + principal.DeviceID
 		}
-		d, err := deps.DecisionesRepo.GetUltimaPendiente(r.Context(), loteID)
+		d, err := h.deps.DecisionesRepo.GetUltimaPendiente(r.Context(), loteID)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
 			return
@@ -1025,12 +1015,12 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 			response.Error(w, http.StatusConflict, "La propuesta cambió; recargá antes de aprobar", nil)
 			return
 		}
-		loopAny, ok := h.registry.GetLoop(loteID)
+		loopAny, ok := h.deps.LoopCancels.GetLoop(loteID)
 		loop, isLoop := loopAny.(*control.Loop)
 		if ok && isLoop && loop.Actuador() == "backend" {
 			// Lab/debug: el backend también despacha. Una fila ya aprobada no
 			// es un error: el dispatch sigue siendo idempotente por consigna.
-			if aerr := deps.DecisionesRepo.Aprobar(r.Context(), d.ID, usuario); aerr != nil && !errors.Is(aerr, decisiones_control.ErrSinPendiente) {
+			if aerr := h.deps.DecisionesRepo.Aprobar(r.Context(), d.ID, usuario); aerr != nil && !errors.Is(aerr, decisiones_control.ErrSinPendiente) {
 				response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
 				return
 			}
@@ -1052,7 +1042,7 @@ func (h *ControlHandler) HandleAplicarConsigna(deps ControlDeps) http.HandlerFun
 			return
 		}
 		// Actuador "pi" (o sin loop en memoria): sólo se autoriza la propuesta.
-		if err := deps.DecisionesRepo.Aprobar(r.Context(), d.ID, usuario); err != nil {
+		if err := h.deps.DecisionesRepo.Aprobar(r.Context(), d.ID, usuario); err != nil {
 			if errors.Is(err, decisiones_control.ErrSinPendiente) {
 				response.Error(w, http.StatusConflict, "No hay propuesta pendiente", nil)
 				return
@@ -1090,7 +1080,7 @@ type consignaAckRequest struct {
 // HandleConsignaAck maneja POST /api/v1/lotes/{id}/consigna/ack: la Pi confirma
 // que aplicó la propuesta y con qué setpoints. Idempotente (un reenvío del ack
 // vuelve a responder 200).
-func (h *ControlHandler) HandleConsignaAck(deps ControlDeps) http.HandlerFunc {
+func (h *ControlHandler) HandleConsignaAck() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
@@ -1115,7 +1105,7 @@ func (h *ControlHandler) HandleConsignaAck(deps ControlDeps) http.HandlerFunc {
 			response.Error(w, http.StatusBadRequest, "Faltan decision_id, temp_aplicado o vel_aplicado", nil)
 			return
 		}
-		lote, err := deps.LoteLookup.GetByID(r.Context(), loteID)
+		lote, err := h.deps.LoteLookup.GetByID(r.Context(), loteID)
 		if err != nil || lote == nil {
 			response.Error(w, http.StatusNotFound, "Lote no encontrado", nil)
 			return
@@ -1124,7 +1114,7 @@ func (h *ControlHandler) HandleConsignaAck(deps ControlDeps) http.HandlerFunc {
 			response.Error(w, http.StatusConflict, "Lote no está abierto", nil)
 			return
 		}
-		info, serr := deps.DeviceSector.SectorDelDispositivo(r.Context(), principal.DeviceID)
+		info, serr := h.deps.DeviceSector.SectorDelDispositivo(r.Context(), principal.DeviceID)
 		if serr != nil || info == nil {
 			response.Error(w, http.StatusForbidden, "El dispositivo no tiene sector asignado", nil)
 			return
@@ -1133,7 +1123,7 @@ func (h *ControlHandler) HandleConsignaAck(deps ControlDeps) http.HandlerFunc {
 			response.Error(w, http.StatusForbidden, "El dispositivo no pertenece al sector del lote", nil)
 			return
 		}
-		d, err := deps.DecisionesRepo.GetByID(r.Context(), body.DecisionID)
+		d, err := h.deps.DecisionesRepo.GetByID(r.Context(), body.DecisionID)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
 			return
@@ -1150,10 +1140,10 @@ func (h *ControlHandler) HandleConsignaAck(deps ControlDeps) http.HandlerFunc {
 		if lote.Modo == lotesector.ModoAutomatico {
 			aplicadoPor = decisiones_control.AplicadoPorMPC
 		}
-		if err := deps.DecisionesRepo.MarcarAplicada(r.Context(), d.ID, *body.TempAplicado, *body.VelAplicado, aplicadoPor); err != nil {
+		if err := h.deps.DecisionesRepo.MarcarAplicada(r.Context(), d.ID, *body.TempAplicado, *body.VelAplicado, aplicadoPor); err != nil {
 			// Sin sentinel de "no encontrada" en el repo: desambiguamos
 			// releyendo la fila.
-			if actual, _ := deps.DecisionesRepo.GetByID(r.Context(), d.ID); actual == nil {
+			if actual, _ := h.deps.DecisionesRepo.GetByID(r.Context(), d.ID); actual == nil {
 				response.Error(w, http.StatusNotFound, "Decisión no encontrada", nil)
 				return
 			}
@@ -1162,10 +1152,10 @@ func (h *ControlHandler) HandleConsignaAck(deps ControlDeps) http.HandlerFunc {
 		}
 		// Best-effort: el ack ya es válido; si falla el espejo de setpoints
 		// sólo se loguea.
-		if err := deps.LoteRepo.UpdateSetpointsAplicados(r.Context(), loteID, *body.TempAplicado, *body.VelAplicado); err != nil {
+		if err := h.deps.LoteRepo.UpdateSetpointsAplicados(r.Context(), loteID, *body.TempAplicado, *body.VelAplicado); err != nil {
 			log.Printf("[control] actualizando setpoints del lote %s tras ack: %v", loteID, err)
 		}
-		if loopAny, ok := h.registry.GetLoop(loteID); ok {
+		if loopAny, ok := h.deps.LoopCancels.GetLoop(loteID); ok {
 			if clearer, ok := loopAny.(propuestaClearer); ok {
 				clearer.ClearPropuesta(d.ID)
 			}

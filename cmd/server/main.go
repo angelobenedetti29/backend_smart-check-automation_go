@@ -293,11 +293,11 @@ func main() {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
 			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, metricasHornoHandler.HandleUltimas)(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/consigna/ack"):
-			controlHandler.HandleConsignaAck(controlDeps)(w, r)
+			controlHandler.HandleConsignaAck()(w, r)
 
 		// --- panel (JWT cookie) ---
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/start"):
-			jwtWrap(controlHandler.HandleControlStart(controlDeps))(w, r)
+			jwtWrap(controlHandler.HandleControlStart())(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
 			jwtWrap(controlHandler.HandleControlStop())(w, r)
 		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/control/parametros"):
@@ -317,7 +317,7 @@ func main() {
 			jwtWrap(controlHandler.HandleConfianzaClases)(w, r)
 		case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/aplicar-consigna") || strings.HasSuffix(r.URL.Path, "/aprobar-consigna")):
 			// Aprueba el operario (cookie) o la propia Pi (Bearer).
-			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, controlHandler.HandleAplicarConsigna(controlDeps))(w, r)
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, controlHandler.HandleAplicarConsigna())(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/decisiones"):
 			jwtWrap(decisionesHandler.Handle)(w, r)
 

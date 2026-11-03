@@ -354,11 +354,11 @@ type consignaEnvelope struct {
 // TestHandleConsignaPropuestaSinLoopSinDecisionDevuelve204 verifica el caso
 // vacío: sin loop y sin decisión pendiente en DB.
 func TestHandleConsignaPropuestaSinLoopSinDecisionDevuelve204(t *testing.T) {
-	h := &ControlHandler{
-		registry:       NewLoopRegistry(),
-		decisionesRepo: &fakeDecisionesRepo{pendiente: nil},
-		loteLookup:     &fakeLoteLookup{lote: &lotesector.Lote{VentanaActualizacionSegundos: 30}},
-	}
+	h := &ControlHandler{deps: ControlDeps{
+		LoopCancels:    NewLoopRegistry(),
+		DecisionesRepo: &fakeDecisionesRepo{pendiente: nil},
+		LoteLookup:     &fakeLoteLookup{lote: &lotesector.Lote{VentanaActualizacionSegundos: 30}},
+	}}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/lotes/lote-1/consigna-propuesta", nil)
 	h.HandleConsignaPropuesta(rec, req)
@@ -383,11 +383,11 @@ func TestHandleConsignaPropuestaConLoopConPropuestaDevuelve200(t *testing.T) {
 	fl := &fakeLoop{snap: snap}
 	reg := NewLoopRegistry()
 	reg.SetLoop("lote-1", fl)
-	h := &ControlHandler{
-		registry:       reg,
-		decisionesRepo: &fakeDecisionesRepo{},
-		loteLookup:     &fakeLoteLookup{lote: &lotesector.Lote{VentanaActualizacionSegundos: 30}},
-	}
+	h := &ControlHandler{deps: ControlDeps{
+		LoopCancels:    reg,
+		DecisionesRepo: &fakeDecisionesRepo{},
+		LoteLookup:     &fakeLoteLookup{lote: &lotesector.Lote{VentanaActualizacionSegundos: 30}},
+	}}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/lotes/lote-1/consigna-propuesta", nil)
@@ -439,14 +439,14 @@ func TestHandleConsignaPropuestaConLoopVacioFallbackDB(t *testing.T) {
 		VentanaFin:    time.Unix(400, 0).UTC(),
 		CreatedAt:     time.Now().UTC(),
 	}}
-	h := &ControlHandler{
-		registry:       reg,
-		decisionesRepo: repo,
-		loteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
+	h := &ControlHandler{deps: ControlDeps{
+		LoopCancels:    reg,
+		DecisionesRepo: repo,
+		LoteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
 			Estado:                       lotesector.EstadoAbierto,
 			Modo:                         lotesector.ModoSupervision,
 			VentanaActualizacionSegundos: 45,
-		}},
+		}}},
 	}
 
 	rec := httptest.NewRecorder()
@@ -480,14 +480,14 @@ func TestHandleConsignaPropuestaFallbackRechazaLoteCerrado(t *testing.T) {
 		VelPropuesto:  0.4,
 		CreatedAt:     time.Now().UTC(),
 	}}
-	h := &ControlHandler{
-		registry:       NewLoopRegistry(),
-		decisionesRepo: repo,
-		loteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
+	h := &ControlHandler{deps: ControlDeps{
+		LoopCancels:    NewLoopRegistry(),
+		DecisionesRepo: repo,
+		LoteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
 			Estado:                       lotesector.EstadoCerrado,
 			Modo:                         lotesector.ModoSupervision,
 			VentanaActualizacionSegundos: 60,
-		}},
+		}}},
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/lotes/lote-1/consigna-propuesta", nil)
@@ -506,14 +506,14 @@ func TestHandleConsignaPropuestaFallbackRechazaModoManual(t *testing.T) {
 		VelPropuesto:  0.4,
 		CreatedAt:     time.Now().UTC(),
 	}}
-	h := &ControlHandler{
-		registry:       NewLoopRegistry(),
-		decisionesRepo: repo,
-		loteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
+	h := &ControlHandler{deps: ControlDeps{
+		LoopCancels:    NewLoopRegistry(),
+		DecisionesRepo: repo,
+		LoteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
 			Estado:                       lotesector.EstadoAbierto,
 			Modo:                         lotesector.ModoManual,
 			VentanaActualizacionSegundos: 60,
-		}},
+		}}},
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/lotes/lote-1/consigna-propuesta", nil)
@@ -532,14 +532,14 @@ func TestHandleConsignaPropuestaFallbackRespetaTTL(t *testing.T) {
 		VelPropuesto:  0.4,
 		CreatedAt:     time.Now().UTC().Add(-10 * time.Minute),
 	}}
-	h := &ControlHandler{
-		registry:       NewLoopRegistry(),
-		decisionesRepo: repo,
-		loteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
+	h := &ControlHandler{deps: ControlDeps{
+		LoopCancels:    NewLoopRegistry(),
+		DecisionesRepo: repo,
+		LoteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
 			Estado:                       lotesector.EstadoAbierto,
 			Modo:                         lotesector.ModoSupervision,
 			VentanaActualizacionSegundos: 60,
-		}},
+		}}},
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/lotes/lote-1/consigna-propuesta", nil)
@@ -584,14 +584,14 @@ func TestHandleConsignaPropuestaFallbackAutorizacion(t *testing.T) {
 				CreatedAt:     time.Now().UTC(),
 				AprobadaPor:   tc.aprobadaPor,
 			}}
-			h := &ControlHandler{
-				registry:       NewLoopRegistry(),
-				decisionesRepo: repo,
-				loteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
+			h := &ControlHandler{deps: ControlDeps{
+				LoopCancels:    NewLoopRegistry(),
+				DecisionesRepo: repo,
+				LoteLookup: &fakeLoteLookup{lote: &lotesector.Lote{
 					Estado:                       tc.estado,
 					Modo:                         tc.modo,
 					VentanaActualizacionSegundos: 60,
-				}},
+				}}},
 			}
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/lotes/lote-1/consigna-propuesta", nil)
@@ -670,7 +670,7 @@ func TestHandleControlStartLoopSobreviveCierreRequest(t *testing.T) {
 
 	// Un server real cancela el contexto de la request cuando ServeHTTP retorna;
 	// así reproducimos el escenario de producción.
-	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleControlStart(deps)))
+	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleControlStart()))
 	defer srv.Close()
 	defer reg.StopAll()
 
@@ -728,7 +728,7 @@ func newModeChangeHandler(t *testing.T, lote *lotesector.Lote, loteRepo *fakeLot
 	secret := []byte("mode-change-test-secret-1234567890")
 	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleModeChange))
 	t.Cleanup(srv.Close)
-	t.Cleanup(h.registry.StopAll)
+	t.Cleanup(h.deps.LoopCancels.StopAll)
 	return h, srv, secret
 }
 
@@ -778,7 +778,7 @@ func TestHandleModeChangeNoopDevuelve200(t *testing.T) {
 	if saved := dec.savedSnapshot(); len(saved) != 0 {
 		t.Fatalf("no debe auditar un no-op; saved=%d", len(saved))
 	}
-	if _, ok := h.registry.GetLoop("lote-1"); ok {
+	if _, ok := h.deps.LoopCancels.GetLoop("lote-1"); ok {
 		t.Fatalf("el no-op no debe registrar loop")
 	}
 }
@@ -795,8 +795,8 @@ func TestHandleModeChangeAMANUALCancelaLoop(t *testing.T) {
 	h, srv, secret := newModeChangeHandler(t, lote, repo, dec)
 
 	loopCtx, loopCancel := context.WithCancel(context.Background())
-	h.registry.Register("lote-1", loopCtx, loopCancel)
-	h.registry.SetLoop("lote-1", &fakeLoop{})
+	h.deps.LoopCancels.Register("lote-1", loopCtx, loopCancel)
+	h.deps.LoopCancels.SetLoop("lote-1", &fakeLoop{})
 
 	status, env := patchModo(t, srv, secret, user.RoleSupervisor, `{"modo":"MANUAL"}`)
 	if status != http.StatusOK {
@@ -808,7 +808,7 @@ func TestHandleModeChangeAMANUALCancelaLoop(t *testing.T) {
 	if env.Data.LoopActivo {
 		t.Fatalf("MANUAL no debe dejar loop activo")
 	}
-	if _, ok := h.registry.GetLoop("lote-1"); ok {
+	if _, ok := h.deps.LoopCancels.GetLoop("lote-1"); ok {
 		t.Fatalf("el loop viejo debe quedar desregistrado")
 	}
 	select {
@@ -856,7 +856,7 @@ func TestHandleModeChangeASupervisionArrancaLoop(t *testing.T) {
 	if !env.Data.LoopActivo {
 		t.Fatalf("SUPERVISION debe dejar loop activo")
 	}
-	if _, ok := h.registry.GetLoop("lote-1"); !ok {
+	if _, ok := h.deps.LoopCancels.GetLoop("lote-1"); !ok {
 		t.Fatalf("debe quedar un loop registrado")
 	}
 	if repo.updateCalls != 1 || repo.updatedModo != lotesector.ModoSupervision {
@@ -955,7 +955,7 @@ func TestHandleModeChangeDevicePutActualizaModo(t *testing.T) {
 	}}
 	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-1"}}
 	h := NewControlHandler(deps)
-	t.Cleanup(h.registry.StopAll)
+	t.Cleanup(h.deps.LoopCancels.StopAll)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/lotes/lote-1/modo", strings.NewReader(`{"modo":"AUTOMATICO"}`))
 	req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "dev-1"}))
@@ -968,7 +968,7 @@ func TestHandleModeChangeDevicePutActualizaModo(t *testing.T) {
 	if repo.updateCalls != 1 || repo.updatedModo != lotesector.ModoAutomatico {
 		t.Fatalf("UpdateModo mal llamado: calls=%d modo=%q", repo.updateCalls, repo.updatedModo)
 	}
-	if _, ok := h.registry.GetLoop("lote-1"); !ok {
+	if _, ok := h.deps.LoopCancels.GetLoop("lote-1"); !ok {
 		t.Fatalf("AUTOMATICO debe dejar loop registrado")
 	}
 }
@@ -986,7 +986,7 @@ func TestHandleModeChangeDevicePutOtroSector(t *testing.T) {
 	deps.LoteRepo = repo
 	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-2"}}
 	h := NewControlHandler(deps)
-	t.Cleanup(h.registry.StopAll)
+	t.Cleanup(h.deps.LoopCancels.StopAll)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/lotes/lote-1/modo", strings.NewReader(`{"modo":"AUTOMATICO"}`))
 	req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "dev-1"}))
@@ -1022,7 +1022,7 @@ func TestHandleModeChangeAuditSaveFallaNoBloquea(t *testing.T) {
 	if repo.updateCalls != 1 || repo.updatedModo != lotesector.ModoSupervision {
 		t.Fatalf("UpdateModo mal llamado: calls=%d modo=%q", repo.updateCalls, repo.updatedModo)
 	}
-	if _, ok := h.registry.GetLoop("lote-1"); !ok {
+	if _, ok := h.deps.LoopCancels.GetLoop("lote-1"); !ok {
 		t.Fatalf("el loop debe arrancar pese al fallo de audit")
 	}
 }
@@ -1380,7 +1380,7 @@ func TestEnsureLoopForLoteIdempotente(t *testing.T) {
 	if err := h.EnsureLoopForLote(context.Background(), lote); err != nil {
 		t.Fatalf("EnsureLoopForLote: %v", err)
 	}
-	got, ok := h.registry.GetLoop("lote-1")
+	got, ok := h.deps.LoopCancels.GetLoop("lote-1")
 	if !ok || got != any(existente) {
 		t.Fatalf("el loop existente no debe reemplazarse; got=%T", got)
 	}
@@ -1407,7 +1407,7 @@ func TestEnsureLoopForLoteSkip(t *testing.T) {
 			if err := h.EnsureLoopForLote(context.Background(), tc.lote); err != nil {
 				t.Fatalf("EnsureLoopForLote: %v", err)
 			}
-			if _, ok := h.registry.GetLoop("lote-1"); ok {
+			if _, ok := h.deps.LoopCancels.GetLoop("lote-1"); ok {
 				t.Fatalf("no debe arrancar loop para %s", tc.name)
 			}
 		})
@@ -1431,7 +1431,7 @@ func TestEnsureLoopForLoteArranca(t *testing.T) {
 			if err := h.EnsureLoopForLote(context.Background(), lote); err != nil {
 				t.Fatalf("EnsureLoopForLote: %v", err)
 			}
-			if _, ok := h.registry.GetLoop("lote-1"); !ok {
+			if _, ok := h.deps.LoopCancels.GetLoop("lote-1"); !ok {
 				t.Fatalf("debe arrancar loop para modo %s", modo)
 			}
 		})
@@ -1457,9 +1457,9 @@ func newAplicarServer(t *testing.T, deps ControlDeps) (*ControlHandler, *httptes
 	t.Helper()
 	h := NewControlHandler(deps)
 	secret := []byte("aplicar-consigna-test-secret-1234567890")
-	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleAplicarConsigna(deps)))
+	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleAplicarConsigna()))
 	t.Cleanup(srv.Close)
-	t.Cleanup(h.registry.StopAll)
+	t.Cleanup(h.deps.LoopCancels.StopAll)
 	return h, srv, secret
 }
 
@@ -1593,13 +1593,13 @@ func TestHandleAplicarConsignaDeviceValidaSector(t *testing.T) {
 	deps.DecisionesRepo = repo
 	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-2"}}
 	h := NewControlHandler(deps)
-	t.Cleanup(h.registry.StopAll)
+	t.Cleanup(h.deps.LoopCancels.StopAll)
 
 	doDevice := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/lotes/lote-1/aplicar-consigna", strings.NewReader(`{}`))
 		req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "dev-1"}))
 		rec := httptest.NewRecorder()
-		h.HandleAplicarConsigna(deps)(rec, req)
+		h.HandleAplicarConsigna()(rec, req)
 		return rec
 	}
 
@@ -1610,7 +1610,7 @@ func TestHandleAplicarConsignaDeviceValidaSector(t *testing.T) {
 		t.Fatalf("no debe aprobar con otro sector")
 	}
 
-	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-1"}}
+	h.deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: "s-1"}}
 	if rec := doDevice(); rec.Code != http.StatusOK {
 		t.Fatalf("mismo sector: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1631,23 +1631,23 @@ type ackEnvelope struct {
 
 const ackBody = `{"decision_id":"dec-1","temp_aplicado":180,"vel_aplicado":0.4}`
 
-func newAckTestHandler(t *testing.T, lote *lotesector.Lote, repo *fakeDecisionesRepo, sector string) (*ControlHandler, ControlDeps) {
+func newAckTestHandler(t *testing.T, lote *lotesector.Lote, repo *fakeDecisionesRepo, sector string) *ControlHandler {
 	t.Helper()
 	deps := validControlDeps()
 	deps.LoteLookup = &fakeLoteLookup{lote: lote}
 	deps.DecisionesRepo = repo
 	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: sector}}
 	h := NewControlHandler(deps)
-	t.Cleanup(h.registry.StopAll)
-	return h, deps
+	t.Cleanup(h.deps.LoopCancels.StopAll)
+	return h
 }
 
-func doAck(t *testing.T, h *ControlHandler, deps ControlDeps, body string) *httptest.ResponseRecorder {
+func doAck(t *testing.T, h *ControlHandler, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/lotes/lote-1/consigna/ack", strings.NewReader(body))
 	req = req.WithContext(deviceauth.WithPrincipal(req.Context(), deviceauth.Principal{DeviceID: "dev-1"}))
 	rec := httptest.NewRecorder()
-	h.HandleConsignaAck(deps)(rec, req)
+	h.HandleConsignaAck()(rec, req)
 	return rec
 }
 
@@ -1663,10 +1663,10 @@ func decodeAck(t *testing.T, rec *httptest.ResponseRecorder) ackEnvelope {
 // TestHandleConsignaAckRequiereDispositivo verifica el 401 sin principal.
 func TestHandleConsignaAckRequiereDispositivo(t *testing.T) {
 	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico}
-	h, deps := newAckTestHandler(t, lote, &fakeDecisionesRepo{}, "s-1")
+	h := newAckTestHandler(t, lote, &fakeDecisionesRepo{}, "s-1")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/lotes/lote-1/consigna/ack", strings.NewReader(ackBody))
 	rec := httptest.NewRecorder()
-	h.HandleConsignaAck(deps)(rec, req)
+	h.HandleConsignaAck()(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
@@ -1677,8 +1677,8 @@ func TestHandleConsignaAckRequiereDispositivo(t *testing.T) {
 func TestHandleConsignaAckValidaSector(t *testing.T) {
 	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico}
 	repo := &fakeDecisionesRepo{porID: &decisiones_control.DecisionControl{ID: "dec-1", LoteID: "lote-1"}}
-	h, deps := newAckTestHandler(t, lote, repo, "s-2")
-	if rec := doAck(t, h, deps, ackBody); rec.Code != http.StatusForbidden {
+	h := newAckTestHandler(t, lote, repo, "s-2")
+	if rec := doAck(t, h, ackBody); rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
 	if len(repo.marcarCalls) != 0 {
@@ -1691,8 +1691,8 @@ func TestHandleConsignaAckValidaSector(t *testing.T) {
 func TestHandleConsignaAckSupervisionSinAprobar409(t *testing.T) {
 	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision}
 	repo := &fakeDecisionesRepo{porID: &decisiones_control.DecisionControl{ID: "dec-1", LoteID: "lote-1"}}
-	h, deps := newAckTestHandler(t, lote, repo, "s-1")
-	if rec := doAck(t, h, deps, ackBody); rec.Code != http.StatusConflict {
+	h := newAckTestHandler(t, lote, repo, "s-1")
+	if rec := doAck(t, h, ackBody); rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	if len(repo.marcarCalls) != 0 {
@@ -1705,11 +1705,11 @@ func TestHandleConsignaAckSupervisionSinAprobar409(t *testing.T) {
 func TestHandleConsignaAckAutomaticoMarcaMPC(t *testing.T) {
 	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico}
 	repo := &fakeDecisionesRepo{porID: &decisiones_control.DecisionControl{ID: "dec-1", LoteID: "lote-1"}}
-	h, deps := newAckTestHandler(t, lote, repo, "s-1")
+	h := newAckTestHandler(t, lote, repo, "s-1")
 	fl := &fakeLoop{}
-	h.registry.SetLoop("lote-1", fl)
+	h.deps.LoopCancels.SetLoop("lote-1", fl)
 
-	rec := doAck(t, h, deps, ackBody)
+	rec := doAck(t, h, ackBody)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1731,9 +1731,9 @@ func TestHandleConsignaAckSupervisionMarcaOperario(t *testing.T) {
 	aprobada := "sup@fermar.com.ar"
 	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision}
 	repo := &fakeDecisionesRepo{porID: &decisiones_control.DecisionControl{ID: "dec-1", LoteID: "lote-1", AprobadaPor: &aprobada}}
-	h, deps := newAckTestHandler(t, lote, repo, "s-1")
+	h := newAckTestHandler(t, lote, repo, "s-1")
 
-	rec := doAck(t, h, deps, ackBody)
+	rec := doAck(t, h, ackBody)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1750,10 +1750,10 @@ func TestHandleConsignaAckSupervisionMarcaOperario(t *testing.T) {
 func TestHandleConsignaAckIdempotente(t *testing.T) {
 	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico}
 	repo := &fakeDecisionesRepo{porID: &decisiones_control.DecisionControl{ID: "dec-1", LoteID: "lote-1"}}
-	h, deps := newAckTestHandler(t, lote, repo, "s-1")
+	h := newAckTestHandler(t, lote, repo, "s-1")
 
 	for i := 0; i < 2; i++ {
-		if rec := doAck(t, h, deps, ackBody); rec.Code != http.StatusOK {
+		if rec := doAck(t, h, ackBody); rec.Code != http.StatusOK {
 			t.Fatalf("ack %d: status = %d, want 200", i+1, rec.Code)
 		}
 	}
@@ -1765,8 +1765,8 @@ func TestHandleConsignaAckIdempotente(t *testing.T) {
 // TestHandleConsignaAckBodyIncompleto400 verifica la validación del body.
 func TestHandleConsignaAckBodyIncompleto400(t *testing.T) {
 	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico}
-	h, deps := newAckTestHandler(t, lote, &fakeDecisionesRepo{}, "s-1")
-	if rec := doAck(t, h, deps, `{"decision_id":"dec-1","temp_aplicado":180}`); rec.Code != http.StatusBadRequest {
+	h := newAckTestHandler(t, lote, &fakeDecisionesRepo{}, "s-1")
+	if rec := doAck(t, h, `{"decision_id":"dec-1","temp_aplicado":180}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
@@ -1825,12 +1825,12 @@ func TestResumeLotesAbiertos(t *testing.T) {
 	deps.DecisionesRepo = dec
 	deps.ProductoRepo = &fakeProductoRepo{prod: &producto.Producto{ID: "prod-1"}}
 	h := NewControlHandler(deps)
-	t.Cleanup(h.registry.StopAll)
+	t.Cleanup(h.deps.LoopCancels.StopAll)
 
 	h.ResumeLotesAbiertos(context.Background())
 
 	for _, id := range []string{"lote-auto", "lote-sup"} {
-		v, ok := h.registry.GetLoop(id)
+		v, ok := h.deps.LoopCancels.GetLoop(id)
 		if !ok {
 			t.Fatalf("el lote %s debe tener loop reanudado", id)
 		}
@@ -1842,7 +1842,7 @@ func TestResumeLotesAbiertos(t *testing.T) {
 			t.Fatalf("lote %s: fase inicial = %q, want ADAPTANDO", id, loop.FaseInicial())
 		}
 	}
-	if _, ok := h.registry.GetLoop("lote-manual"); ok {
+	if _, ok := h.deps.LoopCancels.GetLoop("lote-manual"); ok {
 		t.Fatalf("MANUAL no debe reanudar loop")
 	}
 	if got := dec.countRazon("reanudado_tras_reinicio"); got != 2 {
@@ -1930,7 +1930,7 @@ func newTuningServer(t *testing.T, deps ControlDeps) (*ControlHandler, *httptest
 	secret := []byte("tuning-test-secret-1234567890")
 	srv := httptest.NewServer(authController.JWTMiddleware(secret, h.HandleTuning))
 	t.Cleanup(srv.Close)
-	t.Cleanup(h.registry.StopAll)
+	t.Cleanup(h.deps.LoopCancels.StopAll)
 	return h, srv, secret
 }
 
@@ -1968,9 +1968,9 @@ func TestHandleTuningActualizaSinReiniciarLoop(t *testing.T) {
 
 	viejoCtx, viejoCancel := context.WithCancel(context.Background())
 	defer viejoCancel()
-	h.registry.Register("lote-1", viejoCtx, viejoCancel)
+	h.deps.LoopCancels.Register("lote-1", viejoCtx, viejoCancel)
 	loopViejo := &fakeLoop{}
-	h.registry.SetLoop("lote-1", loopViejo)
+	h.deps.LoopCancels.SetLoop("lote-1", loopViejo)
 
 	status := patchTuning(t, srv, secret, user.RoleSupervisor,
 		`{"tolerancia_temp_c":1.5,"umbral_aceptacion_crudo":3,"umbral_aceptacion_quemado":4,"delta_temp1_max_c":4,"delta_vel_max":0.01}`)
@@ -1993,7 +1993,7 @@ func TestHandleTuningActualizaSinReiniciarLoop(t *testing.T) {
 		t.Fatalf("el tuning no debe cancelar el loop vivo")
 	default:
 	}
-	v, ok := h.registry.GetLoop("lote-1")
+	v, ok := h.deps.LoopCancels.GetLoop("lote-1")
 	if !ok || v != loopViejo {
 		t.Fatalf("el loop debe seguir siendo el mismo; got=%T", v)
 	}
@@ -2092,7 +2092,7 @@ func TestHandleConsignaPropuestaIncluyeLimites(t *testing.T) {
 			deps.DecisionesRepo = dec
 			h := NewControlHandler(deps)
 			if tc.enMem {
-				h.registry.SetLoop("lote-1", &fakeLoop{snap: &control.PropuestaSnapshot{
+				h.deps.LoopCancels.SetLoop("lote-1", &fakeLoop{snap: &control.PropuestaSnapshot{
 					DecisionID: "dec-1", Temp1: 180, Velocidad: 0.2, Autorizada: true,
 				}})
 			}
@@ -2129,10 +2129,10 @@ func TestHandleConsignaPropuestaIncluyeLimites(t *testing.T) {
 func TestHandleConsignaAckActualizaSetpointsLote(t *testing.T) {
 	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico}
 	repo := &fakeDecisionesRepo{porID: &decisiones_control.DecisionControl{ID: "dec-1", LoteID: "lote-1"}}
-	h, deps := newAckTestHandler(t, lote, repo, "s-1")
-	loteRepo := deps.LoteRepo.(*fakeLoteRepoHandler)
+	h := newAckTestHandler(t, lote, repo, "s-1")
+	loteRepo := h.deps.LoteRepo.(*fakeLoteRepoHandler)
 
-	if rec := doAck(t, h, deps, ackBody); rec.Code != http.StatusOK {
+	if rec := doAck(t, h, ackBody); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if loteRepo.setpointsCalls != 1 {
