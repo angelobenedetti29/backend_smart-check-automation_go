@@ -535,23 +535,29 @@ func TestHandleConsignaPropuestaFallbackRespetaTTL(t *testing.T) {
 }
 
 // TestHandleConsignaPropuestaFallbackAutorizacion cubre la semántica del
-// fallback persistido: se sirve en SUPERVISION y AUTOMATICO; autorizada=true
-// en AUTOMATICO o cuando la fila ya tiene aprobada_por; 204 en MANUAL/cerrado.
+// fallback persistido: se sirve en SUPERVISION y AUTOMATICO, y en MANUAL sólo
+// si la fila ya está aprobada (override manual); autorizada=true en AUTOMATICO
+// o cuando la fila ya tiene aprobada_por; manual_override=true sólo en el
+// override manual aprobado (Muestras=0); 204 en MANUAL sin aprobar/cerrado.
 func TestHandleConsignaPropuestaFallbackAutorizacion(t *testing.T) {
 	aprobada := "operario@fermar.com.ar"
 	cases := []struct {
-		name        string
-		estado      string
-		modo        string
-		aprobadaPor *string
-		wantStatus  int
-		wantAuth    bool
+		name               string
+		estado             string
+		modo               string
+		aprobadaPor        *string
+		muestras           int
+		wantStatus         int
+		wantAuth           bool
+		wantManualOverride bool
 	}{
-		{"automatico", lotesector.EstadoAbierto, lotesector.ModoAutomatico, nil, http.StatusOK, true},
-		{"supervision-sin-aprobar", lotesector.EstadoAbierto, lotesector.ModoSupervision, nil, http.StatusOK, false},
-		{"supervision-aprobada", lotesector.EstadoAbierto, lotesector.ModoSupervision, &aprobada, http.StatusOK, true},
-		{"manual", lotesector.EstadoAbierto, lotesector.ModoManual, nil, http.StatusNoContent, false},
-		{"cerrado", lotesector.EstadoCerrado, lotesector.ModoAutomatico, nil, http.StatusNoContent, false},
+		{"automatico", lotesector.EstadoAbierto, lotesector.ModoAutomatico, nil, 17, http.StatusOK, true, false},
+		{"supervision-sin-aprobar", lotesector.EstadoAbierto, lotesector.ModoSupervision, nil, 17, http.StatusOK, false, false},
+		{"supervision-aprobada", lotesector.EstadoAbierto, lotesector.ModoSupervision, &aprobada, 17, http.StatusOK, true, false},
+		{"manual", lotesector.EstadoAbierto, lotesector.ModoManual, nil, 0, http.StatusNoContent, false, false},
+		{"manual-aprobada", lotesector.EstadoAbierto, lotesector.ModoManual, &aprobada, 0, http.StatusOK, true, true},
+		{"manual-aprobada-mpc", lotesector.EstadoAbierto, lotesector.ModoManual, &aprobada, 17, http.StatusNoContent, false, false},
+		{"cerrado", lotesector.EstadoCerrado, lotesector.ModoAutomatico, nil, 17, http.StatusNoContent, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -559,6 +565,7 @@ func TestHandleConsignaPropuestaFallbackAutorizacion(t *testing.T) {
 				ID:            "dec-1",
 				TempPropuesto: 180,
 				VelPropuesto:  0.4,
+				Muestras:      tc.muestras,
 				CreatedAt:     time.Now().UTC(),
 				AprobadaPor:   tc.aprobadaPor,
 			}}
@@ -586,6 +593,9 @@ func TestHandleConsignaPropuestaFallbackAutorizacion(t *testing.T) {
 			}
 			if env.Data.Autorizada != tc.wantAuth {
 				t.Fatalf("autorizada = %v, want %v", env.Data.Autorizada, tc.wantAuth)
+			}
+			if env.Data.ManualOverride != tc.wantManualOverride {
+				t.Fatalf("manual_override = %v, want %v", env.Data.ManualOverride, tc.wantManualOverride)
 			}
 			if tc.aprobadaPor != nil {
 				if env.Data.AprobadaPor == nil || *env.Data.AprobadaPor != *tc.aprobadaPor {
@@ -1098,6 +1108,18 @@ func TestControlSSEReceivePropuestaEnModoSupervision(t *testing.T) {
 	}
 	if _, ok := payload["propuesta"]; !ok {
 		t.Fatalf("payload SSE sin 'propuesta': %+v", payload)
+	}
+	propuesta, ok := payload["propuesta"].(map[string]any)
+	if !ok {
+		t.Fatalf("propuesta SSE no es un objeto: %+v", payload["propuesta"])
+	}
+	for _, key := range []string{"temp1", "velocidad", "z", "prediccion"} {
+		if _, ok := propuesta[key]; !ok {
+			t.Fatalf("propuesta SSE sin %q: %+v", key, propuesta)
+		}
+	}
+	if _, ok := payload["autorizada"]; !ok {
+		t.Fatalf("payload SSE sin 'autorizada': %+v", payload)
 	}
 }
 

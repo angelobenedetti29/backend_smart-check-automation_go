@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
@@ -25,18 +28,36 @@ type OvenController interface {
 	SendSetpoint(hornoID string, temperatura, velocidad float64) oven_controller.DispatchResult
 }
 
+// OverrideRepo es el mínimo del repo de decisiones_control que necesita el
+// service para encolar un override manual como decisión ya aprobada.
+type OverrideRepo interface {
+	Save(ctx context.Context, d *decisiones_control.DecisionControl) error
+	Aprobar(ctx context.Context, decisionID, usuario string) error
+}
+
+// LoteLookup resuelve el estado/modo del lote antes de encolar el override.
+type LoteLookup interface {
+	GetByID(ctx context.Context, loteID string) (*lote_sector.Lote, error)
+}
+
 // ConsignaService implementa consigna.Service. Es el mecanismo del envío
 // manual de consigna (SCA-320): resuelve el setpoint, lo despacha al
 // controlador físico del horno, actualiza el estado activo del horno y audita
 // el resultado. Ante un fallo de enlace, genera una alerta crítica y fuerza al
 // horno a modo CONTROL_MANUAL.
 type ConsignaService struct {
-	consignaRepo consigna.Repository
-	hornoRepo    horno.Repository
-	productoRepo producto.Repository
-	alertaRepo   alerta.Repository
-	controller   OvenController
-	broker       *sse.Broker
+	consignaRepo   consigna.Repository
+	hornoRepo      horno.Repository
+	productoRepo   producto.Repository
+	alertaRepo     alerta.Repository
+	controller     OvenController
+	broker         *sse.Broker
+	decisionesRepo OverrideRepo
+	loteLookup     LoteLookup
+	// overrideEnPi indica que el actuador es la Pi: la consigna manual se
+	// encola para que la Pi la aplique (y luego ackee), en vez de asumir que
+	// el backend ya llegó al controlador físico.
+	overrideEnPi bool
 }
 
 // NewConsignaService instancia el servicio inyectando repositorios, el
@@ -49,14 +70,20 @@ func NewConsignaService(
 	controller OvenController,
 	broker *sse.Broker,
 	alertaRepo alerta.Repository,
+	decisionesRepo OverrideRepo,
+	loteLookup LoteLookup,
+	overrideEnPi bool,
 ) *ConsignaService {
 	return &ConsignaService{
-		consignaRepo: consignaRepo,
-		hornoRepo:    hornoRepo,
-		productoRepo: productoRepo,
-		alertaRepo:   alertaRepo,
-		controller:   controller,
-		broker:       broker,
+		consignaRepo:   consignaRepo,
+		hornoRepo:      hornoRepo,
+		productoRepo:   productoRepo,
+		alertaRepo:     alertaRepo,
+		controller:     controller,
+		broker:         broker,
+		decisionesRepo: decisionesRepo,
+		loteLookup:     loteLookup,
+		overrideEnPi:   overrideEnPi,
 	}
 }
 
@@ -163,8 +190,64 @@ func (s *ConsignaService) dispatch(
 		log.Printf("[ERROR] Error al auditar consigna exitosa de horno %s: %v", hornoID, err)
 	}
 
+	s.encolarOverrideManual(ctx, loteID, temperatura, velocidad, prevTemp, prevVel, usuario)
+
 	go s.broadcastConsigna(rec)
 	return rec, nil
+}
+
+// encolarOverrideManual deja una consigna manual como decisión de control ya
+// aprobada, para que la Pi la levante al pollear consigna-propuesta en modo
+// MANUAL y luego ackee (el ack actualiza los objetivos del lote).
+//
+// shortcut: manual override solo se encola en modo MANUAL; en AUTOMATICO/SUPERVISION manda el MPC.
+func (s *ConsignaService) encolarOverrideManual(
+	ctx context.Context,
+	loteID *string,
+	temperatura, velocidad, prevTemp, prevVel float64,
+	usuario *string,
+) {
+	if !s.overrideEnPi || loteID == nil || s.decisionesRepo == nil || s.loteLookup == nil {
+		return
+	}
+	lote, err := s.loteLookup.GetByID(ctx, *loteID)
+	if err != nil || lote == nil {
+		return
+	}
+	if lote.Estado != lote_sector.EstadoAbierto || lote.Modo != lote_sector.ModoManual {
+		return
+	}
+
+	ahora := time.Now().UTC()
+	d := &decisiones_control.DecisionControl{
+		LoteID:         *loteID,
+		VentanaInicio:  ahora,
+		VentanaFin:     ahora,
+		Muestras:       0,
+		TempActual:     prevTemp,
+		VelActual:      &prevVel,
+		PctCrudosObs:   0,
+		PctOkObs:       0,
+		PctQuemadosObs: 0,
+		ConfPromedio:   0,
+		TempPropuesto:  temperatura,
+		VelPropuesto:   velocidad,
+		AplicadoPor:    decisiones_control.AplicadoPorNadie,
+	}
+	if err := s.decisionesRepo.Save(ctx, d); err != nil {
+		log.Printf("[ERROR] Error al encolar override manual del lote %s: %v", *loteID, err)
+		return
+	}
+	aprobador := "operario"
+	if usuario != nil && *usuario != "" {
+		aprobador = *usuario
+	}
+	if err := s.decisionesRepo.Aprobar(ctx, d.ID, aprobador); err != nil {
+		log.Printf("[ERROR] Error al aprobar override manual del lote %s: %v", *loteID, err)
+		return
+	}
+	log.Printf("[AUDIT] Override manual encolado y aprobado para lote %s (temp=%.2f vel=%.2f por %s)",
+		*loteID, temperatura, velocidad, aprobador)
 }
 
 // handleFalloDeEnlace reacciona a un fallo de enlace con el controlador físico:

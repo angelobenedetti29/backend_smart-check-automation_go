@@ -101,12 +101,12 @@ type Limites struct {
 // valores predichos. Aplicado queda en false hasta que el caller
 // confirme el despacho.
 type Propuesta struct {
-	Temp1         float64
-	Velocidad     float64
-	Z             float64
-	Prediccion    PrediccionSalida
-	VentanaInicio string `json:"ventana_inicio,omitempty"`
-	VentanaFin    string `json:"ventana_fin,omitempty"`
+	Temp1         float64          `json:"temp1"`
+	Velocidad     float64          `json:"velocidad"`
+	Z             float64          `json:"z"`
+	Prediccion    PrediccionSalida `json:"prediccion"`
+	VentanaInicio string           `json:"ventana_inicio,omitempty"`
+	VentanaFin    string           `json:"ventana_fin,omitempty"`
 	// RestriccionRelajada indica que ningún candidato cumplió los umbrales de
 	// aceptación del producto y se devolvió el mejor Z absoluto.
 	RestriccionRelajada bool `json:"restriccion_relajada,omitempty"`

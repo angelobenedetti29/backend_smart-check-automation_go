@@ -817,8 +817,11 @@ type consignaPropuestaResponse struct {
 	VentanaFin    time.Time `json:"ventana_fin"`
 	// Autorizada indica si la Pi puede aplicar sin esperar aprobación
 	// (AUTOMATICO o propuesta de SUPERVISION ya aprobada).
-	Autorizada bool   `json:"autorizada"`
-	Fase       string `json:"fase,omitempty"`
+	Autorizada bool `json:"autorizada"`
+	// ManualOverride marca una consigna manual encolada por el backend: la Pi
+	// la aplica sin el clamp de Δ por ciclo.
+	ManualOverride bool   `json:"manual_override,omitempty"`
+	Fase           string `json:"fase,omitempty"`
 	// AprobadaPor identifica quién aprobó la propuesta en SUPERVISION.
 	AprobadaPor *string `json:"aprobada_por,omitempty"`
 	// Limites son los límites efectivos del MPC (producto + overrides del lote).
@@ -835,8 +838,10 @@ type propuestaProvider interface {
 // Devuelve la propuesta pendiente del loop en memoria si existe; si no,
 // reintenta contra la última decisión pendiente persistida (pull-based para
 // redes poco confiables). Sirve tanto AUTOMATICO (autorizada=true, la Pi
-// aplica sola) como SUPERVISION (autorizada sólo tras la aprobación).
-// Responde 204 cuando no hay nada pendiente o el lote está cerrado/MANUAL.
+// aplica sola) como SUPERVISION (autorizada sólo tras la aprobación). En
+// MANUAL no hay MPC pero sí se sirve un override manual ya aprobado, marcado
+// con manual_override=true para que la Pi omita su clamp de Δ.
+// Responde 204 cuando no hay nada pendiente o el lote está cerrado.
 func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
@@ -897,11 +902,19 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	// Chequear que el lote está vivo y en modo compatible, y que la propuesta
-	// no esté vencida. Si no, respondemos 204 (mismo caso que sin propuesta):
-	// no se sirve una decisión NADIE de un lote cerrado, en MANUAL o vieja.
+	// Chequear que el lote está vivo y que la propuesta no esté vencida. Si no,
+	// respondemos 204 (mismo caso que sin propuesta): no se sirve una decisión
+	// NADIE de un lote cerrado ni una propuesta del MPC en MANUAL (ahí sólo
+	// vale un override manual ya aprobado).
+	// El override manual se persiste con Muestras=0 y aprobado al instante; las
+	// decisiones del MPC llevan el conteo de muestras de la ventana.
+	manualOverride := d.Muestras == 0 && d.AprobadaPor != nil
 	if lote != nil {
-		if lote.Estado != lotesector.EstadoAbierto || lote.Modo == lotesector.ModoManual {
+		if lote.Estado != lotesector.EstadoAbierto {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if lote.Modo == lotesector.ModoManual && !manualOverride {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -917,16 +930,17 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 		autorizada = true
 	}
 	response.OK(w, "Consigna propuesta", consignaPropuestaResponse{
-		DecisionID:    d.ID,
-		Temp1Objetivo: d.TempPropuesto,
-		VelObjetivo:   d.VelPropuesto,
-		GeneratedAt:   d.CreatedAt,
-		TTLSegundos:   ttl,
-		VentanaInicio: d.VentanaInicio,
-		VentanaFin:    d.VentanaFin,
-		Autorizada:    autorizada,
-		AprobadaPor:   d.AprobadaPor,
-		Limites:       limites,
+		DecisionID:     d.ID,
+		Temp1Objetivo:  d.TempPropuesto,
+		VelObjetivo:    d.VelPropuesto,
+		GeneratedAt:    d.CreatedAt,
+		TTLSegundos:    ttl,
+		VentanaInicio:  d.VentanaInicio,
+		VentanaFin:     d.VentanaFin,
+		Autorizada:     autorizada,
+		ManualOverride: manualOverride,
+		AprobadaPor:    d.AprobadaPor,
+		Limites:        limites,
 	})
 }
 

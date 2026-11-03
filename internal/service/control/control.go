@@ -250,6 +250,7 @@ func (loop *Loop) publicarPropuesta(prop *optimizador.Propuesta, decision *decis
 		"lote_id":     loop.loteID,
 		"propuesta":   prop,
 		"decision_id": decision.ID,
+		"autorizada":  autorizada,
 		"ventana":     decision.VentanaInicio,
 	}))
 }

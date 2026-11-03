@@ -3,12 +3,15 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
@@ -165,6 +168,52 @@ func (f *fakeConsignaRepo) count() int {
 	return len(f.saved)
 }
 
+// fakeDecisionesRepo es un doble en memoria del mínimo de decisiones_control
+// que consume el service (Save + Aprobar).
+type fakeDecisionesRepo struct {
+	mu        sync.Mutex
+	saved     []decisiones_control.DecisionControl
+	aprobadas []string
+}
+
+func (f *fakeDecisionesRepo) Save(ctx context.Context, d *decisiones_control.DecisionControl) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d.ID = fmt.Sprintf("dec-%d", len(f.saved)+1)
+	f.saved = append(f.saved, *d)
+	return nil
+}
+
+func (f *fakeDecisionesRepo) Aprobar(ctx context.Context, decisionID, usuario string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.aprobadas = append(f.aprobadas, decisionID)
+	return nil
+}
+
+func (f *fakeDecisionesRepo) snapshot() ([]decisiones_control.DecisionControl, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]decisiones_control.DecisionControl(nil), f.saved...), append([]string(nil), f.aprobadas...)
+}
+
+// fakeLoteLookup devuelve siempre el mismo lote (ABIERTO/MANUAL por default).
+type fakeLoteLookup struct {
+	lote *lote_sector.Lote
+	err  error
+}
+
+func (f *fakeLoteLookup) GetByID(ctx context.Context, loteID string) (*lote_sector.Lote, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.lote, nil
+}
+
+func loteAbiertoManual() *lote_sector.Lote {
+	return &lote_sector.Lote{Estado: lote_sector.EstadoAbierto, Modo: lote_sector.ModoManual}
+}
+
 // newTestService arma un ConsignaService con el cliente simulado real (~5%
 // de fallo aleatorio) — usado por los tests existentes que toleran esa
 // variabilidad. fakeHornoAlertaRepo cubre horno.Repository y alerta.Repository.
@@ -173,7 +222,8 @@ func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *fakeHornoAlert
 	consignaRepo := &fakeConsignaRepo{}
 	ctrl := oven_controller.NewSimulatedOvenController("http://localhost:8600/plc/horno")
 	broker := sse.NewBroker()
-	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
+	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo,
+		&fakeDecisionesRepo{}, &fakeLoteLookup{lote: loteAbiertoManual()}, true)
 	return svc, hornoRepo, consignaRepo
 }
 
@@ -184,8 +234,21 @@ func newTestServiceWithController(paramRepo *fakeParamRepo, ctrl OvenController)
 	hornoRepo := newFakeHornoAlertaRepo()
 	consignaRepo := &fakeConsignaRepo{}
 	broker := sse.NewBroker()
-	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
+	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo,
+		&fakeDecisionesRepo{}, &fakeLoteLookup{lote: loteAbiertoManual()}, true)
 	return svc, hornoRepo, consignaRepo
+}
+
+// newTestServiceWithOverride arma un service determinista con los fakes de
+// decisiones/lote expuestos, para verificar el encolado del override manual.
+func newTestServiceWithOverride(paramRepo *fakeParamRepo, lote *lote_sector.Lote) (*ConsignaService, *fakeConsignaRepo, *fakeDecisionesRepo) {
+	hornoRepo := newFakeHornoAlertaRepo()
+	consignaRepo := &fakeConsignaRepo{}
+	decisionesRepo := &fakeDecisionesRepo{}
+	ctrl := &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}}
+	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, sse.NewBroker(), hornoRepo,
+		decisionesRepo, &fakeLoteLookup{lote: lote}, true)
+	return svc, consignaRepo, decisionesRepo
 }
 
 func TestDispatchManual_FueraDeRango(t *testing.T) {
@@ -248,7 +311,7 @@ func TestDispatchManual_DentroDeRango_ActualizaHornoYAudita(t *testing.T) {
 func TestDispatchManual_ConLoteID_QuedaCorrelacionadoEnHistorial(t *testing.T) {
 	paramRepo := newFakeParamRepo()
 	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, _, consignaRepo := newTestService(paramRepo)
+	svc, consignaRepo, decisionesRepo := newTestServiceWithOverride(paramRepo, loteAbiertoManual())
 
 	loteID := "lote-correlacion-1"
 	req := consigna.ConsignaManualRequest{
@@ -260,7 +323,7 @@ func TestDispatchManual_ConLoteID_QuedaCorrelacionadoEnHistorial(t *testing.T) {
 	}
 
 	rec, err := svc.DispatchManual(context.Background(), req)
-	if err != nil && !errors.Is(err, consigna.ErrDispatchFallido) {
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rec.LoteID == nil || *rec.LoteID != loteID {
@@ -276,6 +339,46 @@ func TestDispatchManual_ConLoteID_QuedaCorrelacionadoEnHistorial(t *testing.T) {
 	}
 	if historial[0].Origen != consigna.OrigenManual {
 		t.Errorf("expected origen MANUAL en el historial, got %s", historial[0].Origen)
+	}
+
+	decisiones, aprobadas := decisionesRepo.snapshot()
+	if len(decisiones) != 1 {
+		t.Fatalf("expected 1 decisión encolada, got %d", len(decisiones))
+	}
+	if decisiones[0].LoteID != loteID {
+		t.Errorf("expected decision para lote %q, got %q", loteID, decisiones[0].LoteID)
+	}
+	if decisiones[0].TempPropuesto != 170.0 || decisiones[0].VelPropuesto != 0.20 {
+		t.Errorf("expected propuesta temp=170 vel=0.20, got temp=%.2f vel=%.2f",
+			decisiones[0].TempPropuesto, decisiones[0].VelPropuesto)
+	}
+	if len(aprobadas) != 1 || aprobadas[0] != decisiones[0].ID {
+		t.Errorf("expected la decisión %q aprobada, got %v", decisiones[0].ID, aprobadas)
+	}
+}
+
+func TestDispatchManual_ConLoteID_NoManual_NoEncolaDecision(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	lote := loteAbiertoManual()
+	lote.Modo = lote_sector.ModoAutomatico
+	svc, _, decisionesRepo := newTestServiceWithOverride(paramRepo, lote)
+
+	loteID := "lote-automatico-1"
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-01",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+		LoteID:                 &loteID,
+	}
+
+	if _, err := svc.DispatchManual(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decisiones, aprobadas := decisionesRepo.snapshot(); len(decisiones) != 0 || len(aprobadas) != 0 {
+		t.Fatalf("un lote no MANUAL no debe encolar override, got decisiones=%d aprobadas=%d",
+			len(decisiones), len(aprobadas))
 	}
 }
 
@@ -396,7 +499,7 @@ func TestDispatchManual_ExitosoTrasFalloRestauraEstadoActivo(t *testing.T) {
 	// controller exitoso, para simular que el operario reactivó el enlace.
 	okCtrl := &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}}
 	broker := sse.NewBroker()
-	okSvc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, okCtrl, broker, hornoRepo)
+	okSvc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, okCtrl, broker, hornoRepo, nil, nil, false)
 
 	_, err = okSvc.DispatchManual(context.Background(), req)
 	if err != nil {

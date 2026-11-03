@@ -121,6 +121,11 @@ func main() {
 	decisionesRepo := repository.NewDecisionesControlPostgresRepository(pgPool)
 	alertaRepo := repository.NewAlertaPostgresRepository(pgPool)
 
+	// El override manual se encola para la Pi salvo que el actuador sea el
+	// backend (lab/debug). Mismo criterio que SetActuador del loop.
+	actuador := os.Getenv("CONTROL_ACTUADOR")
+	encolarOverridePi := actuador == "" || actuador == "pi"
+
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
 
@@ -147,7 +152,8 @@ func main() {
 	// Autenticación de nodos: Bearer <secret> resuelto por hash contra dispositivos activos.
 	deviceVerifier := &deviceauth.Verifier{Store: deviceAuthRepo}
 	registroSvc := registroService.NewService(registrationRepo)
-	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, productoRepo, ovenController, hornoSSEBroker, alertaRepo)
+	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, productoRepo, ovenController, hornoSSEBroker, alertaRepo,
+		decisionesRepo, loteSectorRepo, encolarOverridePi)
 
 	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
 	userSvc := userService.NewService(userRepo)
