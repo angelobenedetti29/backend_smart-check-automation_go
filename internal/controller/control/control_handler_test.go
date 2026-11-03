@@ -54,6 +54,7 @@ func (f *fakeProductoRepo) GetByID(_ context.Context, _ string) (*producto.Produ
 // fakeDecisionesRepo implementa decisiones_control.Repository con resultados
 // controlables por el test.
 type fakeDecisionesRepo struct {
+	mu        sync.Mutex
 	pendiente *decisiones_control.DecisionControl
 	pendErr   error
 	saveErr   error
@@ -71,7 +72,17 @@ type fakeDecisionesRepo struct {
 	marcarPor   []string // aplicado_por efectivo
 }
 
+// savedSnapshot copia la slice de decisiones guardadas para leerla desde el
+// test sin carreras con la goroutine del Loop.
+func (f *fakeDecisionesRepo) savedSnapshot() []*decisiones_control.DecisionControl {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*decisiones_control.DecisionControl(nil), f.saved...)
+}
+
 func (f *fakeDecisionesRepo) Save(_ context.Context, d *decisiones_control.DecisionControl) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.saveErr != nil {
 		return f.saveErr
 	}
@@ -92,6 +103,8 @@ func (f *fakeDecisionesRepo) GetByID(_ context.Context, _ string) (*decisiones_c
 }
 
 func (f *fakeDecisionesRepo) Aprobar(_ context.Context, decisionID, usuario string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.aprobarErr != nil {
 		return f.aprobarErr
 	}
@@ -101,6 +114,8 @@ func (f *fakeDecisionesRepo) Aprobar(_ context.Context, decisionID, usuario stri
 }
 
 func (f *fakeDecisionesRepo) MarcarAplicada(_ context.Context, decisionID string, _, _ float64, aplicadoPor string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.marcarErr != nil {
 		return f.marcarErr
 	}
@@ -760,8 +775,8 @@ func TestHandleModeChangeNoopDevuelve200(t *testing.T) {
 	if repo.updateCalls != 0 {
 		t.Fatalf("no debe llamar UpdateModo; calls=%d", repo.updateCalls)
 	}
-	if len(dec.saved) != 0 {
-		t.Fatalf("no debe auditar un no-op; saved=%d", len(dec.saved))
+	if saved := dec.savedSnapshot(); len(saved) != 0 {
+		t.Fatalf("no debe auditar un no-op; saved=%d", len(saved))
 	}
 	if _, ok := h.registry.GetLoop("lote-1"); ok {
 		t.Fatalf("el no-op no debe registrar loop")
@@ -804,10 +819,11 @@ func TestHandleModeChangeAMANUALCancelaLoop(t *testing.T) {
 	if repo.updateCalls != 1 || repo.updatedModo != lotesector.ModoManual {
 		t.Fatalf("UpdateModo mal llamado: calls=%d modo=%q", repo.updateCalls, repo.updatedModo)
 	}
-	if len(dec.saved) != 1 {
-		t.Fatalf("debe auditar el cambio; saved=%d", len(dec.saved))
+	saved := dec.savedSnapshot()
+	if len(saved) != 1 {
+		t.Fatalf("debe auditar el cambio; saved=%d", len(saved))
 	}
-	got := dec.saved[0]
+	got := saved[0]
 	if got.AplicadoPor != decisiones_control.AplicadoPorNadie {
 		t.Fatalf("aplicado_por = %q, want NADIE", got.AplicadoPor)
 	}
@@ -848,15 +864,16 @@ func TestHandleModeChangeASupervisionArrancaLoop(t *testing.T) {
 	}
 	// El loop arranca y puede dejar además una decisión propia (el tick es
 	// inmediato); buscamos el audit del cambio entre las filas persistidas.
+	saved := dec.savedSnapshot()
 	found := false
-	for _, got := range dec.saved {
+	for _, got := range saved {
 		if got.RazonSkipped != nil && *got.RazonSkipped == "cambio_modo_MANUAL_SUPERVISION" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("debe auditar el cambio; saved=%d", len(dec.saved))
+		t.Fatalf("debe auditar el cambio; saved=%d", len(saved))
 	}
 }
 
@@ -875,7 +892,7 @@ func TestHandleModeChangeLoteCerrado409(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", status)
 	}
-	if repo.updateCalls != 0 || len(dec.saved) != 0 {
+	if repo.updateCalls != 0 || len(dec.savedSnapshot()) != 0 {
 		t.Fatalf("no debe tocar DB ni auditar con lote cerrado")
 	}
 }
@@ -895,7 +912,7 @@ func TestHandleModeChangeRolInsuficiente403(t *testing.T) {
 	if status != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", status)
 	}
-	if repo.updateCalls != 0 || len(dec.saved) != 0 {
+	if repo.updateCalls != 0 || len(dec.savedSnapshot()) != 0 {
 		t.Fatalf("un rol insuficiente no debe tocar DB ni auditar")
 	}
 }
@@ -915,7 +932,7 @@ func TestHandleModeChangeModoInvalido400(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", status)
 	}
-	if repo.updateCalls != 0 || len(dec.saved) != 0 {
+	if repo.updateCalls != 0 || len(dec.savedSnapshot()) != 0 {
 		t.Fatalf("modo inválido no debe tocar DB ni auditar")
 	}
 }

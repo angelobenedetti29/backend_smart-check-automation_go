@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,23 +212,54 @@ func TestLoopPropuestaPendienteTTL(t *testing.T) {
 	}
 }
 
+type marcarArgs struct {
+	decisionID  string
+	temp, vel   float64
+	aplicadoPor string
+}
+
+type decisionesRepoSnapshot struct {
+	saveCalled      int
+	lastAplicadoPor string
+	lastDecision    *decisiones_control.DecisionControl
+	marcarCalled    int
+	marcarArgs      marcarArgs
+}
+
 // fakeDecisionesRepo implementa la interface mínima decisionesRepo del Loop.
 type fakeDecisionesRepo struct {
+	mu              sync.Mutex
 	saveCalled      int
 	saveErr         error
 	lastAplicadoPor string
 	lastDecision    *decisiones_control.DecisionControl
 	marcarCalled    int
-	marcarArgs      struct {
-		decisionID  string
-		temp, vel   float64
-		aplicadoPor string
+	marcarArgs      marcarArgs
+	marcarErr       error
+}
+
+// snapshot copia el estado del fake para leerlo desde el test sin carreras
+// con la goroutine del Loop.
+func (f *fakeDecisionesRepo) snapshot() decisionesRepoSnapshot {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := decisionesRepoSnapshot{
+		saveCalled:      f.saveCalled,
+		lastAplicadoPor: f.lastAplicadoPor,
+		marcarCalled:    f.marcarCalled,
+		marcarArgs:      f.marcarArgs,
 	}
-	marcarErr error
+	if f.lastDecision != nil {
+		cp := *f.lastDecision
+		s.lastDecision = &cp
+	}
+	return s
 }
 
 // Save simula el RETURNING de la DB: completa ID/CreatedAt (salvo error).
 func (f *fakeDecisionesRepo) Save(_ context.Context, d *decisiones_control.DecisionControl) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.saveCalled++
 	f.lastAplicadoPor = d.AplicadoPor
 	if f.saveErr != nil {
@@ -246,6 +278,8 @@ func (f *fakeDecisionesRepo) GetByID(_ context.Context, _ string) (*decisiones_c
 func (f *fakeDecisionesRepo) Aprobar(_ context.Context, _, _ string) error { return nil }
 
 func (f *fakeDecisionesRepo) MarcarAplicada(_ context.Context, id string, t, v float64, ap string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.marcarCalled++
 	f.marcarArgs.decisionID = id
 	f.marcarArgs.temp, f.marcarArgs.vel, f.marcarArgs.aplicadoPor = t, v, ap
@@ -274,16 +308,30 @@ func (f *fakeAlertaRepoControl) Ack(context.Context, string, alerta.Usuario) (*a
 	return nil, alerta.ErrNotFound
 }
 
+type consignaSrvSnapshot struct {
+	calls   int
+	lastReq consigna.ConsignaManualRequest
+}
+
 // fakeConsignaSrv implementa ConsignaDispatchService y devuelve una consigna
 // de éxito con los setpoints configurados.
 type fakeConsignaSrv struct {
+	mu      sync.Mutex
 	cons    *consigna.Consigna
 	err     error
 	calls   int
 	lastReq consigna.ConsignaManualRequest
 }
 
+func (f *fakeConsignaSrv) callsSnapshot() consignaSrvSnapshot {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return consignaSrvSnapshot{calls: f.calls, lastReq: f.lastReq}
+}
+
 func (f *fakeConsignaSrv) Dispatch(_ context.Context, req consigna.ConsignaManualRequest, _ consigna.Origen, _ *string) (*consigna.Consigna, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	f.lastReq = req
 	return f.cons, f.err
@@ -675,11 +723,11 @@ func TestRunTresTicksModoAutomaticoDespacha(t *testing.T) {
 	cancel()
 	time.Sleep(150 * time.Millisecond) // deja terminar el tick en vuelo
 
-	if cons.calls < 3 {
-		t.Fatalf("dispatchCalls = %d, want >= 3", cons.calls)
+	if snap := cons.callsSnapshot(); snap.calls < 3 {
+		t.Fatalf("dispatchCalls = %d, want >= 3", snap.calls)
 	}
-	if repo.saveCalled < 3 {
-		t.Fatalf("saveCalls = %d, want >= 3", repo.saveCalled)
+	if snap := repo.snapshot(); snap.saveCalled < 3 {
+		t.Fatalf("saveCalls = %d, want >= 3", snap.saveCalled)
 	}
 	if got := drainBroadcasts(client); got != 0 {
 		t.Fatalf("broadcasts = %d, want 0 (AUTOMATICO no publica SSE)", got)
@@ -713,11 +761,11 @@ func TestRunModoManualNoTicKea(t *testing.T) {
 	cancel()
 	time.Sleep(150 * time.Millisecond)
 
-	if cons.calls != 0 {
-		t.Fatalf("dispatchCalls = %d, want 0 en MANUAL", cons.calls)
+	if snap := cons.callsSnapshot(); snap.calls != 0 {
+		t.Fatalf("dispatchCalls = %d, want 0 en MANUAL", snap.calls)
 	}
-	if repo.saveCalled != 0 {
-		t.Fatalf("saveCalls = %d, want 0 en MANUAL", repo.saveCalled)
+	if snap := repo.snapshot(); snap.saveCalled != 0 {
+		t.Fatalf("saveCalls = %d, want 0 en MANUAL", snap.saveCalled)
 	}
 	if got := drainBroadcasts(client); got != 0 {
 		t.Fatalf("broadcasts = %d, want 0 en MANUAL", got)
@@ -748,11 +796,11 @@ func TestRunTresTicksModoSupervisionPublicaPropuesta(t *testing.T) {
 	cancel()
 	time.Sleep(150 * time.Millisecond)
 
-	if cons.calls != 0 {
-		t.Fatalf("dispatchCalls = %d, want 0 (SUPERVISION no despacha)", cons.calls)
+	if snap := cons.callsSnapshot(); snap.calls != 0 {
+		t.Fatalf("dispatchCalls = %d, want 0 (SUPERVISION no despacha)", snap.calls)
 	}
-	if repo.saveCalled < 3 {
-		t.Fatalf("saveCalls = %d, want >= 3", repo.saveCalled)
+	if snap := repo.snapshot(); snap.saveCalled < 3 {
+		t.Fatalf("saveCalls = %d, want >= 3", snap.saveCalled)
 	}
 	if got := drainBroadcasts(client); got < 3 {
 		t.Fatalf("broadcasts = %d, want >= 3", got)
