@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -107,3 +108,48 @@ def test_main_sin_dataset_sigue_leyendo_la_bd(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert train.main([]) == 1
     assert llamadas == ["postgres://fake/db"]
+
+
+def test_entrenar_producto_guarda_json_cargable(tmp_path, monkeypatch):
+    """El artefacto debe ser JSON UTF-8 y poder cargarse con xgb.Booster."""
+    xgb = pytest.importorskip("xgboost")
+
+    muestras = []
+    for i in range(40):
+        temp = 150.0 + i * 2.0
+        vel = 0.05 + (i % 10) * 0.045
+        ok = max(0.0, 100.0 - abs(temp - 200.0) * 2.0 - abs(vel - 0.30) * 200.0)
+        crudos = max(0.0, (100.0 - ok) * 0.6)
+        quemados = max(0.0, 100.0 - ok - crudos)
+        muestras.append(
+            train.MuestraLote(
+                producto_id="prod-test",
+                temp_horno_1=temp,
+                velocidad_cinta=vel,
+                temp_comb_1=0.78 * temp,
+                humedad_horno=35.0,
+                pct_crudos=crudos,
+                pct_ok=ok,
+                pct_quemados=quemados,
+                temp_min=150.0,
+                temp_max=230.0,
+                vel_min=0.05,
+                vel_max=0.50,
+            )
+        )
+
+    modelos = tmp_path / "models_xgb"
+    monkeypatch.setattr(train, "_directorio_modelos", lambda: modelos)
+
+    version = train.entrenar_producto(muestras, min_muestras=30, test_size=0.2)
+
+    assert version == 1
+    path = modelos / "producto_prod-test_v1.json"
+    assert path.is_file()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert set(payload) >= {"version", "crudos", "ok", "quemados"}
+    for key in ("crudos", "ok", "quemados"):
+        raw = json.loads(payload[key])
+        assert isinstance(raw, dict)
+        booster = xgb.Booster()
+        booster.load_model(bytearray(payload[key], "utf-8"))

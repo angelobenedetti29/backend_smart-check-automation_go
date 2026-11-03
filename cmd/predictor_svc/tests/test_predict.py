@@ -137,3 +137,44 @@ def test_predict_invalid_payload():
     """Un payload sin los campos requeridos debe ser rechazado (422)."""
     r = client.post("/predict", json={"productoId": ""})
     assert r.status_code in (400, 422)
+
+
+def test_modelo_xgb_recorta_predicciones_fuera_de_rango():
+    """Un booster puede salirse de [0, 100]; la respuesta debe quedar válida."""
+    pytest.importorskip("xgboost")
+    from types import SimpleNamespace
+
+    from predictor_svc.modelo import ModeloXGB, ProductoPlaceholder
+
+    class _Booster:
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def predict(self, _dmat):
+            return [self.value]
+
+    producto = ProductoPlaceholder(
+        id="prod-test",
+        nombre="Producto",
+        temp_min=180.0,
+        temp_max=220.0,
+        velocidad_cinta_min=0.5,
+        velocidad_cinta_max=1.5,
+    )
+    req = SimpleNamespace(
+        temp_horno_1=185.0,
+        velocidad_cinta=1.4,
+        temp_comb_1=144.0,
+        humedad_horno=35.0,
+        temp_min=180.0,
+        temp_max=220.0,
+        velocidad_cinta_min=0.5,
+        velocidad_cinta_max=1.5,
+    )
+    modelo = ModeloXGB(_Booster(120.0), _Booster(-5.0), _Booster(1.0), "test")
+
+    pred = modelo.predict(producto, req)
+
+    for value in (pred.pct_crudos, pred.pct_ok, pred.pct_quemados):
+        assert 0.0 <= value <= 100.0
+    assert abs(pred.pct_crudos + pred.pct_ok + pred.pct_quemados - 100.0) < 0.01

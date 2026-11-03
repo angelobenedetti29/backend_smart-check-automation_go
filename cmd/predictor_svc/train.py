@@ -359,9 +359,9 @@ def entrenar_producto(
         json.dumps(
             {
                 "version": f"v{nueva_version}",
-                "crudos": booster_c.save_raw().decode("utf-8"),
-                "ok": booster_o.save_raw().decode("utf-8"),
-                "quemados": booster_q.save_raw().decode("utf-8"),
+                "crudos": booster_c.save_raw(raw_format="json").decode("utf-8"),
+                "ok": booster_o.save_raw(raw_format="json").decode("utf-8"),
+                "quemados": booster_q.save_raw(raw_format="json").decode("utf-8"),
             },
             ensure_ascii=False,
         ),

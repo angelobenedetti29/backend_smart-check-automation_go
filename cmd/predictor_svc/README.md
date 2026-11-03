@@ -63,6 +63,10 @@ python -m cmd.predictor_svc.export_dataset --out data/windows --split-temporal 0
 python -m cmd.predictor_svc.train --dataset data/windows/train.csv
 python -m cmd.predictor_svc.train --dataset data/windows/train.csv --producto <uuid>
 
+# Dataset sintético incluido para demos/pruebas (6 productos, 240 ventanas c/u).
+# No reemplaza datos reales: ejercita el pipeline y el MPC.
+python -m cmd.predictor_svc.train --dataset cmd/predictor_svc/data/sintetico_6_productos.csv
+
 # O el camino histórico de siempre (una muestra por lote):
 DATABASE_URL='postgres://user:pass@host/db' \
 python -m cmd.predictor_svc.train

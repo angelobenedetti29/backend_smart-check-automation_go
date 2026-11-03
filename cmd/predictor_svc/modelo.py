@@ -153,20 +153,25 @@ class ModeloXGB:
         p_c = float(self._booster_crudos.predict(dmat)[0])
         p_o = float(self._booster_ok.predict(dmat)[0])
         p_q = float(self._booster_quemados.predict(dmat)[0])
-        # Renormalización a [0, 100] con suma 100.
+        # Un booster puede devolver valores fuera de [0, 100] en los extremos;
+        # se recortan antes de renormalizar para no producir porcentajes
+        # negativos ni mayores a 100.
+        p_c = max(0.0, p_c)
+        p_o = max(0.0, p_o)
+        p_q = max(0.0, p_q)
         total = p_c + p_o + p_q
         if total <= 0:
             return Prediccion(0.0, 100.0, 0.0)
-        pct_crudos = max(0.0, p_c * 100.0 / total)
-        pct_ok = max(0.0, p_o * 100.0 / total)
-        pct_quemados = max(0.0, p_q * 100.0 / total)
-        # Re-balanceo para que la suma sea exactamente 100.
-        dif = 100.0 - (pct_crudos + pct_ok + pct_quemados)
-        pct_ok += dif
+        pct_crudos = round(p_c * 100.0 / total, 2)
+        pct_quemados = round(p_q * 100.0 / total, 2)
+        pct_ok = round(100.0 - pct_crudos - pct_quemados, 2)
+        if pct_ok < 0:
+            pct_ok = 0.0
+            pct_quemados = round(100.0 - pct_crudos, 2)
         return Prediccion(
-            pct_crudos=round(pct_crudos, 2),
-            pct_ok=round(pct_ok, 2),
-            pct_quemados=round(pct_quemados, 2),
+            pct_crudos=pct_crudos,
+            pct_ok=pct_ok,
+            pct_quemados=pct_quemados,
         )
 
 
