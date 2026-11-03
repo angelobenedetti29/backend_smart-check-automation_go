@@ -18,10 +18,10 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
 
-// fakeController es un doble de prueba determinista de OvenController: en vez
-// del ~5% de fallo aleatorio del cliente simulado real, siempre devuelve el
+// fakeController es un doble de prueba determinista de OvenController: a
+// diferencia del stub interno (siempre Aplicada=true), devuelve el
 // DispatchResult configurado — necesario para probar la rama de fallo de
-// enlace (alerta crítica + CONTROL_MANUAL) sin depender del azar.
+// enlace (alerta crítica + CONTROL_MANUAL).
 type fakeController struct {
 	result oven_controller.DispatchResult
 	calls  int
@@ -214,13 +214,13 @@ func loteAbiertoManual() *lote_sector.Lote {
 	return &lote_sector.Lote{Estado: lote_sector.EstadoAbierto, Modo: lote_sector.ModoManual}
 }
 
-// newTestService arma un ConsignaService con el cliente simulado real (~5%
-// de fallo aleatorio) — usado por los tests existentes que toleran esa
-// variabilidad. fakeHornoAlertaRepo cubre horno.Repository y alerta.Repository.
+// newTestService arma un ConsignaService con el stub interno determinista
+// (siempre Aplicada=true). fakeHornoAlertaRepo cubre horno.Repository y
+// alerta.Repository.
 func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *fakeHornoAlertaRepo, *fakeConsignaRepo) {
 	hornoRepo := newFakeHornoAlertaRepo()
 	consignaRepo := &fakeConsignaRepo{}
-	ctrl := oven_controller.NewSimulatedOvenController("http://localhost:8600/plc/horno")
+	ctrl := oven_controller.NewSimulatedOvenController()
 	broker := sse.NewBroker()
 	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo,
 		&fakeDecisionesRepo{}, &fakeLoteLookup{lote: loteAbiertoManual()}, true)
@@ -228,8 +228,7 @@ func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *fakeHornoAlert
 }
 
 // newTestServiceWithController arma un ConsignaService con un OvenController
-// determinista (fakeController), para probar rutas de éxito/fallo sin depender
-// del azar del cliente simulado real.
+// determinista (fakeController), para probar rutas de éxito/fallo.
 func newTestServiceWithController(paramRepo *fakeParamRepo, ctrl OvenController) (*ConsignaService, *fakeHornoAlertaRepo, *fakeConsignaRepo) {
 	hornoRepo := newFakeHornoAlertaRepo()
 	consignaRepo := &fakeConsignaRepo{}
@@ -286,7 +285,8 @@ func TestDispatchManual_DentroDeRango_ActualizaHornoYAudita(t *testing.T) {
 	}
 
 	rec, err := svc.DispatchManual(context.Background(), req)
-	// El controlador simulado falla ~5% de las veces; ambas ramas deben auditar.
+	// El stub siempre aplica; la rama de fallo se cubre con fakeController.
+	// Ambas ramas deben auditar.
 	if err != nil && !errors.Is(err, consigna.ErrDispatchFallido) {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -469,6 +469,32 @@ func TestDispatchManual_NoSeBloqueaAunqueHornoEsteEnControlManual(t *testing.T) 
 	}
 	if !rec.Exitosa {
 		t.Errorf("expected consigna exitosa, got Exitosa=false")
+	}
+}
+
+func TestDispatchManual_ExitosoNoPisaEstadoDeAlerta(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	svc, hornoRepo, _ := newTestServiceWithController(paramRepo, &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}})
+
+	h, _ := hornoRepo.GetByID("horno-01")
+	h.Estado = "MANTENIMIENTO"
+	_ = hornoRepo.Update(h)
+
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-01",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+	}
+
+	if _, err := svc.DispatchManual(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	h2, _ := hornoRepo.GetByID("horno-01")
+	if h2.Estado != "MANTENIMIENTO" {
+		t.Errorf("un despacho exitoso no debe pisar MANTENIMIENTO, got %s", h2.Estado)
 	}
 }
 

@@ -649,7 +649,7 @@ func propuestaOK() fakePredictorControl {
 }
 
 // TestRunTresTicksModoAutomaticoDespacha corre el loop real en modo AUTOMATICO
-// con ventanas de 1s y verifica que cada tick despacha al PLC, persiste la
+// con ventanas de 1s y verifica que cada tick despacha al controlador/stub, persiste la
 // decisión y NO publica por SSE.
 func TestRunTresTicksModoAutomaticoDespacha(t *testing.T) {
 	now := time.Now().UTC()

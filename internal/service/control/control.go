@@ -32,18 +32,6 @@ import (
 // ErrLoteNoAbierto indica que el lote no está ABIERTO cuando se intenta operar.
 var ErrLoteNoAbierto = errors.New("control: el lote no está abierto")
 
-// PrediccionPersistida es la salida cruda del XGBoost que se guarda como
-// JSONB en decisiones_control.prediccion. Sólo se persiste el subconjunto
-// relevante: pctCrudos/pctOk/pctQuemados/modelVersion/esPlaceholder.
-type PrediccionPersistida struct {
-	PctCrudos           float64 `json:"pctCrudos"`
-	PctOk               float64 `json:"pctOk"`
-	PctQuemados         float64 `json:"pctQuemados"`
-	ModelVersion        string  `json:"modelVersion"`
-	EsPlaceholder       bool    `json:"esPlaceholder"`
-	RestriccionRelajada bool    `json:"restriccionRelajada,omitempty"`
-}
-
 // Fases del control automático: CALENTANDO espera que el horno alcance la
 // temperatura de receta; ADAPTANDO corre el MPC normal.
 const (
@@ -537,7 +525,7 @@ func (loop *Loop) tick(ctx context.Context) {
 	//    que alimenta z_observado y los % del audit. Si la ventana está
 	//    vacía de eventos, z_observado se persiste como NULL.
 	var pctCrudos, pctOk, pctQuemados float64
-	zObs, zObsSet := loop.calcularZObservado(ctx, ventanaInicio, now, &pctCrudos, &pctOk, &pctQuemados)
+	zObs, _ := loop.calcularZObservado(ctx, ventanaInicio, now, &pctCrudos, &pctOk, &pctQuemados)
 
 	estado := loop.estadoDesdeMetricas(filtradas)
 	// La confianza de detección llega con los eventos de la Pi SALIDA; la
@@ -633,12 +621,11 @@ func (loop *Loop) tick(ctx context.Context) {
 		AplicadoPor:    decisiones_control.AplicadoPorNadie,
 		Prediccion:     serializarPrediccion(predXGB.Prediccion, predXGB.RestriccionRelajada),
 	}
-	_ = zObsSet // sólo para documentar el set en tests / debug
 
 	switch {
 	case loop.modo == lote_sector.ModoAutomatico && loop.Actuador() == "backend":
 		// Lab/debug: el backend sigue despachando directo al horno.
-		loop.aplicarComoMPC(ctx, predXGB, decision, estado)
+		loop.aplicarComoMPC(ctx, predXGB, decision)
 	case loop.modo == lote_sector.ModoAutomatico:
 		// AUTOMATICO normal: la Pi hace pull de la propuesta ya autorizada.
 		decision.AplicadoPor = decisiones_control.AplicadoPorNadie
@@ -867,7 +854,8 @@ func (loop *Loop) entregar(ctx context.Context, prop *optimizador.Propuesta, dec
 }
 
 // calcularZObservado cuenta los eventos del lote en la ventana y devuelve:
-//   - zObs, zObsSet: Z observada (nil cuando no hay eventos)
+//   - zObs: Z observada (nil cuando no hay eventos); el segundo retorno indica
+//     si se pudo calcular
 //   - *pctCrudos, *pctOk, *pctQuemados: porcentajes observados en la ventana
 //
 // Si el repo falla, se persiste el error como skipped_observation (no se
@@ -931,7 +919,7 @@ func (loop *Loop) AplicarPropuesta(ctx context.Context, usuario string) (*consig
 	return cons, nil
 }
 
-func (loop *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuesta, decision *decisiones_control.DecisionControl, estado optimizador.Estado) {
+func (loop *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuesta, decision *decisiones_control.DecisionControl) {
 	cons, err := loop.aplicarConsigna(ctx, prop, consigna.OrigenAutomatico, "")
 	if err != nil {
 		// Si el controlador físico rechaza, registramos la decisión como no
@@ -957,7 +945,6 @@ func (loop *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuest
 		log.Printf("[control] Save decision (mpc ok): %v", err)
 	}
 	cancel()
-	_ = estado
 }
 
 // aplicarConsigna despacha la propuesta con el origen y usuario correctos.
@@ -1084,7 +1071,7 @@ func confianzaPromedio(m []metricashorno.MetricaHorno) float64 {
 }
 
 func serializarPrediccion(p optimizador.PrediccionSalida, restriccionRelajada bool) []byte {
-	b, _ := json.Marshal(PrediccionPersistida{
+	b, _ := json.Marshal(decisiones_control.PrediccionResumen{
 		PctCrudos:           p.PctCrudos,
 		PctOk:               p.PctOk,
 		PctQuemados:         p.PctQuemados,

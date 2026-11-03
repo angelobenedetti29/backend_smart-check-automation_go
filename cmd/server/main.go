@@ -94,19 +94,9 @@ func main() {
 
 	// 2. Instantiate Infrastructure Adapters (Providers Layer)
 	dbRepo := database.NewPostgresRepository()
-	// Driver del controlador físico del horno: simulated (default) o modbus,
-	// seleccionado por OVEN_DRIVER. El Modbus exige Connect exitoso al arrancar.
-	ovenController, ovenCloser, err := oven_controller.NewOvenControllerFromEnv()
-	if err != nil {
-		log.Fatalf("[ovenController] %v", err)
-	}
-	if ovenCloser != nil {
-		defer func() {
-			if cerr := ovenCloser.Close(); cerr != nil {
-				log.Printf("[ovenController] cerrando driver: %v", cerr)
-			}
-		}()
-	}
+	// El backend NO escribe el PLC: usa el stub interno para auditar/actualizar
+	// estado. La Pi ENTRADA es la única que escribe el PLC real.
+	ovenController := oven_controller.NewOvenController()
 
 	// Real PostgreSQL repositories
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
@@ -122,9 +112,10 @@ func main() {
 	alertaRepo := repository.NewAlertaPostgresRepository(pgPool)
 
 	// El override manual se encola para la Pi salvo que el actuador sea el
-	// backend (lab/debug). Mismo criterio que SetActuador del loop.
+	// backend (lab/debug). Mismo criterio que SetActuador del loop: "backend"
+	// es el único valor que no encola; vacío o inválido se comporta como "pi".
 	actuador := os.Getenv("CONTROL_ACTUADOR")
-	encolarOverridePi := actuador == "" || actuador == "pi"
+	encolarOverridePi := actuador != "backend"
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)

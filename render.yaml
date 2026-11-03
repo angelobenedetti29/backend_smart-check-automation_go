@@ -25,10 +25,6 @@ services:
         sync: false
       - key: PREDICTOR_AUTH_TOKEN
         sync: false
-      - key: OVEN_DRIVER
-        sync: false
-      - key: OVEN_MODBUS_ADDRESS
-        sync: false
       - key: PORT
         value: "8080"
 
@@ -54,10 +50,6 @@ services:
       - key: PREDICTOR_URL
         sync: false
       - key: PREDICTOR_AUTH_TOKEN
-        sync: false
-      - key: OVEN_DRIVER
-        sync: false
-      - key: OVEN_MODBUS_ADDRESS
         sync: false
       - key: PORT
         value: "8080"

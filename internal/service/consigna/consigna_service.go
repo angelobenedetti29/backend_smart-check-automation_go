@@ -18,12 +18,11 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
 
-// OvenController abstrae el cliente que despacha setpoints al controlador
-// físico del horno. *oven_controller.SimulatedOvenController y
-// *oven_controller.ModbusOvenController la satisfacen hoy; el día que aparezca
-// otro driver (MQTT/API local) basta con inyectar una implementación distinta
-// con la misma firma — y permite inyectar dobles de prueba deterministas en los
-// tests.
+// OvenController abstrae el cliente que despacha setpoints al controlador del
+// horno. *oven_controller.SimulatedOvenController es la implementación actual
+// (stub interno del backend); la interfaz permite inyectar dobles de prueba y,
+// el día que aparezca otro driver (MQTT/API local), una implementación real con
+// la misma firma.
 type OvenController interface {
 	SendSetpoint(hornoID string, temperatura, velocidad float64) oven_controller.DispatchResult
 }
@@ -42,7 +41,7 @@ type LoteLookup interface {
 
 // ConsignaService implementa consigna.Service. Es el mecanismo del envío
 // manual de consigna (SCA-320): resuelve el setpoint, lo despacha al
-// controlador físico del horno, actualiza el estado activo del horno y audita
+// controlador del horno, actualiza el estado activo del horno y audita
 // el resultado. Ante un fallo de enlace, genera una alerta crítica y fuerza al
 // horno a modo CONTROL_MANUAL.
 type ConsignaService struct {
@@ -56,7 +55,7 @@ type ConsignaService struct {
 	loteLookup     LoteLookup
 	// overrideEnPi indica que el actuador es la Pi: la consigna manual se
 	// encola para que la Pi la aplique (y luego ackee), en vez de asumir que
-	// el backend ya llegó al controlador físico.
+	// el backend ya llegó al controlador del horno.
 	overrideEnPi bool
 }
 
@@ -126,9 +125,9 @@ func (s *ConsignaService) GetHistorialByLote(ctx context.Context, loteID string)
 }
 
 // dispatch centraliza el flujo compartido: busca el horno, despacha al
-// controlador físico, y según el resultado:
-//   - éxito: actualiza el estado activo del horno (y lo restaura a ACTIVO si
-//     venía de un CONTROL_MANUAL previo) y audita.
+// controlador del horno, y según el resultado:
+//   - éxito: actualiza el estado activo del horno (y lo restaura a ACTIVO solo
+//     si venía de un CONTROL_MANUAL previo) y audita.
 //   - fallo: audita el intento, genera una alerta CRITICAL y fuerza al horno
 //     a CONTROL_MANUAL, para que el control automático deje de insistir hasta
 //     que un operario intervenga.
@@ -181,7 +180,9 @@ func (s *ConsignaService) dispatch(
 	h.VelocidadCinta = result.VelocidadReal
 	h.ProductoID = productoID
 	h.LoteID = loteID
-	h.Estado = "ACTIVO" // éxito: restaura el control automático aunque venga de CONTROL_MANUAL
+	if h.Estado == horno.EstadoControlManual {
+		h.Estado = "ACTIVO" // éxito: restaura el control automático tras un fallo de enlace
+	}
 	if err := s.hornoRepo.Update(h); err != nil {
 		log.Printf("[ERROR] Error al actualizar estado del horno %s tras despachar consigna: %v", hornoID, err)
 	}
@@ -250,9 +251,9 @@ func (s *ConsignaService) encolarOverrideManual(
 		*loteID, temperatura, velocidad, aprobador)
 }
 
-// handleFalloDeEnlace reacciona a un fallo de enlace con el controlador físico:
-// fuerza al horno a CONTROL_MANUAL y registra una alerta CRITICAL para que quede
-// visible en el panel, además del registro de auditoría ya guardado.
+// handleFalloDeEnlace reacciona a un fallo de enlace con el controlador del
+// horno: fuerza al horno a CONTROL_MANUAL y registra una alerta CRITICAL para
+// que quede visible en el panel, además del registro de auditoría ya guardado.
 func (s *ConsignaService) handleFalloDeEnlace(h *horno.Horno, motivo string, origen consigna.Origen) {
 	h.Estado = horno.EstadoControlManual
 	if err := s.hornoRepo.Update(h); err != nil {
