@@ -23,6 +23,14 @@ var ErrFueraDeRango = errors.New("consigna: valores fuera de rango seguro")
 // pudo aplicar la consigna.
 var ErrDispatchFallido = errors.New("consigna: el controlador físico rechazó la consigna")
 
+// ErrSectorRequerido indica que el request no trae sector/horno ni un lote del
+// que deducirlo.
+var ErrSectorRequerido = errors.New("consigna: el sector/horno es requerido")
+
+// ErrSectorMismatch indica que el sector enviado no coincide con el sector del
+// lote referenciado.
+var ErrSectorMismatch = errors.New("consigna: el sector no coincide con el del lote")
+
 // Origen identifica el mecanismo que disparó la consigna. Hoy conviven:
 //   - MANUAL (SCA-320): envío desde el panel por un operario.
 //   - AUTOMATICO (SCA-142 reactivado por SCA-400): despacho que dispara el
@@ -69,7 +77,11 @@ type Consigna struct {
 // despacho manual siempre valida contra el rango real cargado en el producto
 // unificado, sin caer a límites de seguridad hardcodeados.
 type ConsignaManualRequest struct {
-	HornoID                string  `json:"hornoId"`
+	// SectorID es el id del sector (slug) que identifica al horno simulado
+	// destino. Es el campo preferido desde que hay un horno por sector.
+	SectorID string `json:"sectorId,omitempty"`
+	// HornoID queda como alias legacy de SectorID.
+	HornoID                string  `json:"hornoId,omitempty"`
 	ProductoID             string  `json:"productoId"`
 	TemperaturaObjetivo    float64 `json:"temperaturaObjetivo"`
 	VelocidadCintaObjetivo float64 `json:"velocidadCintaObjetivo"`
@@ -81,6 +93,15 @@ type ConsignaManualRequest struct {
 	LoteID *string `json:"loteId,omitempty"`
 }
 
+// OvenID resuelve el id del horno destino: prefiere sectorId y cae al alias
+// legacy hornoId. Devuelve el valor trimeado.
+func (r ConsignaManualRequest) OvenID() string {
+	if id := strings.TrimSpace(r.SectorID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(r.HornoID)
+}
+
 // Validate aplica las reglas de forma básicas del request (presencia, valores
 // positivos). El rango seguro específico por producto se valida en el
 // Service, porque depende de datos del producto unificado, no es una regla
@@ -88,8 +109,8 @@ type ConsignaManualRequest struct {
 func (r ConsignaManualRequest) Validate() error {
 	var errs []string
 
-	if strings.TrimSpace(r.HornoID) == "" {
-		errs = append(errs, "hornoId: es requerido")
+	if r.OvenID() == "" {
+		errs = append(errs, "sectorId: es requerido")
 	}
 	if strings.TrimSpace(r.ProductoID) == "" {
 		errs = append(errs, "productoId: es requerido")

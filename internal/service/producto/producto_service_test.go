@@ -180,3 +180,66 @@ func TestCreate_ErrorDeUnicidadDelRepo(t *testing.T) {
 	_, err := svc.Create(context.Background(), reqValido())
 	require.Error(t, err)
 }
+
+func TestCreate_ConCapacidadNominal(t *testing.T) {
+	repo := &fakeProductoRepo{}
+	svc := NewService(repo)
+
+	capacidad := 120.5
+	req := reqValido()
+	req.CapacidadNominalKgH = &capacidad
+
+	got, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, repo.created.CapacidadNominalKgH)
+	assert.Equal(t, 120.5, *repo.created.CapacidadNominalKgH)
+	require.NotNil(t, got.CapacidadNominalKgH)
+	assert.Equal(t, 120.5, *got.CapacidadNominalKgH)
+}
+
+func TestCreate_SinCapacidadNominal(t *testing.T) {
+	repo := &fakeProductoRepo{}
+	svc := NewService(repo)
+
+	req := reqValido()
+	req.CapacidadNominalKgH = nil
+
+	got, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+	assert.Nil(t, repo.created.CapacidadNominalKgH)
+	assert.Nil(t, got.CapacidadNominalKgH)
+}
+
+func TestCreate_CapacidadNominalInvalida(t *testing.T) {
+	repo := &fakeProductoRepo{}
+	svc := NewService(repo)
+
+	capacidad := -1.0
+	req := reqValido()
+	req.CapacidadNominalKgH = &capacidad
+
+	_, err := svc.Create(context.Background(), req)
+	var ve *producto.ValidationError
+	require.ErrorAs(t, err, &ve)
+	require.NotEmpty(t, ve.Fields["capacidadNominalKgH"])
+	assert.Nil(t, repo.created)
+}
+
+func TestUpdate_ConYsinCapacidadNominal(t *testing.T) {
+	repo := &fakeProductoRepo{}
+	svc := NewService(repo)
+
+	capacidad := 90.0
+	req := reqValido()
+	req.CapacidadNominalKgH = &capacidad
+
+	got, err := svc.Update(context.Background(), "prod-42", req)
+	require.NoError(t, err)
+	require.NotNil(t, got.CapacidadNominalKgH)
+	assert.Equal(t, 90.0, *got.CapacidadNominalKgH)
+
+	req.CapacidadNominalKgH = nil
+	got, err = svc.Update(context.Background(), "prod-42", req)
+	require.NoError(t, err)
+	assert.Nil(t, got.CapacidadNominalKgH)
+}

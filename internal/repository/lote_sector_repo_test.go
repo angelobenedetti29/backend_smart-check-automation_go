@@ -428,6 +428,70 @@ func TestLoteSectorRepository_CerrarIdempotente(t *testing.T) {
 	require.Equal(t, 5, again.Conteos.Total)
 }
 
+// TestLoteSectorRepository_CerrarPersisteKgEstimados verifica que el cierre
+// derive los kg de cada bucket desde productos.peso_referencia_kg (0.25 kg para
+// el producto de prueba) y que el reintento idempotente no los recalcule.
+func TestLoteSectorRepository_CerrarPersisteKgEstimados(t *testing.T) {
+	ctx := context.Background()
+	repo, pool := setupLoteSectorRepo(t)
+
+	leerKg := func(loteID string) (correctos, crudos, quemados *float64) {
+		t.Helper()
+		require.NoError(t, pool.QueryRow(ctx, `
+			SELECT correctos_kg::float8, crudos_kg::float8, quemados_kg::float8
+			FROM lotes_productivos WHERE id=$1`, loteID).Scan(&correctos, &crudos, &quemados))
+		return correctos, crudos, quemados
+	}
+
+	lote := abrirLote(t, ctx, repo)
+	ok, crudo, quemado := 3, 1, 2
+	_, yaCerrado, err := repo.Cerrar(ctx, lotesector.CerrarParams{
+		LoteID:   lote.ID,
+		SectorID: testSectorID,
+		Conteos:  lotesector.Conteos{OK: &ok, Crudo: &crudo, Quemado: &quemado, Total: 6},
+		Motivo:   "manual",
+	})
+	require.NoError(t, err)
+	require.False(t, yaCerrado)
+
+	correctosKg, crudosKg, quemadosKg := leerKg(lote.ID)
+	require.NotNil(t, correctosKg)
+	require.InDelta(t, 0.75, *correctosKg, 1e-9)
+	require.NotNil(t, crudosKg)
+	require.InDelta(t, 0.25, *crudosKg, 1e-9)
+	require.NotNil(t, quemadosKg)
+	require.InDelta(t, 0.50, *quemadosKg, 1e-9)
+
+	// Reintento con otros conteos: el cierre ya estaba resuelto y los kg no cambian.
+	otroOK, otroCrudo, otroQuemado := 9, 9, 9
+	_, yaCerrado, err = repo.Cerrar(ctx, lotesector.CerrarParams{
+		LoteID:   lote.ID,
+		SectorID: testSectorID,
+		Conteos:  lotesector.Conteos{OK: &otroOK, Crudo: &otroCrudo, Quemado: &otroQuemado, Total: 27},
+		Motivo:   "manual",
+	})
+	require.NoError(t, err)
+	require.True(t, yaCerrado)
+	correctosKg, crudosKg, quemadosKg = leerKg(lote.ID)
+	require.InDelta(t, 0.75, *correctosKg, 1e-9)
+	require.InDelta(t, 0.25, *crudosKg, 1e-9)
+	require.InDelta(t, 0.50, *quemadosKg, 1e-9)
+
+	t.Run("crudo nil deja crudos_kg NULL", func(t *testing.T) {
+		lote := abrirLote(t, ctx, repo)
+		ok, quemado := 2, 1
+		_, _, err := repo.Cerrar(ctx, lotesector.CerrarParams{
+			LoteID:   lote.ID,
+			SectorID: testSectorID,
+			Conteos:  lotesector.Conteos{OK: &ok, Quemado: &quemado, Total: 3},
+			Motivo:   "manual",
+		})
+		require.NoError(t, err)
+		_, crudosKg, _ := leerKg(lote.ID)
+		require.Nil(t, crudosKg, "sin conteo de crudos el kg debe quedar NULL")
+	})
+}
+
 // TestLoteSectorRepository_CerrarPersisteConfianzaPromedio verifica que el
 // cierre fije la media de confianza de los eventos del lote y que el lote
 // devuelto (y su relectura) la expongan. Sin detecciones con confianza queda

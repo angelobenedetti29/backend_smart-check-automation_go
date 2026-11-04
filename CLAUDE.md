@@ -7,7 +7,7 @@ Los datos son enviados por nodos Raspberry Pi via HTTP.
 
 ## Stack
 - Lenguaje: Go 1.25
-- Base de datos: PostgreSQL 16 (Aiven Cloud)
+- Base de datos: PostgreSQL 16 (Supabase)
 - Infraestructura: Docker + Docker Compose (`db`, `app`, `predictor-svc`)
 - Predictor: sidecar Python/FastAPI + XGBoost (`cmd/predictor_svc`, puerto `8090`)
 - Frontend: Next.js (React) — consumidor de esta API
@@ -214,7 +214,8 @@ arranca el loop del MPC (SCA-400), que es quien propone/aplica consignas.
 - **Consigna manual y MPC**: `ConsignaService.Dispatch` es el camino único; `DispatchManual` (SCA-320) usa `origen=MANUAL` y el loop del MPC (SCA-400) usa `origen=AUTOMATICO`. El trigger automático de SCA-142 desde `/lotes/inicio` fue retirado.
 - **Modos de operación por lote**: `MANUAL` no corre loop; `SUPERVISION` publica propuestas que requieren aprobación; `AUTOMATICO` publica propuestas ya autorizadas. El modo se persiste en `lotes_productivos.modo` y se cambia con `PATCH` (panel) o `PUT` (Pi) `/api/v1/lotes/{id}/modo`.
 - **Actuador configurable**: para el loop MPC, `CONTROL_ACTUADOR=pi` (default) hace que la Pi ENTRADA aplique la consigna haciendo pull; `backend` (solo laboratorio) despacha contra el stub interno del backend, nunca contra un PLC real. La consigna manual siempre pasa por `ConsignaService.dispatch` y llama al stub; el actuador sólo decide si además se encola el override.
-- **PLC del horno**: el backend no abre conexiones Modbus ni escribe ningún PLC. La Pi ENTRADA es la única escritora del PLC real, con su propio `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend usa `SimulatedOvenController` (stub determinista, ~40 ms de latencia, siempre acepta) para auditar y actualizar el estado del horno.
+- **PLC del horno**: el backend no abre conexiones Modbus ni escribe ningún PLC. La Pi ENTRADA es la única escritora del PLC real, con su propio `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend usa `SimulatedOvenController` (stub determinista, ~40 ms de latencia, siempre acepta) para auditar y registrar el comando de consigna.
+- **Estado del horno**: `GET /api/v1/horno` es una proyección de solo lectura de `metricas_horno` (último sample del lote abierto) + lote + alertas. Estados: `SIN_LOTE`, `SIN_TELEMETRIA`, `SIN_DATOS`, `ACTIVO`, `DESACTUALIZADO` (>30 s) y `CONTROL_MANUAL` (alerta `CONSIGNA_ENLACE` activa). Sin telemetría los campos van `null`. El horno en memoria (`horno.Repository`/`Ensure`) sólo registra comandos/auditoría y sirve al endpoint legacy `POST /api/v1/horno/temperatura`; no es fuente de estado.
 - **Override manual encolado**: en modo `MANUAL`, con actuador `pi` y lote abierto, `POST /api/v1/horno/consigna` deja una decisión ya aprobada con `muestras=0`. La Pi la obtiene por `consigna-propuesta` con `manual_override=true` y la aplica sin el clamp de Δ por ciclo; luego confirma por `/consigna/ack`.
 - **SSE de control**: el loop emite `control.propuesta` con `autorizada` (true en AUTOMATICO, false en SUPERVISION hasta la aprobación). La `Propuesta` serializa `temp1`, `velocidad`, `z` y `prediccion`.
 - **Predictor sidecar**: cliente HTTP con timeout de 2s; si el sidecar falla, el optimizador no propone y la decisión se audita como `skipped`. Los artefactos entrenados son JSON (`save_raw(raw_format="json")`) por producto en `models_xgb/`.
@@ -226,7 +227,7 @@ arranca el loop del MPC (SCA-400), que es quien propone/aplica consignas.
 
 | Variable | Descripción |
 |---|---|
-| `DATABASE_URL` | Conexión a PostgreSQL (Aiven PostgreSQL 16 o Docker local) |
+| `DATABASE_URL` | Conexión a PostgreSQL (Supabase PostgreSQL 16 o Docker local) |
 | `FRONTEND_ORIGINS` | Orígenes permitidos por CORS para el panel, separados por coma (default `http://localhost:3000,http://127.0.0.1:3000`) |
 | `JWT_SECRET` | Clave de firma del JWT. Mínimo 32 chars. |
 | `GOOGLE_CLIENT_ID` | Client ID de Google Cloud Console |
@@ -237,7 +238,6 @@ arranca el loop del MPC (SCA-400), que es quien propone/aplica consignas.
 | `PREDICTOR_URL` | URL base del sidecar predictor (default `http://localhost:8090`) |
 | `PREDICTOR_AUTH_TOKEN` | Opcional — Bearer para autenticar contra el sidecar |
 | `CONTROL_ACTUADOR` | `pi` (default; la Pi aplica en el PLC) o `backend` (solo laboratorio; aplica contra el stub interno, no contra un PLC) |
-| `MPC_HORNO_ID` | Horno destino del MPC (default `horno-01`) |
 | `MPC_CONFIANZA_MIN` | Confianza mínima promedio para proponer (default `0.5`) |
 | `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` | Timeout de precalentamiento (default `1800`) |
 | `MPC_PREHEAT_POLL_SEGUNDOS` | Cadencia durante precalentamiento (default `15`) |

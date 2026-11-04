@@ -61,6 +61,10 @@ type Producto struct {
 	TempMax               float64 `json:"tempMax"`
 	VelocidadCintaMin     float64 `json:"velocidadCintaMin"`
 	VelocidadCintaMax     float64 `json:"velocidadCintaMax"`
+	// CapacidadNominalKgH es la capacidad nominal de producción en kg/h.
+	// Nullable: si no está cargada, el producto no participa de cálculos de
+	// capacidad/OEE.
+	CapacidadNominalKgH *float64 `json:"capacidadNominalKgH"`
 	// TempSetpoint y VelocidadCintaSetpoint son opcionales (nullable): valor
 	// puntual dentro del rango min/max, sólo usado si se reactiva el despacho
 	// automático de consigna (SCA-142).
@@ -86,6 +90,8 @@ type ProductoRequest struct {
 	TempMax               float64 `json:"tempMax"`
 	VelocidadCintaMin     float64 `json:"velocidadCintaMin"`
 	VelocidadCintaMax     float64 `json:"velocidadCintaMax"`
+	// CapacidadNominalKgH es opcional (nullable) y, si viene, debe ser > 0.
+	CapacidadNominalKgH *float64 `json:"capacidadNominalKgH"`
 	// Setpoints opcionales: si se envían, deben caer dentro del rango min/max.
 	TempSetpoint           *float64 `json:"tempSetpoint,omitempty"`
 	VelocidadCintaSetpoint *float64 `json:"velocidadCintaSetpoint,omitempty"`
@@ -124,6 +130,9 @@ func (req ProductoRequest) Validate() error {
 	}
 	if req.VelocidadCintaMax <= req.VelocidadCintaMin {
 		fields["velocidadCintaMax"] = fmt.Sprintf("debe ser mayor a velocidadCintaMin (%.2f)", req.VelocidadCintaMin)
+	}
+	if req.CapacidadNominalKgH != nil && *req.CapacidadNominalKgH <= 0 {
+		fields["capacidadNominalKgH"] = "debe ser un valor numérico mayor a 0"
 	}
 	if req.TempSetpoint != nil && (*req.TempSetpoint < req.TempMin || *req.TempSetpoint > req.TempMax) {
 		fields["tempSetpoint"] = "debe estar entre tempMin y tempMax"

@@ -1,4 +1,4 @@
-# Environment variables (contain credentials for Aiven PostgreSQL)
+# Environment variables (contain credentials for Supabase PostgreSQL)
 .env
 
 # AI tool files — generados por/para agentes de IA, no para el equipo

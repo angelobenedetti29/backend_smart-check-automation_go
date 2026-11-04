@@ -559,7 +559,7 @@ func (r *LoteSectorPostgresRepository) Cerrar(ctx context.Context, params lotese
 	}
 
 	if _, err = tx.Exec(ctx, `
-		UPDATE lotes_productivos
+		UPDATE lotes_productivos lp
 		SET correctos = $1,
 		    crudas = $2,
 		    quemados = $3,
@@ -568,12 +568,17 @@ func (r *LoteSectorPostgresRepository) Cerrar(ctx context.Context, params lotese
 		    fin_at = now(),
 		    motivo_cierre = $5,
 		    cerrar_idempotency_key = COALESCE($6, cerrar_idempotency_key),
+		    -- kg estimados (conteo × peso de referencia), no medidos.
+		    correctos_kg = ROUND(($1)::int * p.peso_referencia_kg, 3),
+		    crudos_kg = ROUND(($2)::int * p.peso_referencia_kg, 3),
+		    quemados_kg = ROUND(($3)::int * p.peso_referencia_kg, 3),
 		    confianza_promedio = (
 		        SELECT AVG(confianza) FROM eventos_lote
 		        WHERE lote_id = $7 AND confianza IS NOT NULL
 		    ),
 		    updated_at = now()
-		WHERE id = $7`,
+		FROM productos p
+		WHERE lp.id = $7 AND p.id = lp.producto_id`,
 		params.Conteos.OK, params.Conteos.Crudo, params.Conteos.Quemado,
 		params.Conteos.Total, motivo, cerrarKey, params.LoteID); err != nil {
 		return nil, false, fmt.Errorf("cerrar lote: update: %w", err)

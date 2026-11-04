@@ -69,6 +69,7 @@ func TestApply_CreaColumnasModernas(t *testing.T) {
 	for _, tc := range []struct{ table, column string }{
 		{"metricas_dispositivo", "ai_processor_pct"},
 		{"dispositivos", "whep_url"},
+		{"productos", "capacidad_nominal_kg_h"},
 		{"dispositivos", "secret_hash"},
 		{"dispositivos", "tipo"},
 		{"dispositivos", "rename_url"},
@@ -285,6 +286,67 @@ func TestApply_LotesCamposNullable(t *testing.T) {
 		err := p.QueryRow(context.Background(), `SELECT is_nullable FROM information_schema.columns WHERE table_name='lotes_productivos' AND column_name=$1`, column).Scan(&nullable)
 		require.NoError(t, err)
 		require.Equal(t, "YES", nullable, "%s debería ser nullable", column)
+	}
+}
+
+// TestApply_BackfillKgLotesCerrados verifica que la migración complete los kg
+// de lotes CERRADOS heredados (estimados con el peso vigente del producto) y
+// que reaplicar el esquema no los vuelva a calcular ni falle.
+func TestApply_BackfillKgLotesCerrados(t *testing.T) {
+	p := isolatedPool(t)
+	ctx := context.Background()
+	require.NoError(t, Apply(ctx, p))
+
+	// Simula una base heredada con la precisión vieja para ejercitar la migración.
+	// crudos_kg queda NUMERIC sin precisión: numeric_precision es NULL y también
+	// debe migrarse a NUMERIC(12,3).
+	for _, column := range []string{"correctos_kg", "quemados_kg", "crudos_kg"} {
+		tipo := "NUMERIC(10,2)"
+		if column == "crudos_kg" {
+			tipo = "NUMERIC"
+		}
+		_, err := p.Exec(ctx, `ALTER TABLE lotes_productivos ALTER COLUMN `+column+` TYPE `+tipo)
+		require.NoError(t, err)
+	}
+	require.NoError(t, Apply(ctx, p), "la migración debe ampliar NUMERIC(10,2) a NUMERIC(12,3)")
+
+	var loteID string
+	require.NoError(t, p.QueryRow(ctx, `
+		INSERT INTO lotes_productivos (producto_id, inicio_at, estado, correctos, crudas, quemados, total_unidades)
+		VALUES ('a1b2c3d4-5678-90ab-cdef-1234567890ab', now(), 'CERRADO', 4, 2, 1, 7)
+		RETURNING id`).Scan(&loteID))
+
+	var correctos, crudos, quemados *float64
+	leerKg := func() {
+		t.Helper()
+		require.NoError(t, p.QueryRow(ctx, `
+			SELECT correctos_kg::float8, crudos_kg::float8, quemados_kg::float8
+			FROM lotes_productivos WHERE id=$1`, loteID).Scan(&correctos, &crudos, &quemados))
+	}
+	leerKg()
+	require.Nil(t, correctos, "sin backfill los kg siguen NULL")
+
+	require.NoError(t, Apply(ctx, p))
+	leerKg()
+	require.NotNil(t, correctos)
+	require.InDelta(t, 1.000, *correctos, 1e-9)
+	require.NotNil(t, crudos)
+	require.InDelta(t, 0.500, *crudos, 1e-9)
+	require.NotNil(t, quemados)
+	require.InDelta(t, 0.250, *quemados, 1e-9)
+
+	require.NoError(t, Apply(ctx, p), "reaplicar el esquema debe seguir siendo idempotente")
+	leerKg()
+	require.InDelta(t, 1.000, *correctos, 1e-9)
+	require.InDelta(t, 0.500, *crudos, 1e-9)
+	require.InDelta(t, 0.250, *quemados, 1e-9)
+
+	for _, column := range []string{"correctos_kg", "quemados_kg", "crudos_kg"} {
+		var precision int
+		err := p.QueryRow(ctx, `SELECT numeric_precision FROM information_schema.columns
+			WHERE table_schema=current_schema() AND table_name='lotes_productivos' AND column_name=$1`, column).Scan(&precision)
+		require.NoError(t, err)
+		require.Equal(t, 12, precision, "%s debería ser NUMERIC(12,3)", column)
 	}
 }
 

@@ -59,6 +59,7 @@ func (s *Service) Create(ctx context.Context, req producto.ProductoRequest) (*pr
 		TempMax:                req.TempMax,
 		VelocidadCintaMin:      req.VelocidadCintaMin,
 		VelocidadCintaMax:      req.VelocidadCintaMax,
+		CapacidadNominalKgH:    req.CapacidadNominalKgH,
 		TempSetpoint:           req.TempSetpoint,
 		VelocidadCintaSetpoint: req.VelocidadCintaSetpoint,
 	}, req)
@@ -93,6 +94,7 @@ func (s *Service) Update(ctx context.Context, id string, req producto.ProductoRe
 		TempMax:                req.TempMax,
 		VelocidadCintaMin:      req.VelocidadCintaMin,
 		VelocidadCintaMax:      req.VelocidadCintaMax,
+		CapacidadNominalKgH:    req.CapacidadNominalKgH,
 		TempSetpoint:           req.TempSetpoint,
 		VelocidadCintaSetpoint: req.VelocidadCintaSetpoint,
 	}, req)

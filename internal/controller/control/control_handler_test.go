@@ -658,6 +658,7 @@ func TestHandleControlStartLoopSobreviveCierreRequest(t *testing.T) {
 	deps := validControlDeps()
 	deps.LoteLookup = &fakeLoteLookup{lote: &lotesector.Lote{
 		ID:                           loteID,
+		SectorID:                     "s-1",
 		Estado:                       lotesector.EstadoAbierto,
 		Modo:                         lotesector.ModoSupervision,
 		ProductoID:                   "prod-1",
@@ -839,7 +840,7 @@ func TestHandleModeChangeAMANUALCancelaLoop(t *testing.T) {
 // registra un loop nuevo, persiste el modo y audita.
 func TestHandleModeChangeASupervisionArrancaLoop(t *testing.T) {
 	lote := &lotesector.Lote{
-		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+		ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
 		ProductoID: "prod-1", VentanaEvaluacionSegundos: 600,
 	}
 	repo := &fakeLoteRepoHandler{}
@@ -1005,7 +1006,7 @@ func TestHandleModeChangeDevicePutOtroSector(t *testing.T) {
 // no impide el cambio de modo ni el arranque del loop.
 func TestHandleModeChangeAuditSaveFallaNoBloquea(t *testing.T) {
 	lote := &lotesector.Lote{
-		ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
+		ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
 		ProductoID: "prod-1", VentanaEvaluacionSegundos: 600,
 	}
 	repo := &fakeLoteRepoHandler{}
@@ -1425,7 +1426,7 @@ func TestEnsureLoopForLoteArranca(t *testing.T) {
 			t.Cleanup(deps.LoopCancels.StopAll)
 
 			lote := &lotesector.Lote{
-				ID: "lote-1", Estado: lotesector.EstadoAbierto, Modo: modo, ProductoID: "prod-1",
+				ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: modo, ProductoID: "prod-1",
 				VentanaEvaluacionSegundos: 3600, VentanaActualizacionSegundos: 3600,
 			}
 			if err := h.EnsureLoopForLote(context.Background(), lote); err != nil {
@@ -1812,9 +1813,9 @@ func (s *safeDecisionesRepo) countRazon(razon string) int {
 // lotes AUTOMATICO/SUPERVISION, saltee MANUAL y sea idempotente.
 func TestResumeLotesAbiertos(t *testing.T) {
 	repo := &fakeLoteRepoHandler{abiertos: []lotesector.Lote{
-		{ID: "lote-auto", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico,
+		{ID: "lote-auto", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico,
 			ProductoID: "prod-1", VentanaEvaluacionSegundos: 3600, VentanaActualizacionSegundos: 3600},
-		{ID: "lote-sup", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision,
+		{ID: "lote-sup", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision,
 			ProductoID: "prod-1", VentanaEvaluacionSegundos: 3600, VentanaActualizacionSegundos: 3600},
 		{ID: "lote-manual", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoManual,
 			ProductoID: "prod-1"},

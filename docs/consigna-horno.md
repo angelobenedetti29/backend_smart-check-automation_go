@@ -44,7 +44,7 @@ Loop MPC (por lote) ──► Optimizador ──► Predictor          ├─►
    │                     (sidecar XGBoost)                 │     (no escribe PLC; audita/actualiza estado)
    │                                                       ├─► historial_consignas (auditoría)
    ├─ actuador=backend ──────────────────────────────────►┤
-   │                                                       ├─► horno.Repository.Update() (estado en memoria)
+   │                                                       ├─► horno.Repository.Update() (registro de comando/auditoría)
    └─ actuador=pi ──► SSE control.propuesta                 └─► SSE horno.consigna
                        (incluye `autorizada`)
                        + decisiones_control (audit)
@@ -180,12 +180,16 @@ ACK:
   `ventana`. La `propuesta` serializa `temp1`, `velocidad`, `z` y `prediccion`.
 - `GET /api/v1/horno/events` emite `horno.consigna` con el resultado de cada
   despacho.
-- `GET /api/v1/horno?id=horno-01` devuelve el estado **en memoria** del horno
-  (temperatura, velocidad, producto/lote y estado). Se actualiza con las
-  consignas aplicadas exitosamente.
+- `GET /api/v1/horno?sector_id=horno-1` devuelve una **proyección de solo
+  lectura** del horno (`data.horno.id` es el id del sector): lote abierto +
+  último sample de `metricas_horno`. El horno en memoria del backend ya no es
+  fuente de estado; sólo conserva el comando/auditoría de la última consigna y
+  el flag `CONTROL_MANUAL` (alerta `CONSIGNA_ENLACE` ACTIVA). Sin telemetría,
+  T/V y el resto de las lecturas viajan `null`.
 - La telemetría real (T1, combustión, humedad, ambiente, velocidad y setpoints
-  observados) llega por `POST /api/v1/lotes/{id}/metricas-horno`; el panel la lee
-  con `GET /api/v1/lotes/{id}/metricas-horno`.
+  observados) llega por `POST /api/v1/lotes/{id}/metricas-horno`; es el estado
+  real del horno y el panel la lee por `GET /api/v1/horno` (o cruda con
+  `GET /api/v1/lotes/{id}/metricas-horno`).
 
 ## 8. Fallo de enlace
 
@@ -235,7 +239,7 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
   -b "session_token=<JWT>" \
   -H "Content-Type: application/json" \
   -d '{
-    "hornoId": "horno-01",
+    "sectorId": "horno-1",
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
     "temperaturaObjetivo": 195,
     "velocidadCintaObjetivo": 0.22,

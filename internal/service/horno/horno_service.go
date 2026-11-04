@@ -25,13 +25,13 @@ func NewHornoService(hRepo horno.Repository, aRepo alerta.Repository) *HornoServ
 
 // CheckStatus retrieves the status of a specific oven.
 func (s *HornoService) CheckStatus(id string) (*horno.Horno, error) {
-	return s.hornoRepo.GetByID(id)
+	return s.hornoRepo.Ensure(id)
 }
 
 // UpdateTemperature updates the oven's temperature and handles threshold logic, generating database alerts.
 func (s *HornoService) UpdateTemperature(id string, temp float64) (*horno.Horno, error) {
-	// 1. Retrieve the domain entity
-	h, err := s.hornoRepo.GetByID(id)
+	// 1. Retrieve (or create on demand) the sector's simulated oven
+	h, err := s.hornoRepo.Ensure(id)
 	if err != nil {
 		return nil, err
 	}

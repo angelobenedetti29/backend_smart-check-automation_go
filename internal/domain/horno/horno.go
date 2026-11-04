@@ -10,7 +10,10 @@ import "time"
 // restaure el estado a "ACTIVO" (ver internal/service/consigna).
 const EstadoControlManual = "CONTROL_MANUAL"
 
-// Horno represents an industrial oven entity in the factory line.
+// Horno es el registro en memoria del estado de COMANDO/AUDITORÍA del sector:
+// la última consigna despachada y el flag CONTROL_MANUAL. NO es la fuente del
+// estado actual del horno: GET /api/v1/horno se proyecta desde metricas_horno
+// (telemetría real de la Pi) + el lote abierto.
 type Horno struct {
 	ID             string    `json:"id"`
 	Nombre         string    `json:"nombre"`
@@ -25,11 +28,18 @@ type Horno struct {
 // Repository defines the contract for persisting and retrieving Horno entities.
 type Repository interface {
 	GetByID(id string) (*Horno, error)
+	// Ensure devuelve el horno en memoria de un sector, creándolo si todavía no
+	// existe (get-or-create idempotente). Es un registro de comando/auditoría:
+	// lo usan el dispatch de consignas y el endpoint legacy
+	// POST /api/v1/horno/temperatura. El estado real se lee de metricas_horno.
+	Ensure(id string) (*Horno, error)
 	Update(horno *Horno) error
 }
 
 // Service defines the business logic operations for industrial ovens.
 type Service interface {
+	// CheckStatus conserva el acceso al horno en memoria para compatibilidad;
+	// no es la fuente del estado real del horno.
 	CheckStatus(id string) (*Horno, error)
 	UpdateTemperature(id string, temp float64) (*Horno, error)
 }

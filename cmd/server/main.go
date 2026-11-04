@@ -27,8 +27,11 @@ import (
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
 	metricashornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/metricashorno"
+	oeeController "github.com/angelobenedetti29/smart-check-automation/internal/controller/oee"
+	planificacionController "github.com/angelobenedetti29/smart-check-automation/internal/controller/planificacion"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
 	registroController "github.com/angelobenedetti29/smart-check-automation/internal/controller/registro"
+	reportesController "github.com/angelobenedetti29/smart-check-automation/internal/controller/reportes"
 	sectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sector"
 	sseController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sse"
 	userController "github.com/angelobenedetti29/smart-check-automation/internal/controller/user"
@@ -44,10 +47,13 @@ import (
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
+	oeeService "github.com/angelobenedetti29/smart-check-automation/internal/service/oee"
 	optimizador "github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
+	planificacionService "github.com/angelobenedetti29/smart-check-automation/internal/service/planificacion"
 	"github.com/angelobenedetti29/smart-check-automation/internal/service/predictor"
 	productoService "github.com/angelobenedetti29/smart-check-automation/internal/service/producto"
 	registroService "github.com/angelobenedetti29/smart-check-automation/internal/service/registro"
+	reportesService "github.com/angelobenedetti29/smart-check-automation/internal/service/reportes"
 	sectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/sector"
 	userService "github.com/angelobenedetti29/smart-check-automation/internal/service/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
@@ -110,6 +116,9 @@ func main() {
 	metricasHornoRepo := repository.NewMetricasHornoPostgresRepository(pgPool)
 	decisionesRepo := repository.NewDecisionesControlPostgresRepository(pgPool)
 	alertaRepo := repository.NewAlertaPostgresRepository(pgPool)
+	reportesRepo := repository.NewReportesPostgresRepository(pgPool)
+	planificacionRepo := repository.NewPlanificacionPostgresRepository(pgPool)
+	oeeRepo := repository.NewOEERepository(pgPool)
 
 	// El override manual se encola para la Pi salvo que el actuador sea el
 	// backend (lab/debug). Mismo criterio que SetActuador del loop: "backend"
@@ -144,13 +153,16 @@ func main() {
 	deviceVerifier := &deviceauth.Verifier{Store: deviceAuthRepo}
 	registroSvc := registroService.NewService(registrationRepo)
 	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, productoRepo, ovenController, hornoSSEBroker, alertaRepo,
-		decisionesRepo, loteSectorRepo, encolarOverridePi)
+		decisionesRepo, loteSectorRepo, metricasHornoRepo, encolarOverridePi)
 
 	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
 	userSvc := userService.NewService(userRepo)
+	reportesSvc := reportesService.NewService(reportesRepo)
+	oeeSvc := oeeService.NewService(oeeRepo)
 
 	// Catálogo de productos y ciclo de lote por sector (contrato lotes-sector).
 	productoSvc := productoService.NewService(productoRepo)
+	planificacionSvc := planificacionService.NewService(planificacionRepo)
 	// CRUD de sectores (alta/edición/baja) para el panel.
 	sectorSvc := sectorService.NewService(sectorRepo)
 	// LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS en segundos float; 0 = no enforce.
@@ -168,7 +180,7 @@ func main() {
 	}
 
 	// 4. Instantiate Presentation HTTP Handlers
-	hornoHandler := hornoController.NewHornoHandler(hornoSvc, alertaRepo)
+	hornoHandler := hornoController.NewHornoHandler(hornoSvc, alertaRepo, sectorRepo, loteSectorRepo, metricasHornoRepo)
 	loteSectorSSEHandler := sseController.NewSSEHandler(loteSectorSSEBroker)
 	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc, dispositivoRepo)
 	registroHandler := registroController.NewHandler(registroSvc)
@@ -176,6 +188,7 @@ func main() {
 	consignaHandler := consignaController.NewConsignaHandler(consignaSvc)
 	hornoSSEHandler := sseController.NewSSEHandler(hornoSSEBroker)
 	productoHandler := productoController.NewProductoHandler(productoSvc)
+	planificacionHandler := planificacionController.NewHandler(planificacionSvc)
 	loteSectorHandler := loteSectorController.NewLoteSectorHandler(loteSectorSvc)
 	metricasHornoHandler := metricashornoController.NewMetricasHornoHandler(metricasHornoRepo, loteSectorSvc)
 	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
@@ -338,6 +351,17 @@ func main() {
 	}
 	mux.HandleFunc("/api/v1/productos", loggingMiddleware(productoRoleAware))
 	mux.HandleFunc("/api/v1/productos/", loggingMiddleware(productoRoleAware))
+	// Importación CSV de planificación (fase 1 OEE): sólo Supervisor/Admin.
+	planificacionImport := func(h http.HandlerFunc) http.HandlerFunc {
+		return loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes,
+			authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(h))))
+	}
+	mux.HandleFunc("/api/v1/planificacion/plan/import", planificacionImport(planificacionHandler.HandlePlanImport))
+	mux.HandleFunc("/api/v1/planificacion/paradas/import", planificacionImport(planificacionHandler.HandleParadasImport))
+	mux.HandleFunc("/api/v1/planificacion/energia/import", planificacionImport(planificacionHandler.HandleEnergiaImport))
+	// Listado y borrado de lo importado: mismas rutas exactas de arriba ganan
+	// para POST /import; el subtree atiende GET y DELETE.
+	mux.HandleFunc("/api/v1/planificacion/", planificacionImport(planificacionHandler.HandleSubtree))
 	mux.HandleFunc("/api/v1/dispositivos/sector", loggingMiddleware(loteSectorHandler.HandleSector))
 	// Sectores: GET para cualquier rol autenticado; alta/edición/baja para
 	// Supervisor/Administrador, con rate limit por usuario (management) aplicado
@@ -423,6 +447,14 @@ func main() {
 	// (Supervisor/Administrador).
 	mux.HandleFunc("/api/v1/alertas", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, alertaController.HandleListar(alertaController.AlertaDeps{Repo: alertaRepo}))))
 	mux.HandleFunc("/api/v1/alertas/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, alertaController.HandleAck(alertaController.AlertaDeps{Repo: alertaRepo})))))
+
+	// Reportes: resumen agregado y detalle paginado del período para cualquier
+	// rol autenticado.
+	mux.HandleFunc("/api/v1/reportes/resumen", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleResumen(reportesController.ReportesDeps{Service: reportesSvc}))))
+	mux.HandleFunc("/api/v1/reportes/lotes", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleLotes(reportesController.ReportesDeps{Service: reportesSvc}))))
+	mux.HandleFunc("/api/v1/reportes/trazabilidad", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleTrazabilidad(reportesController.ReportesDeps{Service: reportesSvc}))))
+	mux.HandleFunc("/api/v1/reportes/alertas", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleAlertas(reportesController.ReportesDeps{Service: reportesSvc}))))
+	mux.HandleFunc("/api/v1/reportes/oee", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, oeeController.HandleOEE(oeeController.OEEDeps{Service: oeeSvc}))))
 
 	// 6. Autenticación de dispositivo antes del ServeMux, luego cuotas por peer/usuario.
 	limiter := guard.NewLimiter(0.5, 10)     // 30/minute, burst 10 para endpoints públicos de registro

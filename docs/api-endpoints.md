@@ -67,17 +67,29 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 28 | `GET /api/v1/lotes/{id}/confianza-clases` | Confianza media/desvío por clase |
 | 29 | `POST`/`GET /api/v1/lotes/{id}/metricas-horno` | Telemetría cruda del horno |
 | 30 | `GET /api/v1/lotes/{id}/control/events` | SSE: propuestas `control.propuesta` del lote |
+| 31 | `GET /api/v1/reportes/resumen` | Resumen agregado de producción, calidad, proceso, alertas y automatización |
+| 32 | `GET /api/v1/reportes/lotes` | Detalle paginado por cursor de lotes del período (kg y métricas derivadas) |
+| 33 | `GET /api/v1/reportes/trazabilidad` | Snapshot completo de un lote para el PDF de trazabilidad |
+| 34 | `GET /api/v1/reportes/alertas` | Export de alertas del período con filtros y total/truncada |
+| 35 | `POST /api/v1/planificacion/{plan,paradas,energia}/import` | Importación CSV de plan de producción, paradas y lecturas de energía |
+| 36 | `GET /api/v1/reportes/oee` | OEE estándar (A/P/Q) y consumo específico de energía, global y por sector |
+| 37 | `GET/DELETE /api/v1/planificacion/{plan,paradas,energia}[/{id}]` | Listar lo importado por período y borrar una fila |
 
 ---
 
 ## 1. `GET /api/v1/horno` — Consultar estado del horno
 
-Devuelve el estado activo del horno (temperatura, velocidad de cinta, producto/lote en curso) más sus alertas recientes. El horno vive en memoria en el backend; su estado se actualiza con las consignas aplicadas exitosamente. La telemetría real del horno llega por `POST /api/v1/lotes/{id}/metricas-horno`.
+Devuelve una **proyección de solo lectura** del horno del sector a partir de la
+telemetría real de la Pi (`metricas_horno`) del lote abierto, más sus alertas
+recientes. Si no hay telemetría, los campos numéricos viajan `null`: el backend
+no inventa temperatura. El horno en memoria del backend ya **no** es la fuente
+del estado: sólo registra el comando/auditoría de la última consigna y el flag
+`CONTROL_MANUAL`.
 
-**Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `id` (requerido).
+**Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `sector_id` (requerido; `id` se acepta como alias legacy).
 
 ```bash
-curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno?id=horno-01"
+curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno?sector_id=horno-1"
 ```
 
 ```json
@@ -86,23 +98,53 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno?id=horno-01"
   "message": "Estado de Horno verificado exitosamente",
   "data": {
     "horno": {
-      "id": "horno-01", "nombre": "Horno Rotativo de Clinkerización A-1",
-      "temperatura": 170, "velocidad_cinta": 0.2,
-      "producto_id": "a1b2c3d4-5678-90ab-cdef-1234567890ab", "lote_id": "1d1e9071-...",
-      "estado": "ACTIVO", "ultimo_check": "2026-08-06T12:00:00Z"
+      "id": "horno-1",
+      "nombre": "Horno 1",
+      "sector_id": "horno-1",
+      "lote_id": "1d1e9071-...",
+      "producto_id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+      "temperatura": 170.5,
+      "velocidad_cinta": 0.21,
+      "temp_comb_1": 512.4,
+      "humedad_horno": 12.5,
+      "temp_ambiente": 24.1,
+      "humedad_ambiente": 55.0,
+      "temp_objetivo": 170.0,
+      "vel_objetivo": 0.2,
+      "confianza_deteccion": 0.93,
+      "estado": "ACTIVO",
+      "fuente": "telemetria",
+      "ultimo_check": "2026-08-06T12:00:00Z",
+      "antiguedad_segundos": 3
     },
-    "alertas_recientes": [],
-    "saludo": "Hola Mundo desde el controlador de Horno en Arquitectura de Capas Go!"
+    "alertas_recientes": []
   }
 }
 ```
 
+- `lote_id`/`producto_id`: lote ABIERTO del sector (o `null`).
+- `temperatura`/`velocidad_cinta` y el resto de las lecturas: último sample de
+  `metricas_horno` del lote (o `null` si ese sensor no reportó).
+- `ultimo_check`/`antiguedad_segundos`: `received_at` del último sample y su
+  antigüedad (o `null`).
+
+| `estado` | Significado |
+|---|---|
+| `SIN_LOTE` | El sector no tiene lote abierto |
+| `SIN_TELEMETRIA` | Hay lote abierto pero 0 muestras |
+| `SIN_DATOS` | Hay muestra pero T1 y velocidad de cinta son `null` |
+| `ACTIVO` | Muestra con T o V y antigüedad ≤ 30 s |
+| `DESACTUALIZADO` | La última muestra tiene más de 30 s |
+| `CONTROL_MANUAL` | Alerta `CONSIGNA_ENLACE` ACTIVA para el sector/horno |
+
+`fuente` vale `sin_lote`, `sin_telemetria` o `telemetria` según el origen de los datos.
+
 | Código | Motivo |
 |---|---|
 | 405 | Método distinto de GET |
-| 400 | Falta el query param `id` |
+| 400 | Falta el query param `sector_id` (o el alias `id`) |
+| 404 | El sector no existe |
 | 401 | Falta la cookie JWT o la sesión es inválida/expirada |
-| 404 | No existe un horno con ese `id` |
 
 ---
 
@@ -693,7 +735,7 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos/metricas
 
 ## 14. `POST /api/v1/horno/consigna` — Envío manual de consigna térmica — SCA-320
 
-Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual). El despacho se audita en `historial_consignas` con `origen=MANUAL` y actualiza el estado del horno en memoria. El backend no escribe el PLC: el despacho va a un stub interno (`SimulatedOvenController`); la Pi ENTRADA es la única que aplica el setpoint real en el PLC.
+Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual). El despacho se audita en `historial_consignas` con `origen=MANUAL` y actualiza el registro de comando en memoria (el estado real del horno se lee de `metricas_horno`, no de ese registro). El backend no escribe el PLC: el despacho va a un stub interno (`SimulatedOvenController`); la Pi ENTRADA es la única que aplica el setpoint real en el PLC.
 
 Si el lote está en modo **MANUAL**, está abierto y `CONTROL_ACTUADOR=pi`, además se encola una decisión ya aprobada (`muestras=0`) para que la Pi la aplique como `manual_override` (ver §24). En **AUTOMATICO**/**SUPERVISION** el envío manual se despacha y audita igual, pero el loop del MPC sigue gobernando las propuestas siguientes.
 
@@ -703,7 +745,7 @@ Si el lote está en modo **MANUAL**, está abierto y `CONTROL_ACTUADOR=pi`, adem
 curl -X POST http://localhost:8080/api/v1/horno/consigna \
   -b "session_token=$JWT" -H "Content-Type: application/json" \
   -d '{
-    "hornoId": "horno-01",
+    "sectorId": "horno-1",
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
     "temperaturaObjetivo": 175,
     "velocidadCintaObjetivo": 0.25,
@@ -716,7 +758,7 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
 {
   "success": true, "message": "Consigna manual despachada al horno",
   "data": {
-    "id": "0cd37ba5-...", "hornoId": "horno-01", "loteId": "1d1e9071-...", "productoId": "a1b2c3d4-...",
+    "id": "0cd37ba5-...", "hornoId": "horno-1", "loteId": "1d1e9071-...", "productoId": "a1b2c3d4-...",
     "temperaturaObjetivo": 175, "velocidadCintaObjetivo": 0.25, "origen": "MANUAL",
     "usuario": "operario-demo", "exitosa": true,
     "temperaturaPrevia": 170, "velocidadCintaPrevia": 0.2, "creadaEn": "2026-08-06T12:00:00Z"
@@ -725,7 +767,7 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
 }
 ```
 
-`usuario` y `loteId` son opcionales; `productoId` es **obligatorio**.
+`usuario` y `loteId` son opcionales; `sectorId` (o el alias legacy `hornoId`) y `productoId` son **obligatorios**. Si se envía `loteId` de un lote existente, su `sector_id` manda y un `sectorId` distinto devuelve 422.
 
 | Código | Motivo |
 |---|---|
@@ -1362,6 +1404,685 @@ aprobación. Se manda `: heartbeat` cada 30s.
 
 ---
 
+## 31. `GET /api/v1/reportes/resumen` — Resumen agregado del período
+
+Devuelve agregados de producción, calidad, proceso, alertas y automatización
+para un rango de fechas ART (`America/Argentina/Buenos_Aires`), con filtros
+opcionales por sector, producto y turno. Los días se agrupan por fecha ART y
+las series sólo incluyen días con datos.
+
+**Auth:** cookie JWT `session_token` (cualquier rol autenticado).
+
+| Query param | Obligatorio | Descripción |
+|---|---|---|
+| `desde` / `hasta` | No | `YYYY-MM-DD`, inclusivos. Default: últimos 30 días (hasta = hoy ART). Rango máximo: 366 días inclusive. |
+| `sector_id` | No | Filtra lotes/alertas del sector. |
+| `producto_id` | No | UUID del producto. |
+| `turno` | No | `mañana`, `tarde` o `noche`. |
+
+```bash
+curl -b "session_token=$JWT" \
+  "http://localhost:8080/api/v1/reportes/resumen?desde=2026-10-01&hasta=2026-10-31&sector_id=horno-1"
+```
+
+```json
+{
+  "success": true,
+  "message": "Resumen generado",
+  "data": {
+    "periodo": {"desde":"2026-10-01","hasta":"2026-10-31","timezone":"America/Argentina/Buenos_Aires"},
+    "filtros": {"sector_id":"horno-1","producto_id":null,"turno":null},
+    "produccion": {
+      "lotes_total":42,"lotes_cerrados":40,"lotes_abiertos":2,
+      "unidades":12500,"unidades_ok":11800,"unidades_crudas":400,"unidades_quemadas":300,
+      "kg_total_estimados":3125.0,"kg_ok_estimados":2950.0,"kg_merma_estimados":175.0,
+      "duracion_media_min":48.2,"duracion_p95_min":75.0,
+      "unidades_por_hora":260.4,"kg_por_hora":65.1,
+      "por_turno":[{"clave":"mañana","nombre":"","lotes":14,"unidades":4200,"kg_estimados":1050.0,"fpy_pct":94.5}],
+      "por_sector":[{"clave":"horno-1","nombre":"Horno 1","lotes":20,"unidades":6000,"kg_estimados":1500.0,"fpy_pct":93.0}],
+      "por_producto":[{"clave":"a1b2c3d4-...","nombre":"Tostada Integral","lotes":30,"unidades":9000,"kg_estimados":2250.0,"fpy_pct":95.0}]
+    },
+    "calidad": {
+      "fpy_pct":94.4,"crudo_pct":3.2,"quemado_pct":2.4,
+      "confianza_promedio":0.87,"lotes_conformes_pct":85.0,
+      "serie_diaria":[{"fecha":"2026-10-01","lotes":2,"unidades":420,"kg_estimados":105.0,"fpy_pct":93.8,"crudo_pct":3.5,"quemado_pct":2.7}]
+    },
+    "proceso": {
+      "temp_mae_c":2.1,"temp_en_tolerancia_pct":88.5,
+      "vel_mae":0.012,"vel_en_tolerancia_pct":91.2,
+      "serie_diaria":[{"fecha":"2026-10-01","temp_real_prom":181.2,"temp_objetivo_prom":180.0,"temp_en_tolerancia_pct":87.0}]
+    },
+    "alertas": {
+      "total":18,"por_severidad":{"INFO":10,"WARNING":6,"CRITICAL":2},
+      "por_tipo":[{"clave":"TEMPERATURA_HORNO","total":8}],
+      "ack_pct":83.3,"mtta_min":12.5,
+      "serie_diaria":[{"fecha":"2026-10-01","total":2,"criticas":0}]
+    },
+    "automatizacion": {
+      "decisiones_total":320,"mpc_pct":62.5,"operario_pct":20.0,"sin_aplicar_pct":17.5,
+      "z_mae":0.18,
+      "top_skip":[{"clave":"confianza_baja","total":12}],
+      "modo_pct":{"AUTOMATICO":55.0,"SUPERVISION":35.0,"MANUAL":10.0}
+    }
+  }
+}
+```
+
+Sólo los lotes `CERRADO` con `inicio_at` en el período suman unidades/kg y
+calidad; los `ABIERTO` se informan aparte en `lotes_abiertos`. Las tasas,
+promedios y duraciones sin datos viajan como `null`; los arrays siempre son
+`[]`.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 400 | Fecha inválida, `desde > hasta`, rango > 366 días, turno inválido o `producto_id` no UUID |
+| 500 | Error interno |
+
+---
+
+## 32. `GET /api/v1/reportes/lotes` — Detalle paginado de lotes del período
+
+Devuelve el detalle de lotes (CERRADOS y ABIERTOS) cuyo `inicio_at` cae en el
+período ART, con conteos, kg estimados y métricas derivadas. Es la fuente para
+el CSV y el anexo del PDF; no reemplaza al historial operativo de
+`GET /api/v1/lotes`.
+
+**Auth:** cookie JWT `session_token` (cualquier rol autenticado).
+
+| Query param | Obligatorio | Descripción |
+|---|---|---|
+| `desde` / `hasta` | No | `YYYY-MM-DD`, inclusivos. Default: últimos 30 días (hasta = hoy ART). Rango máximo: 366 días inclusive. |
+| `sector_id` | No | Filtra por sector. |
+| `producto_id` | No | UUID del producto. |
+| `turno` | No | `mañana`, `tarde` o `noche`. |
+| `limite` | No | Filas por página. Default 100, máximo 1000. |
+| `antes_de` | No | Cursor opaco de la página anterior (base64url de `<inicio_at RFC3339Nano>\|<id>`). Se devuelve en `siguiente_cursor`. |
+
+Orden: `inicio_at DESC, id DESC`. `siguiente_cursor` viaja sólo cuando la
+página se llenó (hay más filas). Los lotes ABIERTOS traen
+`cerrado_en`/`motivo_cierre`/`duracion_min` en `null` y conteos parciales; los
+buckets nulos se preservan en `conteos` y `kg`.
+
+```bash
+curl -b "session_token=$JWT" \
+  "http://localhost:8080/api/v1/reportes/lotes?desde=2026-10-01&hasta=2026-10-31&limite=100"
+```
+
+```json
+{
+  "success": true,
+  "message": "Lotes del reporte obtenidos",
+  "data": [
+    {
+      "id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+      "sector_id": "horno-1",
+      "sector_nombre": "Sector 1",
+      "producto_id": "b2c3d4e5-6789-0abc-def1-234567890abc",
+      "producto_nombre": "Tostada Integral",
+      "turno": "mañana",
+      "estado": "CERRADO",
+      "abierto_en": "2026-10-01T10:00:00-03:00",
+      "cerrado_en": "2026-10-01T11:00:00-03:00",
+      "motivo_cierre": "manual",
+      "modo": "AUTOMATICO",
+      "conteos": {"ok": 90, "crudo": 6, "quemado": 4, "total": 100},
+      "kg": {"ok": 22.5, "crudo": 1.5, "quemado": 1.0, "total": 25.0, "merma": 2.5},
+      "confianza_promedio": 0.8,
+      "duracion_min": 60.0,
+      "fpy_pct": 90.0,
+      "crudo_pct": 6.0,
+      "quemado_pct": 4.0
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "pageSize": 100,
+  "siguiente_cursor": "MjAyNi0xMC0wMVQxMzowMDowMFp8YTFCMkMzRDQtNTY3OC05MEFCLUNERUYtMTIzNDU2Nzg5MEFC"
+}
+```
+
+`total` cuenta las filas que matchean los filtros sin aplicar el cursor. Las
+tasas viajan en `null` cuando la suma de buckets es 0; `duracion_min` sólo se
+calcula si el lote tiene `fin_at`.
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 400 | Fecha inválida, `desde > hasta`, rango > 366 días, turno inválido, `producto_id` no UUID, `limite` no numérico o `antes_de` malformado |
+| 500 | Error interno |
+
+---
+
+## 33. `GET /api/v1/reportes/trazabilidad` — Snapshot de trazabilidad de un lote
+
+Devuelve en una sola respuesta todo lo necesario para el PDF de trazabilidad de
+un lote: cabecera con conteos/kg/métricas derivadas y parámetros de control,
+KPIs y serie temporal de proceso, confianza por clase, decisiones del MPC,
+consignas, alertas y timestamp de generación. La lectura se hace en una
+transacción read-only `REPEATABLE READ` para que todos los bloques compartan el
+mismo snapshot.
+
+**Auth:** cookie JWT `session_token` (cualquier rol autenticado).
+
+| Query param | Obligatorio | Descripción |
+|---|---|---|
+| `lote_id` | Sí | UUID del lote. Si falta o es inválido → 400; si no existe → 404. |
+
+Proceso: se calculan MAE y % en tolerancia sobre `metricas_horno` del lote,
+ignorando filas con real u objetivo nulo. El objetivo de temperatura es
+`COALESCE(m.temp_objetivo, lp.temp1_objetivo)` y el de velocidad
+`COALESCE(m.vel_objetivo, lp.vel_objetivo)`; las tolerancias son
+`lp.tolerancia_temp_c` y `COALESCE(lp.delta_vel_max, pr.delta_vel_max)`. La
+serie agrega por buckets de `max(60s, ceil(duración/120))` (usa `now()` si el
+lote está abierto) para acotar a ~120 puntos. Decisiones: últimas 100 por
+`created_at DESC`. Consignas y alertas: todas, por fecha ascendente. Los arrays
+siempre viajan como `[]`; tasas/promedios/valores opcionales viajan en `null`.
+
+```bash
+curl -b "session_token=$JWT" \
+  "http://localhost:8080/api/v1/reportes/trazabilidad?lote_id=a1b2c3d4-5678-90ab-cdef-1234567890ab"
+```
+
+```json
+{
+  "success": true,
+  "message": "Trazabilidad del lote",
+  "data": {
+    "lote": {
+      "id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+      "sector_id": "horno-1",
+      "sector_nombre": "Sector 1",
+      "producto_id": "b2c3d4e5-6789-0abc-def1-234567890abc",
+      "producto_nombre": "Tostada Integral",
+      "turno": "mañana",
+      "estado": "CERRADO",
+      "abierto_en": "2026-11-04T10:00:00-03:00",
+      "cerrado_en": "2026-11-04T11:00:00-03:00",
+      "motivo_cierre": "manual",
+      "modo": "AUTOMATICO",
+      "conteos": {"ok": 90, "crudo": 6, "quemado": 4, "total": 100},
+      "kg": {"ok": 22.5, "crudo": 1.5, "quemado": 1.0, "total": 25.0, "merma": 2.5},
+      "confianza_promedio": 0.8,
+      "duracion_min": 60.0,
+      "fpy_pct": 90.0,
+      "crudo_pct": 6.0,
+      "quemado_pct": 4.0,
+      "temp1_objetivo": 180.0,
+      "vel_objetivo": 0.2,
+      "tolerancia_temp_c": 2.0,
+      "umbral_aceptacion_crudo": 5.0,
+      "umbral_aceptacion_quemado": 5.0,
+      "delta_temp1_max_c": null,
+      "delta_vel_max": null
+    },
+    "proceso": {
+      "temp_mae_c": 1.2,
+      "temp_en_tolerancia_pct": 88.5,
+      "vel_mae": 0.012,
+      "vel_en_tolerancia_pct": 91.2,
+      "serie": [
+        {"ts": "2026-11-04T14:00:00-03:00", "temp_real": 181.2, "temp_objetivo": 180.0,
+         "vel_real": 0.2, "vel_objetivo": 0.2, "muestras": 12}
+      ]
+    },
+    "confianza_clases": [
+      {"clase": "ok", "confianza_media": 0.9, "confianza_stddev": 0.05, "muestras": 100}
+    ],
+    "decisiones": [
+      {"id": "d1e2f3a4-5678-90ab-cdef-1234567890ab", "creada_en": "2026-11-04T10:05:00-03:00",
+       "ventana_inicio": "2026-11-04T10:00:00-03:00", "ventana_fin": "2026-11-04T10:05:00-03:00",
+       "muestras": 30, "temp_actual": 180.0, "vel_actual": 0.2,
+       "pct_ok_obs": 95.0, "pct_crudos_obs": 2.0, "pct_quemados_obs": 3.0,
+       "conf_promedio": 0.9, "temp_propuesto": 181.0, "vel_propuesto": 0.2,
+       "temp_aplicado": 181.0, "vel_aplicado": 0.2, "z_observado": 0.2,
+       "z_predicho": 0.3, "razon_skipped": null, "aplicado_por": "MPC",
+       "aprobada_por": null, "aprobada_at": null}
+    ],
+    "consignas": [
+      {"id": "c1d2e3f4-5678-90ab-cdef-1234567890ab", "creada_en": "2026-11-04T10:00:00-03:00",
+       "temperatura_objetivo": 180.0, "velocidad_cinta_objetivo": 0.2, "origen": "MANUAL",
+       "usuario": "operario", "exitosa": true, "motivo_error": null,
+       "temperatura_previa": 179.0, "velocidad_cinta_previa": 0.19}
+    ],
+    "alertas": [
+      {"id": "a1f2e3d4-5678-90ab-cdef-1234567890ab", "creada_en": "2026-11-04T10:10:00-03:00",
+       "tipo": "TEMPERATURA_HORNO", "severidad": "CRITICAL", "estado": "ACK",
+       "mensaje": "Temperatura fuera de rango", "acked_at": "2026-11-04T10:12:00-03:00"}
+    ],
+    "generado_en": "2026-11-04T11:05:00-03:00"
+  }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 400 | `lote_id` ausente o no es un UUID |
+| 404 | El lote no existe |
+| 500 | Error interno |
+
+---
+
+## 34. `GET /api/v1/reportes/alertas` — Export de alertas del período
+
+Devuelve las alertas cuyo `created_at` cae en el período ART, con los mismos
+filtros del resumen más `estado`, y sin el tope operativo de 200 de
+`GET /api/v1/alertas`. Es la fuente para exportar alertas desde el panel.
+
+**Auth:** cookie JWT `session_token` (cualquier rol autenticado).
+
+| Query param | Obligatorio | Descripción |
+|---|---|---|
+| `desde` / `hasta` | No | `YYYY-MM-DD`, inclusivos. Default: últimos 30 días (hasta = hoy ART). Rango máximo: 366 días inclusive. |
+| `sector_id` | No | Filtra por `a.sector_id`. |
+| `producto_id` | No | UUID del producto; se aplica vía el lote (las alertas sin lote quedan excluidas). |
+| `turno` | No | `mañana`, `tarde` o `noche`; vía el lote (excluye alertas sin lote). |
+| `estado` | No | `ACTIVA`, `ACK` o `RESUELTA`. Vacío = todas. Otro valor → 400. |
+| `limite` | No | Filas a devolver. Default 1000, máximo 5000. No numérico → 400. |
+
+Orden: `created_at DESC`. `total` cuenta las alertas que matchean los filtros
+sin límite; `truncada` es `true` cuando `total` supera las filas devueltas.
+`sector_id`, `lote_id`, `producto_id`, `turno`, `acked_at`, `acked_por` y
+`mtta_min` viajan en `null` cuando no aplican. `mtta_min` es
+`(acked_at - created_at)` en minutos y sólo se calcula con `acked_at` no nulo;
+`acked_por` es el email del usuario que reconoció la alerta. Lista y total se
+leen en una transacción read-only `REPEATABLE READ`.
+
+```bash
+curl -b "session_token=$JWT" \
+  "http://localhost:8080/api/v1/reportes/alertas?desde=2026-10-01&hasta=2026-10-31&estado=ACK&limite=1000"
+```
+
+```json
+{
+  "success": true,
+  "message": "Alertas del período",
+  "data": {
+    "total": 120,
+    "truncada": false,
+    "alertas": [
+      {
+        "id": "a1f2e3d4-5678-90ab-cdef-1234567890ab",
+        "creada_en": "2026-11-04T14:02:00-03:00",
+        "sector_id": "s1",
+        "sector_nombre": "Sector 1",
+        "lote_id": "b2c3d4e5-6789-0abc-def1-234567890abc",
+        "producto_id": "c3d4e5f6-7890-abcd-ef12-34567890abcd",
+        "producto_nombre": "Tostada Integral",
+        "turno": "tarde",
+        "tipo": "TEMPERATURA_HORNO",
+        "severidad": "CRITICAL",
+        "estado": "ACK",
+        "mensaje": "Temperatura fuera de rango",
+        "acked_at": "2026-11-04T14:12:00-03:00",
+        "acked_por": "admin@fermar.com.ar",
+        "mtta_min": 10.0
+      }
+    ]
+  }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 405 | Método distinto de GET |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 400 | Fecha inválida, `desde > hasta`, rango > 366 días, turno inválido, `producto_id` no UUID, `estado` inválido o `limite` no numérico |
+| 500 | Error interno |
+
+---
+
+## 35. `POST /api/v1/planificacion/{plan,paradas,energia}/import` — Importación CSV para OEE
+
+Importa el plan de producción, los eventos de parada y las lecturas de energía
+que alimentan los indicadores de OEE. Cada endpoint recibe un único archivo CSV
+en un body `multipart/form-data` con el campo `file`.
+
+**Auth:** cookie JWT `session_token`, roles **Supervisor** o **Administrador**.
+
+| Endpoint | Tabla destino | Clave de UPSERT |
+|---|---|---|
+| `POST /api/v1/planificacion/plan/import` | `plan_produccion` | `(sector_id, inicio_at, producto_id)` |
+| `POST /api/v1/planificacion/paradas/import` | `eventos_parada` | `(sector_id, inicio_at, causa_codigo)` |
+| `POST /api/v1/planificacion/energia/import` | `lecturas_energia` | `(sector_id, periodo_inicio, periodo_fin)` |
+
+### Formato y reglas comunes
+
+- Límite de archivo: **5 MB**. Body `multipart/form-data`; el campo debe llamarse
+  `file`. Si falta el archivo, el header es inválido o el archivo excede el
+  límite, responde **400**.
+- CSV con encoding UTF-8; se tolera **BOM** al inicio. La cabecera debe ser exacta
+  (el orden importa); los valores se normalizan con `TrimSpace`.
+- Fechas/horas: `YYYY-MM-DD HH:MM` se interpretan como hora de Argentina
+  (`America/Argentina/Buenos_Aires`); también se acepta RFC3339 con offset
+  (`2026-11-04T14:00:00-03:00`). Las fechas sueltas usan `YYYY-MM-DD`.
+- Cada fila se valida de forma independiente. Las inválidas se reportan en
+  `errores` con el número de fila (la fila 1 es la cabecera) y **no se insertan**.
+- Antes de insertar se valida que `sector_id`, `producto_id`, y `lote_id` cuando
+  viene, existan. Las filas válidas se escriben en una sola transacción con
+  `ON CONFLICT ... DO UPDATE`.
+- **Plan:** se rechazan por fila los planes que se solapen con otro plan del
+  mismo sector (en la base o dentro del mismo CSV), con semántica half-open
+  (`inicio < fin_otro && inicio_otro < fin`). El error se reporta como
+  `"solape con otro plan del sector"` y la fila no se inserta; el resto del CSV
+  se procesa igual. Reimportar la misma clave de UPSERT
+  `(sector_id, inicio_at, producto_id)` actualiza sin considerarse solape.
+- Si todas las filas fallan, la respuesta es **200** con `data.errores`; un error
+  inesperado de base de datos es **500**.
+
+**Cabeceras CSV:**
+
+| Endpoint | Cabecera exacta |
+|---|---|
+| Plan | `sector_id,fecha,turno,producto_id,inicio,fin,kg_plan` |
+| Paradas | `sector_id,lote_id,causa_codigo,tipo,inicio,fin,notas` |
+| Energía | `sector_id,lote_id,periodo_inicio,periodo_fin,kwh,gas_m3` |
+
+Reglas por columna:
+
+- **Plan:** `turno` ∈ `mañana|tarde|noche`; `kg_plan > 0`; `fin > inicio`.
+- **Paradas:** `lote_id` vacío = sin lote; `tipo` ∈ `PLANIFICADA|NO_PLANIFICADA`;
+  `causa_codigo` requerido; `notas` opcional; `fin > inicio`.
+- **Energía:** `lote_id` y `gas_m3` opcionales; `kwh >= 0`; `gas_m3 >= 0` si
+  viene; `periodo_fin > periodo_inicio`.
+
+### Ejemplo
+
+```bash
+curl -b "session_token=$JWT" \
+  -F "file=@plan.csv" \
+  "http://localhost:8080/api/v1/planificacion/plan/import"
+```
+
+`plan.csv`:
+
+```csv
+sector_id,fecha,turno,producto_id,inicio,fin,kg_plan
+horno-1,2026-11-04,mañana,a1b2c3d4-5678-90ab-cdef-1234567890ab,2026-11-04 06:00,2026-11-04 14:00,500.500
+horno-1,2026-11-04,tarde,a1b2c3d4-5678-90ab-cdef-1234567890ab,2026-11-04 14:00,2026-11-04 22:00,480.000
+```
+
+```json
+{
+  "success": true,
+  "message": "Plan importado",
+  "data": {
+    "procesadas": 2,
+    "insertadas": 1,
+    "actualizadas": 1,
+    "errores": []
+  }
+}
+```
+
+Si alguna fila falla:
+
+```json
+{
+  "success": true,
+  "message": "Plan importado",
+  "data": {
+    "procesadas": 3,
+    "insertadas": 2,
+    "actualizadas": 0,
+    "errores": [
+      { "fila": 3, "mensaje": "sector_id inexistente" }
+    ]
+  }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 200 | Importación procesada (aunque todas las filas tengan errores) |
+| 400 | Falta el campo `file`, el archivo supera 5 MB, el body no es multipart o la cabecera/estructura CSV es inválida |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | El rol no es Supervisor ni Administrador |
+| 405 | Método distinto de POST |
+| 500 | Error inesperado de base de datos |
+
+---
+
+## 36. `GET /api/v1/reportes/oee` — OEE y consumo específico de energía
+
+Calcula el OEE estándar del período, **global** y **por sector**, más el
+consumo específico de energía. Usa el plan de producción, las paradas, los
+lotes cerrados y las lecturas de energía cargados por la importación CSV
+(sección 35).
+
+**Auth:** cookie JWT `session_token`, cualquier rol.
+
+**Query params:**
+
+| Param | Obligatorio | Descripción |
+|---|---|---|
+| `desde` | No | Fecha ART inclusive `YYYY-MM-DD`. Default: `hasta - 29 días`. |
+| `hasta` | No | Fecha ART inclusive `YYYY-MM-DD`. Default: hoy. |
+| `sector_id` | No | Sector a calcular. Vacío u omitido = todos. |
+
+Mismas reglas de período que el resto de reportes: fechas inclusivas, máximo
+**366 días**. **No** se admite filtro por `producto_id` ni `turno`: el plan y
+las paradas no se pueden desagregar de forma consistente por producto/turno.
+
+### Fórmulas
+
+El período se traduce a `[desde 00:00, hasta+1día 00:00)` ART. Plan, paradas y
+energía se prorratean por su **solape** con esa ventana; los lotes se cuentan
+por `inicio_at` dentro de la ventana (sin prorrateo).
+
+- **Tiempo planificado** = suma del solape del plan, en minutos.
+- **Horas planificadas por producto** = solape por producto / 3600.
+- **Capacidad teórica kg** = Σ (`productos.capacidad_nominal_kg_h` × horas
+  planificadas del producto). Si un producto planificado no tiene capacidad
+  `> 0`, `performance_pct` es `null` y se agrega
+  `sin_capacidad_producto:<uuid>`.
+- **planned_downtime** = solape de paradas `PLANIFICADA`.
+- **unplanned_downtime** = solape de paradas `NO_PLANIFICADA`.
+- **operating** = `max(0, tiempo_planificado - unplanned_downtime)`.
+- **kg_plan** = suma de `kg_plan` de las filas de plan **prorrateada por su
+  solape** con el período (`kg_plan × solape / duración del plan`), igual que la
+  energía.
+- **kg_producidos** = Σ `COALESCE(correctos_kg,0)+COALESCE(crudos_kg,0)+COALESCE(quemados_kg,0)`
+  de lotes `CERRADO`.
+- **kg_ok** = Σ `COALESCE(correctos_kg,0)` de esos lotes.
+- **Availability** = `operating / tiempo_planificado × 100`. Sin plan: `null`
+  y motivo `sin_plan_produccion`.
+- **Performance** = `kg_producidos / capacidad_teórica × 100`. Sin capacidad:
+  `null` y motivo `sin_capacidad_producto:<uuid>`.
+- **Quality** = `kg_ok / kg_producidos × 100`. Sin producción: `null` y motivo
+  `sin_produccion`.
+- **OEE** = `A × P × Q / 10000`. Si falta A, P o Q, es `null`.
+- **Energía** = suma de lecturas que solapan el período. `gas_m3` suma sólo
+  lecturas no nulas y es `null` si ninguna mide gas. Sin lecturas: `energy` es
+  `null` y se agrega `sin_lecturas_energia` (no bloquea el OEE).
+- `kwh_por_kg_ok = kwh / kg_ok` y `gas_m3_por_kg_ok = gas_m3 / kg_ok` sólo si
+  `kg_ok > 0`.
+
+Redondeos: porcentajes a **2** decimales, kg y consumos específicos (kWh/kg,
+m³/kg) a **3**, minutos a **1**. `calculable` es `true` sólo si A, P y Q están
+calculados. `motivos` siempre es un array (vacío si no hay faltantes).
+
+### Sectores incluidos
+
+`por_sector` incluye los sectores con datos de plan, lotes, paradas o energía
+en el período. Si se filtró `sector_id`, se incluye ese sector aunque no tenga
+datos (`calculable=false` con sus motivos). Sin datos y sin filtro,
+`por_sector` es `[]` y `global` queda `calculable=false` con
+`sin_plan_produccion`. `global` agrega todos los sectores filtrados
+(`sector_id=""`, `sector_nombre="Todos"`); los cocientes se recalculan sobre
+los totales, no se promedian tasas.
+
+### Ejemplo
+
+```bash
+curl -b "session_token=$JWT" \
+  "http://localhost:8080/api/v1/reportes/oee?desde=2026-11-01&hasta=2026-11-04"
+```
+
+```json
+{
+  "success": true,
+  "message": "OEE del período",
+  "data": {
+    "periodo": { "desde": "2026-11-01", "hasta": "2026-11-04", "timezone": "America/Argentina/Buenos_Aires" },
+    "filtros": { "sector_id": null },
+    "global": {
+      "sector_id": "",
+      "sector_nombre": "Todos",
+      "calculable": true,
+      "motivos": [],
+      "availability_pct": 87.5,
+      "performance_pct": 85.71,
+      "quality_pct": 95.0,
+      "oee_pct": 71.25,
+      "planned_time_min": 480.0,
+      "planned_downtime_min": 0.0,
+      "unplanned_downtime_min": 60.0,
+      "operating_time_min": 420.0,
+      "kg_plan": 1000.0,
+      "kg_producidos": 600.0,
+      "kg_ok": 570.0,
+      "capacidad_teorica_kg": 700.0,
+      "energy": {
+        "kwh": 300.0,
+        "gas_m3": null,
+        "kwh_por_kg_ok": 0.526,
+        "gas_m3_por_kg_ok": null
+      }
+    },
+    "por_sector": [
+      {
+        "sector_id": "horno-1",
+        "sector_nombre": "Horno 1",
+        "calculable": true,
+        "motivos": [],
+        "availability_pct": 87.5,
+        "performance_pct": 85.71,
+        "quality_pct": 95.0,
+        "oee_pct": 71.25,
+        "planned_time_min": 480.0,
+        "planned_downtime_min": 0.0,
+        "unplanned_downtime_min": 60.0,
+        "operating_time_min": 420.0,
+        "kg_plan": 1000.0,
+        "kg_producidos": 600.0,
+        "kg_ok": 570.0,
+        "capacidad_teorica_kg": 700.0,
+        "energy": {
+          "kwh": 300.0,
+          "gas_m3": null,
+          "kwh_por_kg_ok": 0.526,
+          "gas_m3_por_kg_ok": null
+        }
+      }
+    ]
+  }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 200 | Cálculo generado (aunque no sea `calculable`) |
+| 400 | Fecha inválida, `desde` posterior a `hasta` o rango mayor a 366 días |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 405 | Método distinto de GET |
+| 500 | Error inesperado de base de datos |
+
+---
+
+## 37. `GET`/`DELETE /api/v1/planificacion/{plan,paradas,energia}` — Listado y borrado de lo importado
+
+Lista lo importado en un período para revisarlo y permite borrar una fila por
+id. La corrección se hace reimportando el CSV (UPSERT de la sección 35).
+
+**Auth:** cookie JWT `session_token`, roles **Supervisor** o **Administrador**.
+
+| Método y ruta | Tabla |
+|---|---|
+| `GET /api/v1/planificacion/plan` | `plan_produccion` |
+| `GET /api/v1/planificacion/paradas` | `eventos_parada` |
+| `GET /api/v1/planificacion/energia` | `lecturas_energia` |
+| `DELETE /api/v1/planificacion/plan/{id}` | `plan_produccion` |
+| `DELETE /api/v1/planificacion/paradas/{id}` | `eventos_parada` |
+| `DELETE /api/v1/planificacion/energia/{id}` | `lecturas_energia` |
+
+### Parámetros del listado
+
+| Parámetro | Default | Reglas |
+|---|---|---|
+| `desde` | `hasta - 29 días` | `YYYY-MM-DD`, día ART inclusive |
+| `hasta` | hoy (ART) | `YYYY-MM-DD`, día ART inclusive |
+| `sector_id` | — | filtro opcional por sector |
+| `limite` | 500 | entero; no numérico → **400**; no positivo usa el default; máximo 2000 |
+
+- Rango máximo: **366 días** inclusive. `desde > hasta` → **400**.
+- Orden: `inicio_at` (plan, paradas) o `periodo_inicio` (energía) **descendente**.
+- `total` es el count con los mismos filtros, sin límite; `truncada` indica
+  `total > len(items)`.
+- El count y la lista salen de una transacción read-only `REPEATABLE READ`.
+- Los timestamps viajan en hora ART (`-03:00`); `fecha` es `YYYY-MM-DD`.
+
+Items:
+
+- **Plan:** `id, sector_id, sector_nombre, producto_id, producto_nombre, fecha,
+  turno, inicio_at, fin_at, kg_plan`.
+- **Paradas:** `id, sector_id, sector_nombre, lote_id (null), inicio_at, fin_at,
+  causa_codigo, tipo, notas (null)`.
+- **Energía:** `id, sector_id, sector_nombre, lote_id (null), periodo_inicio,
+  periodo_fin, kwh, gas_m3 (null)`.
+
+### Borrado
+
+`{id}` debe ser un UUID válido (**400** si no lo es) y existir (**404** si no
+existe). Éxito:
+
+```json
+{"success": true, "message": "Registro eliminado"}
+```
+
+### Ejemplo
+
+```json
+{
+  "success": true,
+  "message": "Plan obtenido",
+  "data": {
+    "total": 12,
+    "truncada": false,
+    "items": [
+      {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "sector_id": "horno-1",
+        "sector_nombre": "Horno 1",
+        "producto_id": "22222222-2222-2222-2222-222222222222",
+        "producto_nombre": "Pan Francés",
+        "fecha": "2026-11-04",
+        "turno": "mañana",
+        "inicio_at": "2026-11-04T06:00:00-03:00",
+        "fin_at": "2026-11-04T14:00:00-03:00",
+        "kg_plan": 500
+      }
+    ]
+  }
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 200 | Listado o borrado correcto |
+| 400 | Fecha inválida, `desde > hasta`, rango > 366 días, `limite` no numérico o `id` no UUID |
+| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
+| 403 | Rol distinto de Supervisor/Administrador |
+| 404 | `id` inexistente o recurso desconocido |
+| 405 | Método distinto de GET/DELETE (o DELETE sin `id`) |
+| 500 | Error inesperado de base de datos |
+
+---
+
 ## Tabla resumen: auth y validaciones por endpoint
 
 | Endpoint | Auth | Content-Type obligatorio | Límite body 1MB |
@@ -1399,4 +2120,14 @@ aprobación. Se manda `: heartbeat` cada 30s.
 | `GET /api/v1/lotes/{id}/metricas-horno` | Dual (Bearer de dispositivo o JWT cookie) | — | — |
 | `GET /api/v1/lotes/{id}/control/events` | JWT cookie (`session_token`) | — | — |
 | `GET /*/events` (los SSE) | JWT cookie (`session_token`) | — | — |
+| `GET /api/v1/reportes/resumen` | JWT cookie (`session_token`), cualquier rol | — | — |
+| `GET /api/v1/reportes/lotes` | JWT cookie (`session_token`), cualquier rol | — | — |
+| `GET /api/v1/reportes/trazabilidad` | JWT cookie (`session_token`), cualquier rol | — | — |
+| `GET /api/v1/reportes/alertas` | JWT cookie (`session_token`), cualquier rol | — | — |
+| `POST /api/v1/planificacion/plan/import` | JWT cookie, Supervisor/Admin | ✅ multipart | ✅ 5 MB |
+| `POST /api/v1/planificacion/paradas/import` | JWT cookie, Supervisor/Admin | ✅ multipart | ✅ 5 MB |
+| `POST /api/v1/planificacion/energia/import` | JWT cookie, Supervisor/Admin | ✅ multipart | ✅ 5 MB |
+| `GET /api/v1/planificacion/{plan,paradas,energia}` | JWT cookie, Supervisor/Admin | — | — |
+| `DELETE /api/v1/planificacion/{plan,paradas,energia}/{id}` | JWT cookie, Supervisor/Admin | — | — |
+| `GET /api/v1/reportes/oee` | JWT cookie (`session_token`), cualquier rol | — | — |
 | Otros `GET` | Según la sección del endpoint | — | — |

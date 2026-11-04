@@ -45,7 +45,7 @@ type Loop struct {
 	loteID         string
 	productoID     string
 	modo           string // MANUAL | SUPERVISION | AUTOMATICO
-	hornoID        string // horno físico destino del despacho (MPC_HORNO_ID, default "horno-01")
+	hornoID        string // id del sector (= id del horno simulado) destino del despacho
 	ventanaEvalSeg int
 	ventanaActSeg  int
 	pesos          optimizador.Pesos
@@ -311,8 +311,8 @@ func NewLoop(
 }
 
 // Configurar aplica los parámetros del lote. Antes de Start, el Loop no
-// conoce ni el modo ni las ventanas del lote. `hornoID` es el horno físico
-// destino del despacho (provisto por la config del MPC, no por el lote).
+// conoce ni el modo ni las ventanas del lote. `hornoID` es el id del sector
+// (= id del horno simulado) destino del despacho, provisto por el lote.
 func (loop *Loop) Configurar(
 	productoID string,
 	modo string,
@@ -795,7 +795,13 @@ func (loop *Loop) alertarPreheatTimeout(ctx context.Context, lote *lote_sector.L
 	}
 
 	loteID := loop.loteID
+	var sectorID *string
+	if loop.hornoID != "" {
+		s := loop.hornoID // variable local: el puntero debe sobrevivir al loop
+		sectorID = &s
+	}
 	a := &alerta.Alerta{
+		SectorID:  sectorID,
 		LoteID:    &loteID,
 		HornoID:   loop.hornoID,
 		Tipo:      alerta.TipoPrecalentamientoTimeout,
@@ -951,15 +957,11 @@ func (loop *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuest
 // `usuario` puede estar vacío cuando el origen es AUTOMATICO (MPC despacha
 // solo); en modo MANUAL el handler lo carga desde el JWT del operario.
 //
-// HornoID proviene de la env MPC_HORNO_ID (default "horno-01") y representa
-// el horno físico destino del despacho.
+// HornoID proviene del sector del lote: el id del sector ES el id del horno
+// simulado destino del despacho. Sin sector, la validación del service falla.
 func (loop *Loop) aplicarConsigna(ctx context.Context, prop *optimizador.Propuesta, origen consigna.Origen, usuario string) (*consigna.Consigna, error) {
-	hornoID := loop.hornoID
-	if hornoID == "" {
-		hornoID = "horno-01"
-	}
 	req := consigna.ConsignaManualRequest{
-		HornoID:                hornoID,
+		SectorID:               loop.hornoID,
 		ProductoID:             loop.productoID,
 		TemperaturaObjetivo:    prop.Temp1,
 		VelocidadCintaObjetivo: prop.Velocidad,

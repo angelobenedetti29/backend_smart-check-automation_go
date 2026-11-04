@@ -6,7 +6,7 @@
 |---|---|---|
 | Backend (staging) | Render (Docker, rama `staging`) | `smartcheck-backend-staging` |
 | Backend (producción) | Render (Docker, rama `main`) | `smartcheck-backend-prod` |
-| Base de datos | Aiven PostgreSQL 16 | Session pooler, puerto 5432 |
+| Base de datos | Supabase PostgreSQL 16 | Session pooler, puerto 5432 |
 | Predictor XGBoost | Sidecar externo (no definido en `render.yaml`) | Debe ser alcanzable por `PREDICTOR_URL` |
 
 Los servicios de Render están definidos en [`render.yaml`](render.yaml). El
@@ -25,14 +25,13 @@ MPC opera degradado y las decisiones se auditan como `skipped`.
 
 | Variable | Descripción |
 |---|---|
-| `DATABASE_URL` | Connection string a Aiven PostgreSQL 16 (puerto 5432, `sslmode=require`) |
+| `DATABASE_URL` | Connection string a Supabase PostgreSQL 16 (puerto 5432, `sslmode=require`) |
 | `JWT_SECRET` | Clave de firma del JWT (mínimo 32 caracteres) |
 | `GOOGLE_CLIENT_ID` | Client ID de Google Cloud Console |
 | `FRONTEND_ORIGINS` | Orígenes del panel permitidos por CORS, separados por coma |
 | `PREDICTOR_URL` | URL base del sidecar predictor; en Render debe ser una URL alcanzable desde el servicio |
 | `PREDICTOR_AUTH_TOKEN` | Opcional; si se define, el backend envía `Authorization: Bearer <token>` al sidecar |
 | `CONTROL_ACTUADOR` | Quién aplica la consigna del MPC: `pi` (default) o `backend` (solo laboratorio; no escribe un PLC real) |
-| `MPC_HORNO_ID` | Identificador del horno destino del MPC (default `horno-01`) |
 | `MPC_CONFIANZA_MIN` | Confianza mínima promedio del detector para proponer cambios (default `0.5`) |
 | `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` | Timeout de precalentamiento en AUTOMATICO (default `1800`) |
 | `MPC_PREHEAT_POLL_SEGUNDOS` | Cadencia de lectura durante el precalentamiento (default `15`) |
@@ -48,8 +47,9 @@ lee variables de driver Modbus.
 
 **La Pi ENTRADA es la única que escribe el PLC real** con su propio
 `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend usa un
-stub interno determinista para auditar y actualizar el estado del horno. En
-producción dejá `CONTROL_ACTUADOR=pi`; `backend` es sólo laboratorio y aplica
+stub interno determinista para auditar y registrar el comando de consigna. El
+estado real del horno es la telemetría (`metricas_horno`), expuesta por
+`GET /api/v1/horno`. En producción dejá `CONTROL_ACTUADOR=pi`; `backend` es sólo laboratorio y aplica
 contra el stub, no contra un PLC.
 
 El detalle de todas las variables (incluidas las de telemetría de dispositivos)

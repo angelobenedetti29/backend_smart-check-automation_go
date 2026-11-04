@@ -42,6 +42,16 @@ func validManualJSON() []byte {
 	}`)
 }
 
+func validSectorJSON() []byte {
+	return []byte(`{
+		"sectorId": "sector-x",
+		"productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+		"temperaturaObjetivo": 170.0,
+		"velocidadCintaObjetivo": 0.20,
+		"usuario": "operario-demo"
+	}`)
+}
+
 func executeDispatchRequest(t *testing.T, handler *ConsignaHandler, method string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, "/api/v1/horno/consigna", bytes.NewReader(body))
@@ -54,9 +64,9 @@ func executeDispatchRequest(t *testing.T, handler *ConsignaHandler, method strin
 func TestDispatchManual_Success(t *testing.T) {
 	svc := &mockConsignaService{
 		dispatchManualFunc: func(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
-			assert.Equal(t, "horno-01", req.HornoID)
+			assert.Equal(t, "horno-01", req.OvenID())
 			assert.Equal(t, 170.0, req.TemperaturaObjetivo)
-			return &consigna.Consigna{HornoID: req.HornoID, Origen: consigna.OrigenManual, Exitosa: true}, nil
+			return &consigna.Consigna{HornoID: req.OvenID(), Origen: consigna.OrigenManual, Exitosa: true}, nil
 		},
 	}
 	handler := NewConsignaHandler(svc)
@@ -68,6 +78,39 @@ func TestDispatchManual_Success(t *testing.T) {
 	err := json.Unmarshal(rr.Body.Bytes(), &resp)
 	assert.NoError(t, err)
 	assert.True(t, resp["success"].(bool))
+}
+
+func TestDispatchManual_SectorID(t *testing.T) {
+	svc := &mockConsignaService{
+		dispatchManualFunc: func(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
+			assert.Equal(t, "sector-x", req.OvenID())
+			return &consigna.Consigna{HornoID: req.OvenID(), Origen: consigna.OrigenManual, Exitosa: true}, nil
+		},
+	}
+	handler := NewConsignaHandler(svc)
+	rr := executeDispatchRequest(t, handler, http.MethodPost, validSectorJSON())
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	var resp map[string]interface{}
+	err := json.Unmarshal(rr.Body.Bytes(), &resp)
+	assert.NoError(t, err)
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, "sector-x", data["hornoId"])
+}
+
+func TestDispatchManual_SinSectorNiHorno(t *testing.T) {
+	svc := &mockConsignaService{
+		dispatchManualFunc: func(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
+			t.Error("DispatchManual should not be called without sector/horno")
+			return nil, nil
+		},
+	}
+	handler := NewConsignaHandler(svc)
+	body := []byte(`{"productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab","temperaturaObjetivo":170,"velocidadCintaObjetivo":0.2}`)
+	rr := executeDispatchRequest(t, handler, http.MethodPost, body)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
 }
 
 func TestDispatchManual_FueraDeRango(t *testing.T) {
@@ -116,7 +159,7 @@ func TestDispatchManual_DispatchFallido(t *testing.T) {
 	svc := &mockConsignaService{
 		dispatchManualFunc: func(ctx context.Context, req consigna.ConsignaManualRequest) (*consigna.Consigna, error) {
 			motivo := "timeout del controlador físico (simulado)"
-			return &consigna.Consigna{HornoID: req.HornoID, Origen: consigna.OrigenManual, Exitosa: false, MotivoError: &motivo}, consigna.ErrDispatchFallido
+			return &consigna.Consigna{HornoID: req.OvenID(), Origen: consigna.OrigenManual, Exitosa: false, MotivoError: &motivo}, consigna.ErrDispatchFallido
 		},
 	}
 	handler := NewConsignaHandler(svc)

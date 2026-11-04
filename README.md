@@ -11,7 +11,7 @@ cinta, y un sidecar Python que sirve las predicciones XGBoost.
 | Capa | Tecnología |
 |---|---|
 | Lenguaje | Go 1.25 |
-| Base de datos | PostgreSQL 16 (Aiven en producción) |
+| Base de datos | PostgreSQL 16 (Supabase en producción) |
 | Driver DB | pgx/v5 |
 | Infraestructura local | Docker + Docker Compose (`db`, `app`, `predictor-svc`) |
 | Predictor | Sidecar Python/FastAPI + XGBoost (`cmd/predictor_svc`, puerto `8090`) |
@@ -75,7 +75,8 @@ Cada lote abierto puede operar en tres modos:
 `control.sensores`/`control.actuadores` (`modbus_tcp`/`modbus_rtu`). El backend
 no abre conexiones Modbus ni escribe ningún PLC: usa un stub interno
 determinista (`SimulatedOvenController`, ~40 ms de latencia, siempre acepta)
-para auditar y actualizar el estado del horno.
+para auditar y registrar el comando de consigna. El estado real del horno es la
+telemetría de la Pi (`metricas_horno`), que `GET /api/v1/horno` proyecta.
 
 `CONTROL_ACTUADOR` acepta `pi` (default) o `backend`:
 

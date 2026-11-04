@@ -22,6 +22,37 @@ func TestPostgresRepository_GetByID(t *testing.T) {
 	}
 }
 
+func TestPostgresRepository_Ensure(t *testing.T) {
+	repo := NewPostgresRepository()
+
+	// Crea el horno simulado del sector on demand.
+	h, err := repo.Ensure("sector-nuevo")
+	if err != nil {
+		t.Fatalf("unexpected error ensuring horno: %v", err)
+	}
+	if h.ID != "sector-nuevo" {
+		t.Errorf("expected id del sector 'sector-nuevo', got '%s'", h.ID)
+	}
+	if h.Nombre != "Horno sector-nuevo" {
+		t.Errorf("expected nombre 'Horno sector-nuevo', got '%s'", h.Nombre)
+	}
+	if h.Estado != "ACTIVO" {
+		t.Errorf("expected estado ACTIVO, got '%s'", h.Estado)
+	}
+
+	// Idempotente: el segundo Ensure devuelve el mismo horno, no lo recrea.
+	h.Temperatura = 195.0
+	_ = repo.Update(h)
+
+	h2, err := repo.Ensure("sector-nuevo")
+	if err != nil {
+		t.Fatalf("unexpected error on second Ensure: %v", err)
+	}
+	if h2.Temperatura != 195.0 {
+		t.Errorf("Ensure no debe recrear el horno existente, got temp=%.1f", h2.Temperatura)
+	}
+}
+
 func TestPostgresRepository_Update(t *testing.T) {
 	repo := NewPostgresRepository()
 

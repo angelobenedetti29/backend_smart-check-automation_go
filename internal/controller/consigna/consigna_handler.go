@@ -102,6 +102,10 @@ func (h *ConsignaHandler) GetHistorial(w http.ResponseWriter, r *http.Request) {
 // HTTP apropiada para el despacho manual de consigna.
 func (h *ConsignaHandler) handleDispatchError(w http.ResponseWriter, err error, rec *consigna.Consigna) {
 	switch {
+	case errors.Is(err, consigna.ErrSectorRequerido):
+		response.Error(w, http.StatusUnprocessableEntity, "El sector/horno es requerido", nil)
+	case errors.Is(err, consigna.ErrSectorMismatch):
+		response.Error(w, http.StatusUnprocessableEntity, "El sector no coincide con el del lote seleccionado", nil)
 	case errors.Is(err, consigna.ErrHornoNoExiste):
 		response.Error(w, http.StatusNotFound, "El horno indicado no existe", nil)
 	case errors.Is(err, consigna.ErrParametrosNoExiste):

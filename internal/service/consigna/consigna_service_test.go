@@ -12,6 +12,7 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
@@ -168,6 +169,12 @@ func (f *fakeConsignaRepo) count() int {
 	return len(f.saved)
 }
 
+func (f *fakeConsignaRepo) all() []consigna.Consigna {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]consigna.Consigna(nil), f.saved...)
+}
+
 // fakeDecisionesRepo es un doble en memoria del mínimo de decisiones_control
 // que consume el service (Save + Aprobar).
 type fakeDecisionesRepo struct {
@@ -214,6 +221,19 @@ func loteAbiertoManual() *lote_sector.Lote {
 	return &lote_sector.Lote{Estado: lote_sector.EstadoAbierto, Modo: lote_sector.ModoManual}
 }
 
+// fakeMetricasLookup devuelve la telemetría configurada para cualquier lote.
+type fakeMetricasLookup struct {
+	muestras []metricashorno.MetricaHorno
+	err      error
+}
+
+func (f *fakeMetricasLookup) GetUltimasParaLote(ctx context.Context, loteID string, limite int) ([]metricashorno.MetricaHorno, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.muestras, nil
+}
+
 // newTestService arma un ConsignaService con el stub interno determinista
 // (siempre Aplicada=true). fakeHornoAlertaRepo cubre horno.Repository y
 // alerta.Repository.
@@ -223,7 +243,7 @@ func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *fakeHornoAlert
 	ctrl := oven_controller.NewSimulatedOvenController()
 	broker := sse.NewBroker()
 	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo,
-		&fakeDecisionesRepo{}, &fakeLoteLookup{lote: loteAbiertoManual()}, true)
+		&fakeDecisionesRepo{}, &fakeLoteLookup{lote: loteAbiertoManual()}, nil, true)
 	return svc, hornoRepo, consignaRepo
 }
 
@@ -234,7 +254,7 @@ func newTestServiceWithController(paramRepo *fakeParamRepo, ctrl OvenController)
 	consignaRepo := &fakeConsignaRepo{}
 	broker := sse.NewBroker()
 	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo,
-		&fakeDecisionesRepo{}, &fakeLoteLookup{lote: loteAbiertoManual()}, true)
+		&fakeDecisionesRepo{}, &fakeLoteLookup{lote: loteAbiertoManual()}, nil, true)
 	return svc, hornoRepo, consignaRepo
 }
 
@@ -246,7 +266,7 @@ func newTestServiceWithOverride(paramRepo *fakeParamRepo, lote *lote_sector.Lote
 	decisionesRepo := &fakeDecisionesRepo{}
 	ctrl := &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}}
 	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, sse.NewBroker(), hornoRepo,
-		decisionesRepo, &fakeLoteLookup{lote: lote}, true)
+		decisionesRepo, &fakeLoteLookup{lote: lote}, nil, true)
 	return svc, consignaRepo, decisionesRepo
 }
 
@@ -305,6 +325,43 @@ func TestDispatchManual_DentroDeRango_ActualizaHornoYAudita(t *testing.T) {
 		if h.Temperatura != 170.0 || h.VelocidadCinta != 0.20 {
 			t.Errorf("expected horno state to reflect dispatched setpoint, got temp=%.2f vel=%.2f", h.Temperatura, h.VelocidadCinta)
 		}
+	}
+}
+
+func TestDispatchManual_AuditaLecturaPreviaDeTelemetria(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+
+	temp, vel := 198.0, 0.31
+	metricas := &fakeMetricasLookup{muestras: []metricashorno.MetricaHorno{{TempHorno1: &temp, VelocidadCinta: &vel}}}
+	hornoRepo := newFakeHornoAlertaRepo()
+	consignaRepo := &fakeConsignaRepo{}
+	lote := &lote_sector.Lote{ID: "lote-telemetria-1", SectorID: "horno-01", Estado: lote_sector.EstadoAbierto, Modo: lote_sector.ModoManual}
+	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo,
+		oven_controller.NewSimulatedOvenController(), sse.NewBroker(), hornoRepo,
+		nil, &fakeLoteLookup{lote: lote}, metricas, false)
+
+	loteID := lote.ID
+	req := consigna.ConsignaManualRequest{
+		HornoID:                "horno-01",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+		LoteID:                 &loteID,
+	}
+
+	if _, err := svc.DispatchManual(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	saved := consignaRepo.all()
+	if len(saved) != 1 {
+		t.Fatalf("expected 1 registro auditado, got %d", len(saved))
+	}
+	if saved[0].TemperaturaPrevia == nil || *saved[0].TemperaturaPrevia != 198.0 {
+		t.Errorf("expected temperaturaPrevia=198 de la telemetría, got %v", saved[0].TemperaturaPrevia)
+	}
+	if saved[0].VelocidadCintaPrevia == nil || *saved[0].VelocidadCintaPrevia != 0.31 {
+		t.Errorf("expected velocidadCintaPrevia=0.31 de la telemetría, got %v", saved[0].VelocidadCintaPrevia)
 	}
 }
 
@@ -525,7 +582,7 @@ func TestDispatchManual_ExitosoTrasFalloRestauraEstadoActivo(t *testing.T) {
 	// controller exitoso, para simular que el operario reactivó el enlace.
 	okCtrl := &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}}
 	broker := sse.NewBroker()
-	okSvc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, okCtrl, broker, hornoRepo, nil, nil, false)
+	okSvc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, okCtrl, broker, hornoRepo, nil, nil, nil, false)
 
 	_, err = okSvc.DispatchManual(context.Background(), req)
 	if err != nil {
@@ -535,5 +592,90 @@ func TestDispatchManual_ExitosoTrasFalloRestauraEstadoActivo(t *testing.T) {
 	h2, _ := hornoRepo.GetByID("horno-01")
 	if h2.Estado != "ACTIVO" {
 		t.Errorf("expected Estado ACTIVO tras despacho exitoso, got %s", h2.Estado)
+	}
+}
+
+// newTestServiceWithLote arma un service con un lote concreto, para probar la
+// resolución del sector a partir del lote.
+func newTestServiceWithLote(paramRepo *fakeParamRepo, lote *lote_sector.Lote) (*ConsignaService, *fakeConsignaRepo) {
+	hornoRepo := newFakeHornoAlertaRepo()
+	consignaRepo := &fakeConsignaRepo{}
+	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo,
+		oven_controller.NewSimulatedOvenController(), sse.NewBroker(), hornoRepo,
+		nil, &fakeLoteLookup{lote: lote}, nil, false)
+	return svc, consignaRepo
+}
+
+func TestDispatchManual_SectorID_SinSeed_CreaHornoYAudita(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	svc, _, consignaRepo := newTestService(paramRepo)
+
+	req := consigna.ConsignaManualRequest{
+		SectorID:               "sector-9",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+	}
+
+	rec, err := svc.DispatchManual(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.HornoID != "sector-9" {
+		t.Errorf("expected HornoID = sectorID 'sector-9', got '%s'", rec.HornoID)
+	}
+	if consignaRepo.count() != 1 {
+		t.Fatalf("expected 1 registro auditado, got %d", consignaRepo.count())
+	}
+	if saved := consignaRepo.all(); saved[0].HornoID != "sector-9" {
+		t.Errorf("expected el historial con HornoID 'sector-9', got '%s'", saved[0].HornoID)
+	}
+}
+
+func TestDispatchManual_LoteMandaSector(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	lote := &lote_sector.Lote{ID: "lote-1", SectorID: "sector-lote", Estado: lote_sector.EstadoAbierto, Modo: lote_sector.ModoManual}
+	svc, _ := newTestServiceWithLote(paramRepo, lote)
+
+	loteID := "lote-1"
+	req := consigna.ConsignaManualRequest{
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+		LoteID:                 &loteID,
+	}
+
+	rec, err := svc.DispatchManual(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.HornoID != "sector-lote" {
+		t.Errorf("expected el sector del lote 'sector-lote', got '%s'", rec.HornoID)
+	}
+}
+
+func TestDispatchManual_SectorMismatchConLote(t *testing.T) {
+	paramRepo := newFakeParamRepo()
+	paramRepo.byProducto[testProductoID] = baseParametros()
+	lote := &lote_sector.Lote{ID: "lote-1", SectorID: "sector-lote", Estado: lote_sector.EstadoAbierto, Modo: lote_sector.ModoManual}
+	svc, consignaRepo := newTestServiceWithLote(paramRepo, lote)
+
+	loteID := "lote-1"
+	req := consigna.ConsignaManualRequest{
+		SectorID:               "otro-sector",
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170.0,
+		VelocidadCintaObjetivo: 0.20,
+		LoteID:                 &loteID,
+	}
+
+	_, err := svc.DispatchManual(context.Background(), req)
+	if !errors.Is(err, consigna.ErrSectorMismatch) {
+		t.Fatalf("expected ErrSectorMismatch, got %v", err)
+	}
+	if consignaRepo.count() != 0 {
+		t.Fatalf("un mismatch no debe auditarse ni despacharse")
 	}
 }

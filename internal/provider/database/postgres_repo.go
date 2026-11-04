@@ -9,7 +9,9 @@ import (
 )
 
 // PostgresRepository implements horno.Repository.
-// It simulates a PostgreSQL database adapter for testing and transactional scaffolding.
+// Es un registro en memoria de comandos/auditoría: la última consigna
+// despachada y el flag CONTROL_MANUAL. El estado real del horno se proyecta
+// desde metricas_horno (telemetría de la Pi) + el lote abierto.
 type PostgresRepository struct {
 	mu     sync.RWMutex
 	hornos map[string]horno.Horno
@@ -43,6 +45,30 @@ func (r *PostgresRepository) GetByID(id string) (*horno.Horno, error) {
 	if !ok {
 		return nil, errors.New("horno no encontrado")
 	}
+	return &h, nil
+}
+
+// Ensure devuelve el horno en memoria del sector. Si no existe, lo crea con
+// valores por defecto (sin persistencia real). Es idempotente y se usa para
+// despachar/auditar consignas y para el endpoint legacy de temperatura; no
+// representa el estado real, que vive en metricas_horno.
+func (r *PostgresRepository) Ensure(id string) (*horno.Horno, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if h, ok := r.hornos[id]; ok {
+		return &h, nil
+	}
+
+	h := horno.Horno{
+		ID:             id,
+		Nombre:         "Horno " + id,
+		Temperatura:    185.3,
+		VelocidadCinta: 0.20,
+		Estado:         "ACTIVO",
+		UltimoCheck:    time.Now(),
+	}
+	r.hornos[id] = h
 	return &h, nil
 }
 

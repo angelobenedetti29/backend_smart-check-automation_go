@@ -2,7 +2,7 @@
 -- Smart-Check Automation — Fermar S.A.
 -- Esquema de Base de Datos PostgreSQL (MVP)
 -- Versión: 1.1
--- Motor:  PostgreSQL 16 (Aiven Cloud, AWS sa-east-1)
+-- Motor:  PostgreSQL 16 (Supabase)
 -- ============================================================================
 -- Este script crea la estructura completa del modelo de datos para:
 --   1. Tabla maestra: productos (incluye los parámetros de control embebidos)
@@ -33,6 +33,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE IF NOT EXISTS productos (
     id          UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
     nombre      VARCHAR(100)    NOT NULL,
+    capacidad_nominal_kg_h NUMERIC(10,3),
     created_at  TIMESTAMPTZ     NOT NULL DEFAULT now()
 );
 
@@ -57,6 +58,9 @@ ALTER TABLE productos ADD COLUMN IF NOT EXISTS updated_at              TIMESTAMP
 -- automático de consigna (SCA-142). Nullable.
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS temp_setpoint             NUMERIC(6,2);
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_setpoint  NUMERIC(6,2);
+-- Capacidad nominal de producción del producto (kg/h); nullable hasta que se
+-- cargue por catálogo o por importación.
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS capacidad_nominal_kg_h    NUMERIC(10,3);
 
 COMMENT ON COLUMN productos.peso_referencia_kg      IS 'Peso patrón/ideal de una unidad del producto (kg)';
 COMMENT ON COLUMN productos.tolerancia_peso_pct     IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
@@ -69,6 +73,7 @@ COMMENT ON COLUMN productos.velocidad_cinta_max     IS 'Velocidad máxima acepta
 COMMENT ON COLUMN productos.updated_at              IS 'Marca temporal de la última modificación del registro';
 COMMENT ON COLUMN productos.temp_setpoint             IS 'Temperatura objetivo dentro de [temp_min, temp_max]; nullable, opcional, sólo usado si se reactiva el despacho automático (SCA-142)';
 COMMENT ON COLUMN productos.velocidad_cinta_setpoint IS 'Velocidad objetivo dentro de [velocidad_cinta_min, velocidad_cinta_max]; nullable, opcional';
+COMMENT ON COLUMN productos.capacidad_nominal_kg_h   IS 'Capacidad nominal de producción del producto en kg por hora; nullable, si se informa debe ser mayor a 0';
 
 -- Backfill desde la tabla legada parametros_producto (si existe) antes de dropearla.
 DO $$
@@ -143,6 +148,10 @@ BEGIN
     ALTER TABLE productos ADD CONSTRAINT chk_productos_velocidad_setpoint_rango
       CHECK (velocidad_cinta_setpoint IS NULL OR (velocidad_cinta_setpoint >= velocidad_cinta_min AND velocidad_cinta_setpoint <= velocidad_cinta_max));
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_capacidad_nominal_positiva') THEN
+    ALTER TABLE productos ADD CONSTRAINT chk_productos_capacidad_nominal_positiva
+      CHECK (capacidad_nominal_kg_h IS NULL OR capacidad_nominal_kg_h > 0);
+  END IF;
 END $$;
 
 -- La tabla legada queda sin uso una vez migrados los datos.
@@ -208,9 +217,9 @@ CREATE TABLE IF NOT EXISTS lotes_productivos (
     correctos           INTEGER         NOT NULL,
     quemados            INTEGER         NOT NULL,
     crudas              INTEGER,
-    correctos_kg        NUMERIC(10,2)   NOT NULL,
-    quemados_kg         NUMERIC(10,2)   NOT NULL,
-    crudos_kg           NUMERIC(10,2),
+    correctos_kg        NUMERIC(12,3)   NOT NULL,
+    quemados_kg         NUMERIC(12,3)   NOT NULL,
+    crudos_kg           NUMERIC(12,3),
     temp_horno_1        NUMERIC(6,2),
     temp_comb_horno_1   NUMERIC(6,2),
     velocidad_cinta     NUMERIC(6,2),
@@ -265,9 +274,9 @@ COMMENT ON COLUMN lotes_productivos.total_unidades IS 'Total de unidades hornead
 COMMENT ON COLUMN lotes_productivos.correctos IS 'Unidades en estado correcto (aprobadas)';
 COMMENT ON COLUMN lotes_productivos.quemados  IS 'Unidades quemadas (rechazadas)';
 COMMENT ON COLUMN lotes_productivos.crudas    IS 'Unidades crudas / sin clasificar (nullable)';
-COMMENT ON COLUMN lotes_productivos.correctos_kg IS 'Peso total en kg de panes correctos';
-COMMENT ON COLUMN lotes_productivos.quemados_kg  IS 'Peso total en kg de panes quemados';
-COMMENT ON COLUMN lotes_productivos.crudos_kg    IS 'Peso total en kg de panes crudos (nullable)';
+COMMENT ON COLUMN lotes_productivos.correctos_kg IS 'Peso total ESTIMADO en kg de panes correctos = correctos × productos.peso_referencia_kg (3 decimales)';
+COMMENT ON COLUMN lotes_productivos.quemados_kg  IS 'Peso total ESTIMADO en kg de panes quemados = quemados × productos.peso_referencia_kg (3 decimales)';
+COMMENT ON COLUMN lotes_productivos.crudos_kg    IS 'Peso total ESTIMADO en kg de panes crudos = crudas × productos.peso_referencia_kg (3 decimales, nullable)';
 COMMENT ON COLUMN lotes_productivos.temp_horno_1 IS 'Temperatura del horno 1 al inicio (°C)';
 COMMENT ON COLUMN lotes_productivos.temp_comb_horno_1 IS 'Temperatura de la cámara de combustión del horno 1 (°C, nullable)';
 COMMENT ON COLUMN lotes_productivos.velocidad_cinta IS 'Velocidad de la cinta transportadora del horno (m/s)';
@@ -865,6 +874,40 @@ ALTER TABLE lotes_productivos
     ALTER COLUMN correctos_kg DROP NOT NULL,
     ALTER COLUMN quemados_kg DROP NOT NULL;
 
+-- Los kg del lote son estimaciones (conteo × peso de referencia) y se guardan
+-- con 3 decimales: NUMERIC(12,3) evita redondear el producto de conteo × peso.
+DO $$
+DECLARE
+    col text;
+BEGIN
+    FOREACH col IN ARRAY ARRAY['correctos_kg', 'quemados_kg', 'crudos_kg'] LOOP
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'lotes_productivos'
+              AND column_name = col
+              AND (numeric_precision IS NULL OR numeric_precision < 12)
+        ) THEN
+            EXECUTE format('ALTER TABLE lotes_productivos ALTER COLUMN %I TYPE NUMERIC(12,3)', col);
+        END IF;
+    END LOOP;
+END $$;
+
+-- Backfill de kg para lotes CERRADOS heredados. Usa el peso vigente del
+-- producto (no hay historial de peso), así que es una estimación retroactiva.
+-- Sólo toca buckets con conteo y kg NULL, por lo que es idempotente y no se
+-- re-ejecuta sobre las mismas filas en cada arranque.
+UPDATE lotes_productivos lp
+SET correctos_kg = CASE WHEN lp.correctos IS NULL THEN NULL ELSE ROUND(lp.correctos * p.peso_referencia_kg, 3) END,
+    quemados_kg  = CASE WHEN lp.quemados  IS NULL THEN NULL ELSE ROUND(lp.quemados  * p.peso_referencia_kg, 3) END,
+    crudos_kg    = CASE WHEN lp.crudas    IS NULL THEN NULL ELSE ROUND(lp.crudas    * p.peso_referencia_kg, 3) END
+FROM productos p
+WHERE p.id = lp.producto_id
+  AND lp.estado = 'CERRADO'
+  AND ( (lp.correctos IS NOT NULL AND lp.correctos_kg IS NULL)
+     OR (lp.quemados  IS NOT NULL AND lp.quemados_kg  IS NULL)
+     OR (lp.crudas    IS NOT NULL AND lp.crudos_kg    IS NULL) );
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lotes_sector') THEN
@@ -953,6 +996,117 @@ COMMENT ON COLUMN eventos_lote.created_at   IS 'Marca temporal en que el backend
 -- Índice para reconstruir el detalle de un lote en orden cronológico.
 CREATE INDEX IF NOT EXISTS idx_eventos_lote_lote_created
     ON eventos_lote (lote_id, created_at);
+
+-- ============================================================================
+-- FASE 1 OEE: plan de producción, paradas y lecturas de energía
+-- ============================================================================
+-- Planificación diaria por sector/turno, eventos de parada que explican el
+-- tiempo no productivo y consumos de energía/gas por período. Las tres tablas
+-- son idempotentes y se alimentan por importación CSV autenticada.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS plan_produccion (
+    id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    sector_id    VARCHAR(50)   NOT NULL REFERENCES sectores(id) ON DELETE RESTRICT,
+    producto_id  UUID          NOT NULL REFERENCES productos(id) ON DELETE RESTRICT,
+    fecha        DATE          NOT NULL,
+    turno        VARCHAR(10)   NOT NULL,
+    inicio_at    TIMESTAMPTZ   NOT NULL,
+    fin_at       TIMESTAMPTZ   NOT NULL,
+    kg_plan      NUMERIC(10,3) NOT NULL,
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
+
+    CONSTRAINT chk_plan_turno
+        CHECK (turno IN ('mañana', 'tarde', 'noche')),
+    CONSTRAINT chk_plan_kg_positivo
+        CHECK (kg_plan > 0),
+    CONSTRAINT chk_plan_fin_after_inicio
+        CHECK (fin_at > inicio_at),
+    CONSTRAINT uq_plan_produccion_sector_inicio_producto
+        UNIQUE (sector_id, inicio_at, producto_id)
+);
+
+COMMENT ON TABLE  plan_produccion             IS 'Plan de producción por sector y turno; una fila por producto y ventana planificada.';
+COMMENT ON COLUMN plan_produccion.id          IS 'Identificador UUID del plan de producción';
+COMMENT ON COLUMN plan_produccion.sector_id   IS 'FK al sector de producción';
+COMMENT ON COLUMN plan_produccion.producto_id IS 'FK al producto planificado';
+COMMENT ON COLUMN plan_produccion.fecha       IS 'Fecha del plan (calendario de Argentina)';
+COMMENT ON COLUMN plan_produccion.turno       IS 'Turno planificado: mañana, tarde o noche';
+COMMENT ON COLUMN plan_produccion.inicio_at   IS 'Inicio de la ventana planificada';
+COMMENT ON COLUMN plan_produccion.fin_at      IS 'Fin de la ventana planificada, posterior al inicio';
+COMMENT ON COLUMN plan_produccion.kg_plan     IS 'Kilogramos planificados para la ventana; debe ser mayor a 0';
+COMMENT ON COLUMN plan_produccion.created_at  IS 'Marca temporal de alta del registro';
+COMMENT ON COLUMN plan_produccion.updated_at  IS 'Marca temporal de la última modificación del registro';
+
+CREATE INDEX IF NOT EXISTS idx_plan_produccion_sector_inicio
+    ON plan_produccion (sector_id, inicio_at);
+
+CREATE TABLE IF NOT EXISTS eventos_parada (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    sector_id     VARCHAR(50) NOT NULL REFERENCES sectores(id) ON DELETE RESTRICT,
+    lote_id       UUID        REFERENCES lotes_productivos(id) ON DELETE SET NULL,
+    inicio_at     TIMESTAMPTZ NOT NULL,
+    fin_at        TIMESTAMPTZ NOT NULL,
+    causa_codigo  TEXT        NOT NULL,
+    tipo          VARCHAR(20) NOT NULL,
+    notas         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT chk_eventos_parada_tipo
+        CHECK (tipo IN ('PLANIFICADA', 'NO_PLANIFICADA')),
+    CONSTRAINT chk_eventos_parada_fin_after_inicio
+        CHECK (fin_at > inicio_at),
+    CONSTRAINT uq_eventos_parada_sector_inicio_causa
+        UNIQUE (sector_id, inicio_at, causa_codigo)
+);
+
+COMMENT ON TABLE  eventos_parada              IS 'Eventos de parada de producción que explican el tiempo no productivo (OEE).';
+COMMENT ON COLUMN eventos_parada.id           IS 'Identificador UUID del evento de parada';
+COMMENT ON COLUMN eventos_parada.sector_id    IS 'FK al sector afectado';
+COMMENT ON COLUMN eventos_parada.lote_id      IS 'FK opcional al lote productivo afectado; SET NULL si se elimina el lote';
+COMMENT ON COLUMN eventos_parada.inicio_at    IS 'Inicio de la parada';
+COMMENT ON COLUMN eventos_parada.fin_at       IS 'Fin de la parada, posterior al inicio';
+COMMENT ON COLUMN eventos_parada.causa_codigo IS 'Código de causa de la parada (texto libre normalizado por el importador)';
+COMMENT ON COLUMN eventos_parada.tipo         IS 'Tipo de parada: PLANIFICADA o NO_PLANIFICADA';
+COMMENT ON COLUMN eventos_parada.notas        IS 'Observaciones libres de la parada (nullable)';
+COMMENT ON COLUMN eventos_parada.created_at   IS 'Marca temporal de alta del registro';
+
+CREATE INDEX IF NOT EXISTS idx_eventos_parada_sector_inicio
+    ON eventos_parada (sector_id, inicio_at);
+
+CREATE TABLE IF NOT EXISTS lecturas_energia (
+    id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    sector_id      VARCHAR(50)   NOT NULL REFERENCES sectores(id) ON DELETE RESTRICT,
+    lote_id        UUID          REFERENCES lotes_productivos(id) ON DELETE SET NULL,
+    periodo_inicio TIMESTAMPTZ   NOT NULL,
+    periodo_fin    TIMESTAMPTZ   NOT NULL,
+    kwh            NUMERIC(12,3) NOT NULL,
+    gas_m3         NUMERIC(12,3),
+    created_at     TIMESTAMPTZ   NOT NULL DEFAULT now(),
+
+    CONSTRAINT chk_lecturas_energia_kwh_no_negativo
+        CHECK (kwh >= 0),
+    CONSTRAINT chk_lecturas_energia_gas_no_negativo
+        CHECK (gas_m3 IS NULL OR gas_m3 >= 0),
+    CONSTRAINT chk_lecturas_energia_fin_after_inicio
+        CHECK (periodo_fin > periodo_inicio),
+    CONSTRAINT uq_lecturas_energia_sector_periodo
+        UNIQUE (sector_id, periodo_inicio, periodo_fin)
+);
+
+COMMENT ON TABLE  lecturas_energia                IS 'Lecturas de consumo eléctrico y gas por sector y período, insumo del indicador de energía del OEE.';
+COMMENT ON COLUMN lecturas_energia.id             IS 'Identificador UUID de la lectura';
+COMMENT ON COLUMN lecturas_energia.sector_id      IS 'FK al sector medido';
+COMMENT ON COLUMN lecturas_energia.lote_id        IS 'FK opcional al lote productivo asociado; SET NULL si se elimina el lote';
+COMMENT ON COLUMN lecturas_energia.periodo_inicio IS 'Inicio del período de medición';
+COMMENT ON COLUMN lecturas_energia.periodo_fin    IS 'Fin del período de medición, posterior al inicio';
+COMMENT ON COLUMN lecturas_energia.kwh            IS 'Consumo eléctrico del período en kWh; no negativo';
+COMMENT ON COLUMN lecturas_energia.gas_m3         IS 'Consumo de gas del período en m³ (nullable); no negativo';
+COMMENT ON COLUMN lecturas_energia.created_at     IS 'Marca temporal de alta del registro';
+
+CREATE INDEX IF NOT EXISTS idx_lecturas_energia_sector_periodo
+    ON lecturas_energia (sector_id, periodo_inicio);
 
 -- ============================================================================
 -- SCA-400: MODO DE OPERACIÓN, VENTANAS Y CICLO DE CONTROL

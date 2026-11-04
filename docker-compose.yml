@@ -22,7 +22,6 @@ services:
       .env
     environment:
       - PREDICTOR_URL=http://predictor-svc:8090
-      - MPC_HORNO_ID=horno-01
     ports:
       - "${PORT}:${PORT}"
     depends_on:

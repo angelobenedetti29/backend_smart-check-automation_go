@@ -13,6 +13,7 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
@@ -39,6 +40,12 @@ type LoteLookup interface {
 	GetByID(ctx context.Context, loteID string) (*lote_sector.Lote, error)
 }
 
+// MetricasLookup lee la telemetría real del horno para auditar la lectura
+// previa a la consigna (en lugar del horno en memoria).
+type MetricasLookup interface {
+	GetUltimasParaLote(ctx context.Context, loteID string, limite int) ([]metricashorno.MetricaHorno, error)
+}
+
 // ConsignaService implementa consigna.Service. Es el mecanismo del envío
 // manual de consigna (SCA-320): resuelve el setpoint, lo despacha al
 // controlador del horno, actualiza el estado activo del horno y audita
@@ -53,6 +60,7 @@ type ConsignaService struct {
 	broker         *sse.Broker
 	decisionesRepo OverrideRepo
 	loteLookup     LoteLookup
+	metricas       MetricasLookup
 	// overrideEnPi indica que el actuador es la Pi: la consigna manual se
 	// encola para que la Pi la aplique (y luego ackee), en vez de asumir que
 	// el backend ya llegó al controlador del horno.
@@ -71,6 +79,7 @@ func NewConsignaService(
 	alertaRepo alerta.Repository,
 	decisionesRepo OverrideRepo,
 	loteLookup LoteLookup,
+	metricas MetricasLookup,
 	overrideEnPi bool,
 ) *ConsignaService {
 	return &ConsignaService{
@@ -82,6 +91,7 @@ func NewConsignaService(
 		broker:         broker,
 		decisionesRepo: decisionesRepo,
 		loteLookup:     loteLookup,
+		metricas:       metricas,
 		overrideEnPi:   overrideEnPi,
 	}
 }
@@ -103,6 +113,22 @@ func (s *ConsignaService) DispatchManual(ctx context.Context, req consigna.Consi
 // automático (SCA-400 / MPC) lo usan pasando el origen correspondiente. La
 // validación contra el rango seguro del producto es idéntica en ambos casos.
 func (s *ConsignaService) Dispatch(ctx context.Context, req consigna.ConsignaManualRequest, origen consigna.Origen, usuario *string) (*consigna.Consigna, error) {
+	// Resolver el horno destino: un horno simulado por sector, con id = sector.
+	// Si viene un lote existente, su sector es autoritativo.
+	ovenID := req.OvenID()
+	if s.loteLookup != nil && req.LoteID != nil && *req.LoteID != "" {
+		lote, err := s.loteLookup.GetByID(ctx, *req.LoteID)
+		if err == nil && lote != nil && lote.SectorID != "" {
+			if ovenID != "" && ovenID != lote.SectorID {
+				return nil, consigna.ErrSectorMismatch
+			}
+			ovenID = lote.SectorID
+		}
+	}
+	if ovenID == "" {
+		return nil, consigna.ErrSectorRequerido
+	}
+
 	p, err := s.productoRepo.GetByID(ctx, req.ProductoID)
 	if err != nil {
 		return nil, consigna.ErrParametrosNoExiste
@@ -114,7 +140,7 @@ func (s *ConsignaService) Dispatch(ctx context.Context, req consigna.ConsignaMan
 	}
 
 	prod := req.ProductoID
-	return s.dispatch(ctx, req.HornoID, req.LoteID, &prod,
+	return s.dispatch(ctx, ovenID, req.LoteID, &prod,
 		req.TemperaturaObjetivo, req.VelocidadCintaObjetivo,
 		origen, usuario)
 }
@@ -124,8 +150,8 @@ func (s *ConsignaService) GetHistorialByLote(ctx context.Context, loteID string)
 	return s.consignaRepo.GetByLoteID(ctx, loteID)
 }
 
-// dispatch centraliza el flujo compartido: busca el horno, despacha al
-// controlador del horno, y según el resultado:
+// dispatch centraliza el flujo compartido: asegura el horno simulado del
+// sector, despacha al controlador del horno, y según el resultado:
 //   - éxito: actualiza el estado activo del horno (y lo restaura a ACTIVO solo
 //     si venía de un CONTROL_MANUAL previo) y audita.
 //   - fallo: audita el intento, genera una alerta CRITICAL y fuerza al horno
@@ -139,13 +165,25 @@ func (s *ConsignaService) dispatch(
 	origen consigna.Origen,
 	usuario *string,
 ) (*consigna.Consigna, error) {
-	h, err := s.hornoRepo.GetByID(hornoID)
+	h, err := s.hornoRepo.Ensure(hornoID)
 	if err != nil {
 		return nil, consigna.ErrHornoNoExiste
 	}
 
+	// La lectura previa auditada sale de la telemetría real del lote; el horno
+	// en memoria sólo es fallback cuando todavía no hay muestras.
 	prevTemp := h.Temperatura
 	prevVel := h.VelocidadCinta
+	if s.metricas != nil && loteID != nil && *loteID != "" {
+		if muestras, err := s.metricas.GetUltimasParaLote(ctx, *loteID, 1); err == nil && len(muestras) > 0 {
+			if muestras[0].TempHorno1 != nil {
+				prevTemp = *muestras[0].TempHorno1
+			}
+			if muestras[0].VelocidadCinta != nil {
+				prevVel = *muestras[0].VelocidadCinta
+			}
+		}
+	}
 
 	result := s.controller.SendSetpoint(hornoID, temperatura, velocidad)
 
@@ -261,6 +299,7 @@ func (s *ConsignaService) handleFalloDeEnlace(h *horno.Horno, motivo string, ori
 	}
 
 	a := &alerta.Alerta{
+		SectorID:  &h.ID, // el id del horno simulado es el id del sector
 		HornoID:   h.ID,
 		Tipo:      alerta.TipoConsignaEnlace,
 		Severidad: alerta.SeveridadCritical,

@@ -35,9 +35,11 @@ func TestProductoRepository_CRUDYSetpoints(t *testing.T) {
 	// Create con setpoints.
 	setpointTemp := 200.0
 	setpointVel := 0.2
+	capacidad := 120.5
 	p := nuevoProductoDePrueba("Producto Repo Test")
 	p.TempSetpoint = &setpointTemp
 	p.VelocidadCintaSetpoint = &setpointVel
+	p.CapacidadNominalKgH = &capacidad
 
 	creado, err := repo.Create(ctx, p)
 	require.NoError(t, err)
@@ -56,6 +58,8 @@ func TestProductoRepository_CRUDYSetpoints(t *testing.T) {
 	assert.Equal(t, 200.0, *got.TempSetpoint)
 	require.NotNil(t, got.VelocidadCintaSetpoint)
 	assert.Equal(t, 0.2, *got.VelocidadCintaSetpoint)
+	require.NotNil(t, got.CapacidadNominalKgH)
+	assert.Equal(t, 120.5, *got.CapacidadNominalKgH)
 
 	// List lo incluye.
 	list, err := repo.List(ctx)
@@ -80,8 +84,10 @@ func TestProductoRepository_CRUDYSetpoints(t *testing.T) {
 	p2 := nuevoProductoDePrueba("Producto Repo Test Editado")
 	p2.ID = creado.ID
 	nuevoSetpoint := 210.0
+	nuevaCapacidad := 80.0
 	p2.TempSetpoint = &nuevoSetpoint
 	p2.VelocidadCintaSetpoint = nil
+	p2.CapacidadNominalKgH = &nuevaCapacidad
 
 	actualizado, err := repo.Update(ctx, p2)
 	require.NoError(t, err)
@@ -89,6 +95,15 @@ func TestProductoRepository_CRUDYSetpoints(t *testing.T) {
 	require.NotNil(t, actualizado.TempSetpoint)
 	assert.Equal(t, 210.0, *actualizado.TempSetpoint)
 	assert.Nil(t, actualizado.VelocidadCintaSetpoint)
+	require.NotNil(t, actualizado.CapacidadNominalKgH)
+	assert.Equal(t, 80.0, *actualizado.CapacidadNominalKgH)
+
+	// Update sin capacidad la limpia (NULL).
+	p3 := nuevoProductoDePrueba("Producto Repo Test Editado")
+	p3.ID = creado.ID
+	actualizado, err = repo.Update(ctx, p3)
+	require.NoError(t, err)
+	assert.Nil(t, actualizado.CapacidadNominalKgH)
 
 	// Update de inexistente.
 	inexistente := nuevoProductoDePrueba("No Existe")

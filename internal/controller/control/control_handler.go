@@ -247,9 +247,9 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, lote *lotesector.
 	if err != nil {
 		return err
 	}
-	hornoID := os.Getenv("MPC_HORNO_ID")
+	hornoID := lote.SectorID
 	if hornoID == "" {
-		hornoID = "horno-01"
+		return fmt.Errorf("el lote %s no tiene sector asignado", lote.ID)
 	}
 	pesos := optimizador.PesosDesdeLote(lote.PesosObjetivo)
 	limites := optimizador.LimitesDe(prod, lote)

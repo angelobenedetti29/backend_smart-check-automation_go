@@ -35,7 +35,7 @@ PORT=8080
 > `JWT_SECRET` y `GOOGLE_CLIENT_ID` son obligatorios: el servidor no arranca sin ellos
 > (`cmd/server/main.go`). `FRONTEND_ORIGINS` define los orígenes permitidos por CORS
 > (si se omite, el default es `http://localhost:3000,http://127.0.0.1:3000`).
-> En producción la base es **Aiven PostgreSQL 16**; el `DATABASE_URL` de arriba es solo
+> En producción la base es **Supabase PostgreSQL 16**; el `DATABASE_URL` de arriba es solo
 > para el Docker local.
 >
 > **Host de `DATABASE_URL`:** dentro del contenedor `app` el host es `db`, no
