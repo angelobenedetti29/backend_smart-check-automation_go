@@ -233,7 +233,7 @@ func trazabilidadDecisiones(ctx context.Context, tx pgx.Tx, loteID string, out *
 func trazabilidadConsignas(ctx context.Context, tx pgx.Tx, loteID string, out *[]reportes.ConsignaTrazabilidad) error {
 	rows, err := tx.Query(ctx, `
 		SELECT id::text, creada_en, temperatura_objetivo, velocidad_cinta_objetivo,
-		       origen, usuario, exitosa, motivo_error,
+		       origen, usuario, decision_id, estado, exitosa, motivo_error,
 		       temperatura_previa, velocidad_cinta_previa
 		FROM historial_consignas
 		WHERE lote_id = $1
@@ -247,7 +247,7 @@ func trazabilidadConsignas(ctx context.Context, tx pgx.Tx, loteID string, out *[
 		var c reportes.ConsignaTrazabilidad
 		if err := rows.Scan(
 			&c.ID, &c.CreadaEn, &c.TemperaturaObjetivo, &c.VelocidadCintaObjetivo,
-			&c.Origen, &c.Usuario, &c.Exitosa, &c.MotivoError,
+			&c.Origen, &c.Usuario, &c.DecisionID, &c.Estado, &c.Exitosa, &c.MotivoError,
 			&c.TemperaturaPrevia, &c.VelocidadCintaPrevia,
 		); err != nil {
 			return fmt.Errorf("scan trazabilidad consignas: %w", err)

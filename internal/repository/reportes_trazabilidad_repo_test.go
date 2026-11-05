@@ -115,8 +115,10 @@ func TestReportesRepo_TrazabilidadIntegracion(t *testing.T) {
 			INSERT INTO historial_consignas (
 				horno_id, lote_id, producto_id, temperatura_objetivo,
 				velocidad_cinta_objetivo, origen, usuario, exitosa,
+				decision_id, estado,
 				temperatura_previa, velocidad_cinta_previa, creada_en
-			) VALUES ('horno-traz',$1,$2,$3,$4,'MANUAL','operario',true,179,0.19,$5)`,
+			) VALUES ('horno-traz',$1,$2,$3,$4,'MANUAL','operario',true,
+				gen_random_uuid(),'APLICADA',179,0.19,$5)`,
 			loteID, testProductoID, 180.0+float64(i), 0.2+float64(i)*0.01,
 			inicio.Add(time.Duration(i)*time.Minute))
 		require.NoError(t, err)
@@ -188,6 +190,8 @@ func TestReportesRepo_TrazabilidadIntegracion(t *testing.T) {
 
 	require.Len(t, traz.Consignas, 2)
 	require.Equal(t, "MANUAL", traz.Consignas[0].Origen)
+	require.NotNil(t, traz.Consignas[0].DecisionID)
+	require.Equal(t, "APLICADA", traz.Consignas[0].Estado)
 	require.True(t, traz.Consignas[0].CreadaEn.Before(traz.Consignas[1].CreadaEn))
 
 	require.Len(t, traz.Alertas, 2)

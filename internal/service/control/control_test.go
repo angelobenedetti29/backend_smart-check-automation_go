@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
@@ -308,125 +307,12 @@ func (f *fakeAlertaRepoControl) Ack(context.Context, string, alerta.Usuario) (*a
 	return nil, alerta.ErrNotFound
 }
 
-type consignaSrvSnapshot struct {
-	calls   int
-	lastReq consigna.ConsignaManualRequest
-}
-
-// fakeConsignaSrv implementa ConsignaDispatchService y devuelve una consigna
-// de éxito con los setpoints configurados.
-type fakeConsignaSrv struct {
-	mu      sync.Mutex
-	cons    *consigna.Consigna
-	err     error
-	calls   int
-	lastReq consigna.ConsignaManualRequest
-}
-
-func (f *fakeConsignaSrv) callsSnapshot() consignaSrvSnapshot {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return consignaSrvSnapshot{calls: f.calls, lastReq: f.lastReq}
-}
-
-func (f *fakeConsignaSrv) Dispatch(_ context.Context, req consigna.ConsignaManualRequest, _ consigna.Origen, _ *string) (*consigna.Consigna, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls++
-	f.lastReq = req
-	return f.cons, f.err
-}
-
 // TestNewLoopAsignaLoteID verifica que NewLoop propaga el loteID al campo del
 // struct (sin esto el tick persiste con lote_id vacío).
 func TestNewLoopAsignaLoteID(t *testing.T) {
-	loop := NewLoop("lote-xyz", nil, nil, nil, nil, nil, nil, nil, nil)
+	loop := NewLoop("lote-xyz", nil, nil, nil, nil, nil, nil, nil)
 	if loop.loteID != "lote-xyz" {
 		t.Fatalf("loteID = %q, want %q", loop.loteID, "lote-xyz")
-	}
-}
-
-// TestAplicarPropuestaMarcaFilaComoAplicada verifica que tras un dispatch
-// exitoso la fila persistida se marca como aplicada por OPERARIO.
-func TestAplicarPropuestaMarcaFilaComoAplicada(t *testing.T) {
-	repo := &fakeDecisionesRepo{}
-	srv := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
-	l := &Loop{
-		propuestaPendiente: &optimizador.Propuesta{Temp1: 180, Velocidad: 0.45},
-		lastDecisionID:     "dec-1",
-		decisiones:         repo,
-		consigna:           srv,
-	}
-
-	cons, err := l.AplicarPropuesta(context.Background(), "operario@x")
-	if err != nil {
-		t.Fatalf("error inesperado: %v", err)
-	}
-	if cons == nil {
-		t.Fatalf("se esperaba consigna no-nil")
-	}
-	if repo.marcarCalled != 1 {
-		t.Fatalf("MarcarAplicada llamado %d veces, want 1", repo.marcarCalled)
-	}
-	if repo.marcarArgs.decisionID != "dec-1" {
-		t.Fatalf("decisionID = %q, want dec-1", repo.marcarArgs.decisionID)
-	}
-	if repo.marcarArgs.temp != 180 || repo.marcarArgs.vel != 0.45 {
-		t.Fatalf("setpoints mal propagados: %+v", repo.marcarArgs)
-	}
-	if repo.marcarArgs.aplicadoPor != decisiones_control.AplicadoPorOperario {
-		t.Fatalf("aplicadoPor = %q, want %q", repo.marcarArgs.aplicadoPor, decisiones_control.AplicadoPorOperario)
-	}
-	if l.propuestaPendiente != nil {
-		t.Fatalf("propuestaPendiente debe quedar nil")
-	}
-	if l.lastDecisionID != "" {
-		t.Fatalf("lastDecisionID debe quedar vacío")
-	}
-}
-
-// TestAplicarPropuestaSinDecisionIDNoFalla verifica el caso en que la
-// persistencia previa falló y no hay decisionID que marcar.
-func TestAplicarPropuestaSinDecisionIDNoFalla(t *testing.T) {
-	repo := &fakeDecisionesRepo{}
-	srv := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
-	l := &Loop{
-		propuestaPendiente: &optimizador.Propuesta{Temp1: 180, Velocidad: 0.45},
-		lastDecisionID:     "",
-		decisiones:         repo,
-		consigna:           srv,
-	}
-
-	cons, err := l.AplicarPropuesta(context.Background(), "operario@x")
-	if err != nil {
-		t.Fatalf("error inesperado: %v", err)
-	}
-	if cons == nil {
-		t.Fatalf("se esperaba consigna no-nil")
-	}
-	if repo.marcarCalled != 0 {
-		t.Fatalf("no debería llamar MarcarAplicada sin decisionID; calls=%d", repo.marcarCalled)
-	}
-}
-
-// TestAplicarPropuestaErrorEnMarcarNoFallaElDispatch verifica que un error al
-// marcar el audit no oculta el dispatch exitoso.
-func TestAplicarPropuestaErrorEnMarcarNoFallaElDispatch(t *testing.T) {
-	repo := &fakeDecisionesRepo{marcarErr: context.DeadlineExceeded}
-	srv := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
-	l := &Loop{
-		propuestaPendiente: &optimizador.Propuesta{Temp1: 180, Velocidad: 0.45},
-		lastDecisionID:     "dec-2",
-		decisiones:         repo,
-		consigna:           srv,
-	}
-
-	cons, err := l.AplicarPropuesta(context.Background(), "operario@x")
-	if err != nil {
-		t.Fatalf("el error de MarcarAplicada no debe propagarse: %v", err)
-	}
-	if cons == nil {
-		t.Fatalf("se esperaba consigna no-nil")
 	}
 }
 
@@ -596,10 +482,10 @@ func TestTickSupervisionPublicaAtomico(t *testing.T) {
 	}
 }
 
-// TestTickAutoDespachaYNoPublica verifica el camino AUTOMATICO: tick despacha
-// (Save con aplicado_por=MPC), NO deja propuesta pendiente y NO emite el
-// broadcast de control.propuesta reservado a SUPERVISION.
-func TestTickAutoDespachaYNoPublica(t *testing.T) {
+// TestTickAutomaticoPublicaAutorizada verifica el camino AUTOMATICO: tick
+// persiste la decisión como NADIE, publica la propuesta autorizada y no
+// despacha (la Pi hace el pull).
+func TestTickAutomaticoPublicaAutorizada(t *testing.T) {
 	repo := &fakeDecisionesRepo{}
 	broker := sse.NewBroker()
 	client := broker.Subscribe()
@@ -609,27 +495,21 @@ func TestTickAutoDespachaYNoPublica(t *testing.T) {
 	loop := newSupervisionLoop(now, repo, broker, fakePredictorControl{out: optimizador.PrediccionSalida{PctCrudos: 10, PctOk: 80, PctQuemados: 10}})
 	loop.modo = lote_sector.ModoAutomatico
 	loop.fase = FaseAdaptando
-	loop.actuador = "backend"
-	loop.consigna = &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 205, VelocidadCintaObjetivo: 0.22}}
 
 	loop.tick(context.Background())
 
 	if repo.saveCalled != 1 {
 		t.Fatalf("Save llamado %d veces, want 1", repo.saveCalled)
 	}
-	if repo.lastAplicadoPor != decisiones_control.AplicadoPorMPC {
-		t.Fatalf("aplicado_por = %q, want %q", repo.lastAplicadoPor, decisiones_control.AplicadoPorMPC)
+	if repo.lastAplicadoPor != decisiones_control.AplicadoPorNadie {
+		t.Fatalf("aplicado_por = %q, want %q", repo.lastAplicadoPor, decisiones_control.AplicadoPorNadie)
 	}
-	if loop.propuestaPendiente != nil {
-		t.Fatalf("AUTOMATICO no debe dejar propuesta pendiente")
+	snap := loop.PropuestaPendiente(30)
+	if snap == nil || !snap.Autorizada {
+		t.Fatalf("AUTOMATICO debe publicar propuesta autorizada; got %+v", snap)
 	}
-	if loop.lastDecisionID != "" {
-		t.Fatalf("AUTOMATICO no debe setear lastDecisionID; got=%q", loop.lastDecisionID)
-	}
-	select {
-	case ev := <-client.Events:
-		t.Fatalf("AUTOMATICO no debe emitir control.propuesta; got=%s", ev.EventType)
-	default:
+	if got := drainBroadcasts(client); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1", got)
 	}
 }
 
@@ -696,10 +576,10 @@ func propuestaOK() fakePredictorControl {
 	}}
 }
 
-// TestRunTresTicksModoAutomaticoDespacha corre el loop real en modo AUTOMATICO
-// con ventanas de 1s y verifica que cada tick despacha al controlador/stub, persiste la
-// decisión y NO publica por SSE.
-func TestRunTresTicksModoAutomaticoDespacha(t *testing.T) {
+// TestRunTresTicksModoAutomaticoPublica corre el loop real en modo AUTOMATICO
+// con ventanas de 1s y verifica que cada tick persiste la decisión y publica la
+// propuesta autorizada por SSE (la Pi la levanta).
+func TestRunTresTicksModoAutomaticoPublica(t *testing.T) {
 	now := time.Now().UTC()
 	repo := &fakeDecisionesRepo{}
 	broker := sse.NewBroker()
@@ -709,11 +589,8 @@ func TestRunTresTicksModoAutomaticoDespacha(t *testing.T) {
 	loop := newSupervisionLoop(now, repo, broker, propuestaOK())
 	loop.modo = lote_sector.ModoAutomatico
 	loop.fase = FaseAdaptando
-	loop.actuador = "backend"
 	loop.ventanaEvalSeg = 1
 	loop.ventanaActSeg = 1
-	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
-	loop.consigna = cons
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -723,17 +600,14 @@ func TestRunTresTicksModoAutomaticoDespacha(t *testing.T) {
 	cancel()
 	time.Sleep(150 * time.Millisecond) // deja terminar el tick en vuelo
 
-	if snap := cons.callsSnapshot(); snap.calls < 3 {
-		t.Fatalf("dispatchCalls = %d, want >= 3", snap.calls)
-	}
 	if snap := repo.snapshot(); snap.saveCalled < 3 {
 		t.Fatalf("saveCalls = %d, want >= 3", snap.saveCalled)
 	}
-	if got := drainBroadcasts(client); got != 0 {
-		t.Fatalf("broadcasts = %d, want 0 (AUTOMATICO no publica SSE)", got)
+	if got := drainBroadcasts(client); got < 3 {
+		t.Fatalf("broadcasts = %d, want >= 3", got)
 	}
-	if loop.propuestaPendiente != nil {
-		t.Fatalf("AUTOMATICO no debe dejar propuesta pendiente")
+	if loop.propuestaPendiente == nil {
+		t.Fatalf("AUTOMATICO debe dejar propuesta pendiente")
 	}
 }
 
@@ -750,8 +624,6 @@ func TestRunModoManualNoTicKea(t *testing.T) {
 	loop.modo = lote_sector.ModoManual
 	loop.ventanaEvalSeg = 1
 	loop.ventanaActSeg = 1
-	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
-	loop.consigna = cons
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -761,9 +633,6 @@ func TestRunModoManualNoTicKea(t *testing.T) {
 	cancel()
 	time.Sleep(150 * time.Millisecond)
 
-	if snap := cons.callsSnapshot(); snap.calls != 0 {
-		t.Fatalf("dispatchCalls = %d, want 0 en MANUAL", snap.calls)
-	}
 	if snap := repo.snapshot(); snap.saveCalled != 0 {
 		t.Fatalf("saveCalls = %d, want 0 en MANUAL", snap.saveCalled)
 	}
@@ -785,8 +654,6 @@ func TestRunTresTicksModoSupervisionPublicaPropuesta(t *testing.T) {
 	loop := newSupervisionLoop(now, repo, broker, propuestaOK())
 	loop.ventanaEvalSeg = 1
 	loop.ventanaActSeg = 1
-	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 180, VelocidadCintaObjetivo: 0.45}}
-	loop.consigna = cons
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -796,9 +663,6 @@ func TestRunTresTicksModoSupervisionPublicaPropuesta(t *testing.T) {
 	cancel()
 	time.Sleep(150 * time.Millisecond)
 
-	if snap := cons.callsSnapshot(); snap.calls != 0 {
-		t.Fatalf("dispatchCalls = %d, want 0 (SUPERVISION no despacha)", snap.calls)
-	}
 	if snap := repo.snapshot(); snap.saveCalled < 3 {
 		t.Fatalf("saveCalls = %d, want >= 3", snap.saveCalled)
 	}
@@ -807,6 +671,10 @@ func TestRunTresTicksModoSupervisionPublicaPropuesta(t *testing.T) {
 	}
 	if loop.propuestaPendiente == nil {
 		t.Fatalf("SUPERVISION debe dejar propuesta pendiente en memoria")
+	}
+	snap := loop.PropuestaPendiente(30)
+	if snap == nil || snap.Autorizada {
+		t.Fatalf("la propuesta de SUPERVISION no debe estar autorizada sin aprobación; got %+v", snap)
 	}
 }
 
@@ -840,42 +708,6 @@ func TestAprobarYLimpiarPropuesta(t *testing.T) {
 	l.ClearPropuesta("dec-1")
 	if l.propuestaPendiente != nil || l.lastDecisionID != "" || l.propuestaAprobada {
 		t.Fatalf("ClearPropuesta debe limpiar propuesta, id y autorización")
-	}
-}
-
-// TestTickAutomaticoActuadorPiPublicaSinDespachar verifica el default "pi":
-// AUTOMATICO publica una propuesta ya autorizada y NO despacha al horno.
-func TestTickAutomaticoActuadorPiPublicaSinDespachar(t *testing.T) {
-	repo := &fakeDecisionesRepo{}
-	broker := sse.NewBroker()
-	client := broker.Subscribe()
-	defer broker.Unsubscribe(client)
-
-	now := time.Now().UTC()
-	loop := newSupervisionLoop(now, repo, broker, fakePredictorControl{out: optimizador.PrediccionSalida{PctCrudos: 10, PctOk: 80, PctQuemados: 10}})
-	loop.modo = lote_sector.ModoAutomatico
-	loop.fase = FaseAdaptando
-	loop.actuador = "pi"
-	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 205, VelocidadCintaObjetivo: 0.22}}
-	loop.consigna = cons
-
-	loop.tick(context.Background())
-
-	if cons.calls != 0 {
-		t.Fatalf("actuador=pi no debe despachar; calls=%d", cons.calls)
-	}
-	if loop.propuestaPendiente == nil {
-		t.Fatalf("AUTOMATICO con actuador=pi debe dejar propuesta pendiente")
-	}
-	snap := loop.PropuestaPendiente(30)
-	if snap == nil || !snap.Autorizada {
-		t.Fatalf("la propuesta de AUTOMATICO debe estar autorizada: %+v", snap)
-	}
-	if got := drainBroadcasts(client); got != 1 {
-		t.Fatalf("broadcasts = %d, want 1", got)
-	}
-	if repo.lastAplicadoPor != decisiones_control.AplicadoPorNadie {
-		t.Fatalf("aplicado_por = %q, want NADIE", repo.lastAplicadoPor)
 	}
 }
 
@@ -995,15 +827,9 @@ func TestTickPlaceholderAutomaticoNoPublicaNiDespacha(t *testing.T) {
 	loop := newSupervisionLoop(now, repo, broker, pred)
 	loop.modo = lote_sector.ModoAutomatico
 	loop.fase = FaseAdaptando
-	loop.actuador = "pi"
-	cons := &fakeConsignaSrv{cons: &consigna.Consigna{TemperaturaObjetivo: 205, VelocidadCintaObjetivo: 0.22}}
-	loop.consigna = cons
 
 	loop.tick(context.Background())
 
-	if cons.calls != 0 {
-		t.Fatalf("placeholder no debe despachar; calls=%d", cons.calls)
-	}
 	if repo.lastDecision == nil || repo.lastDecision.RazonSkipped == nil || *repo.lastDecision.RazonSkipped != "modelo_no_entrenado" {
 		t.Fatalf("se esperaba skip modelo_no_entrenado; got=%+v", repo.lastDecision)
 	}
@@ -1046,7 +872,6 @@ func newPreheatLoop(now time.Time, repo *fakeDecisionesRepo, broker *sse.Broker,
 	loop := newSupervisionLoop(now, repo, broker, pred)
 	loop.modo = lote_sector.ModoAutomatico
 	loop.fase = FaseCalentando
-	loop.actuador = "pi"
 	loop.preheatPollSeg = 15
 	loop.confianzaMin = 0.5
 	loop.clienteLote = &fakeLoteLookupControl{lote: &lote_sector.Lote{

@@ -55,7 +55,6 @@ Completar los valores reales en `.env`.
 | `PORT` | No | `8080` | Puerto HTTP del backend |
 | `PREDICTOR_URL` | No | `http://localhost:8090` | URL base del sidecar predictor |
 | `PREDICTOR_AUTH_TOKEN` | No | vacío | Si se define, el backend envía `Authorization: Bearer <token>` en sus requests al sidecar (`/predict`, `/health`, `/admin/modelos`) |
-| `CONTROL_ACTUADOR` | No | `pi` | Quién aplica la consigna del MPC: `pi` (la Pi la aplica en el PLC) o `backend` (solo laboratorio; aplica contra el stub interno, no contra un PLC) |
 | `MPC_CONFIANZA_MIN` | No | `0.5` | Confianza mínima promedio del detector para proponer cambios |
 | `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` | No | `1800` | Timeout de precalentamiento en modo automático |
 | `MPC_PREHEAT_POLL_SEGUNDOS` | No | `15` | Cadencia de lectura durante el precalentamiento |

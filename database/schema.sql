@@ -527,6 +527,10 @@ CREATE TABLE IF NOT EXISTS historial_consignas (
     motivo_error              TEXT,
     temperatura_previa        NUMERIC(6,2),
     velocidad_cinta_previa    NUMERIC(6,2),
+    -- decision_id no lleva FK: decisiones_control se crea más abajo en este
+    -- mismo script y una FK rompería el orden de creación.
+    decision_id               UUID,
+    estado                    VARCHAR(20)     NOT NULL DEFAULT 'PENDIENTE',
     creada_en                 TIMESTAMPTZ     NOT NULL DEFAULT now(),
 
     CONSTRAINT fk_historial_consignas_producto
@@ -535,19 +539,22 @@ CREATE TABLE IF NOT EXISTS historial_consignas (
         ON DELETE SET NULL,
 
     CONSTRAINT chk_historial_consignas_origen
-        CHECK (origen IN ('AUTOMATICO', 'MANUAL'))
+        CHECK (origen IN ('AUTOMATICO', 'MANUAL')),
+
+    CONSTRAINT chk_historial_consignas_estado
+        CHECK (estado IN ('PENDIENTE', 'APLICADA', 'RECHAZADA'))
 );
 
-COMMENT ON TABLE  historial_consignas IS 'Auditoría de toda consigna térmica/velocidad despachada (o intentada) al controlador físico del horno, de origen automático (SCA-142) o manual (SCA-320).';
-COMMENT ON COLUMN historial_consignas.horno_id IS 'Identificador del horno (dominio horno vive en memoria, sin tabla propia; no es FK)';
+COMMENT ON TABLE  historial_consignas IS 'Auditoría de toda consigna térmica/velocidad manual (SCA-320) aceptada y encolada para la Pi ENTRADA; conserva filas históricas de origen automático (SCA-142).';
+COMMENT ON COLUMN historial_consignas.horno_id IS 'Identificador del sector/horno al que se encoló la consigna (no es FK: el sector vive en sectores)';
 COMMENT ON COLUMN historial_consignas.lote_id IS 'Correlación con el lote productivo, sin FK: en el despacho automático el lote puede no estar persistido aún en lotes_productivos';
 COMMENT ON COLUMN historial_consignas.producto_id IS 'FK al producto cuyos parámetros originaron la consigna (nullable: puede no aplicar en consignas manuales sin producto asociado)';
-COMMENT ON COLUMN historial_consignas.origen IS 'AUTOMATICO: disparado por detección de IA al iniciar el lote. MANUAL: cargado por un operario desde el panel';
+COMMENT ON COLUMN historial_consignas.origen IS 'MANUAL: cargado por un operario desde el panel. AUTOMATICO: sólo lectura de filas históricas (ya no se escribe)';
 COMMENT ON COLUMN historial_consignas.usuario IS 'Identificador del operario que disparó una consigna manual';
-COMMENT ON COLUMN historial_consignas.exitosa IS 'Indica si el controlador físico (simulado) aplicó la consigna con éxito';
-COMMENT ON COLUMN historial_consignas.motivo_error IS 'Motivo del rechazo/fallo cuando exitosa=false';
-COMMENT ON COLUMN historial_consignas.temperatura_previa IS 'Temperatura activa del horno inmediatamente antes de este despacho (para trazabilidad)';
-COMMENT ON COLUMN historial_consignas.velocidad_cinta_previa IS 'Velocidad de cinta activa del horno inmediatamente antes de este despacho (para trazabilidad)';
+COMMENT ON COLUMN historial_consignas.exitosa IS 'Compatibilidad: true = aceptada y encolada para la Pi. La fuente fina del ciclo de vida es estado (PENDIENTE/APLICADA/RECHAZADA)';
+COMMENT ON COLUMN historial_consignas.motivo_error IS 'Motivo del fallo de encolado cuando exitosa=false';
+COMMENT ON COLUMN historial_consignas.temperatura_previa IS 'Temperatura real del lote (metricas_horno) inmediatamente antes de encolar la consigna; NULL si no había telemetría';
+COMMENT ON COLUMN historial_consignas.velocidad_cinta_previa IS 'Velocidad de cinta real del lote (metricas_horno) inmediatamente antes de encolar la consigna; NULL si no había telemetría';
 
 CREATE INDEX IF NOT EXISTS idx_historial_consignas_lote_id
     ON historial_consignas (lote_id);
@@ -630,6 +637,31 @@ BEGIN
             FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT;
     END IF;
 END $$;
+
+-- Ciclo de vida de la consigna encolada para la Pi. decision_id sólo guarda el
+-- id de la decisión de control (sin FK, ver comentario en la tabla): el ack de
+-- la Pi cierra la fila como APLICADA.
+ALTER TABLE historial_consignas ADD COLUMN IF NOT EXISTS decision_id UUID;
+ALTER TABLE historial_consignas ADD COLUMN IF NOT EXISTS estado VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_historial_consignas_estado') THEN
+        ALTER TABLE historial_consignas ADD CONSTRAINT chk_historial_consignas_estado
+            CHECK (estado IN ('PENDIENTE','APLICADA','RECHAZADA'));
+    END IF;
+END $$;
+
+-- Backfill de filas históricas: sólo toca las que no tienen decision_id, así
+-- que una consigna nueva pendiente no se pisa en reaplicaciones.
+UPDATE historial_consignas
+SET estado = CASE WHEN exitosa THEN 'APLICADA' ELSE 'RECHAZADA' END
+WHERE decision_id IS NULL AND estado = 'PENDIENTE';
+
+CREATE INDEX IF NOT EXISTS idx_historial_consignas_decision_id
+    ON historial_consignas (decision_id) WHERE decision_id IS NOT NULL;
+
+COMMENT ON COLUMN historial_consignas.decision_id IS 'Decisión de control encolada para la Pi; permite cerrar el estado con el ack (sin FK)';
+COMMENT ON COLUMN historial_consignas.estado IS 'PENDIENTE = encolada; APLICADA = confirmada por ack de la Pi; RECHAZADA = no se pudo encolar';
 
 -- ============================================================================
 -- Registro de dispositivos por solicitud + aprobación (reemplaza Ed25519)

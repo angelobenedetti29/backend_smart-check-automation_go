@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -13,8 +12,6 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/sector"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
-	"github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 )
 
 // fakeAlertaRepo implementa alerta.Repository en memoria para los handlers.
@@ -69,8 +66,7 @@ func (f *fakeMetricasLookup) GetUltimasParaLote(ctx context.Context, loteID stri
 	return f.muestras, f.err
 }
 
-// newGetHandler arma un handler con fakes; el service sólo se usa en el
-// endpoint legacy, así que el GET no depende de él.
+// newGetHandler arma un handler con fakes.
 func newGetHandler(sectorEntity *sector.Sector, lote *lote_sector.Lote, muestras []metricashorno.MetricaHorno, aRepo *fakeAlertaRepo) *HornoHandler {
 	sectores := &fakeSectorLookup{sectores: map[string]*sector.Sector{}}
 	if sectorEntity != nil {
@@ -79,7 +75,7 @@ func newGetHandler(sectorEntity *sector.Sector, lote *lote_sector.Lote, muestras
 	if aRepo == nil {
 		aRepo = &fakeAlertaRepo{}
 	}
-	return NewHornoHandler(nil, aRepo, sectores, &fakeLoteAbiertoLookup{lote: lote}, &fakeMetricasLookup{muestras: muestras})
+	return NewHornoHandler(aRepo, sectores, &fakeLoteAbiertoLookup{lote: lote}, &fakeMetricasLookup{muestras: muestras})
 }
 
 func getHornoData(t *testing.T, handler *HornoHandler, url string) (int, map[string]interface{}) {
@@ -263,47 +259,5 @@ func TestHornoHandler_GetHornoStatus_SinParametros(t *testing.T) {
 	code, _ := getHornoData(t, handler, "/api/v1/horno")
 	if code != http.StatusBadRequest {
 		t.Errorf("expected status 400 sin sector_id, got %d", code)
-	}
-}
-
-func TestHornoHandler_UpdateTemperature(t *testing.T) {
-	dbRepo := database.NewPostgresRepository()
-	aRepo := &fakeAlertaRepo{}
-	svc := service.NewHornoService(dbRepo, aRepo)
-	handler := NewHornoHandler(svc, aRepo, nil, nil, nil)
-
-	// Valid input JSON body
-	input := UpdateTemperatureInput{
-		ID:          "horno-01",
-		Temperatura: 205.5, // Trigger CRITICAL alert (> 200°C)
-	}
-	jsonBytes, _ := json.Marshal(input)
-
-	req, err := http.NewRequest("POST", "/api/v1/horno/temperatura", bytes.NewBuffer(jsonBytes))
-	if err != nil {
-		t.Fatalf("failed to build request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	rr := httptest.NewRecorder()
-	handler.UpdateTemperature(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rr.Code)
-	}
-
-	var body map[string]interface{}
-	_ = json.Unmarshal(rr.Body.Bytes(), &body)
-
-	if body["success"] != true {
-		t.Errorf("expected success true, got %v", body["success"])
-	}
-
-	// Check that state updated to MANTENIMIENTO due to threshold trigger (> 200°C)
-	data := body["data"].(map[string]interface{})
-	hornoMap := data["horno"].(map[string]interface{})
-
-	if hornoMap["estado"] != "MANTENIMIENTO" {
-		t.Errorf("expected oven state 'MANTENIMIENTO' after 205.5°C trigger, got '%s'", hornoMap["estado"])
 	}
 }

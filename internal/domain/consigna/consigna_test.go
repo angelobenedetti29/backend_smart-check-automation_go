@@ -9,11 +9,13 @@ import (
 
 // baseValidManualRequest returns a fully valid ConsignaManualRequest for use as a test baseline.
 func baseValidManualRequest() ConsignaManualRequest {
+	loteID := "lote-1"
 	return ConsignaManualRequest{
 		SectorID:               "horno-01",
 		ProductoID:             "a1b2c3d4-5678-90ab-cdef-1234567890ab",
 		TemperaturaObjetivo:    170.00,
 		VelocidadCintaObjetivo: 0.20,
+		LoteID:                 &loteID,
 	}
 }
 
@@ -22,31 +24,31 @@ func TestValidate_ValidRequest(t *testing.T) {
 	assert.NoError(t, req.Validate(), "un request válido no debe producir errores")
 }
 
-func TestValidate_ValidRequestWithLegacyHornoID(t *testing.T) {
+func TestValidate_ValidRequestWithoutSector(t *testing.T) {
 	req := baseValidManualRequest()
 	req.SectorID = ""
-	req.HornoID = "horno-01"
+	req.HornoID = ""
 
-	assert.NoError(t, req.Validate(), "el alias legacy hornoId debe seguir siendo válido")
-	assert.Equal(t, "horno-01", req.OvenID())
+	assert.NoError(t, req.Validate(), "el sector es opcional: se deduce del lote")
 }
 
-func TestValidate_EmptySectorID(t *testing.T) {
+func TestValidate_MissingLoteID(t *testing.T) {
 	req := baseValidManualRequest()
-	req.SectorID = ""
+	req.LoteID = nil
 
 	err := req.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sectorId")
+	assert.Contains(t, err.Error(), "loteId")
 }
 
-func TestValidate_WhitespaceSectorID(t *testing.T) {
+func TestValidate_EmptyLoteID(t *testing.T) {
 	req := baseValidManualRequest()
-	req.SectorID = "   "
+	vacio := "   "
+	req.LoteID = &vacio
 
 	err := req.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sectorId")
+	assert.Contains(t, err.Error(), "loteId")
 }
 
 func TestValidate_EmptyProductoID(t *testing.T) {
@@ -99,7 +101,7 @@ func TestValidate_MultipleErrorsAggregated(t *testing.T) {
 
 	err := req.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sectorId")
+	assert.Contains(t, err.Error(), "loteId")
 	assert.Contains(t, err.Error(), "productoId")
 	assert.Contains(t, err.Error(), "temperaturaObjetivo")
 	assert.Contains(t, err.Error(), "velocidadCintaObjetivo")

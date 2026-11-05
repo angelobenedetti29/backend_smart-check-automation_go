@@ -40,12 +40,10 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/guard"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	googleProvider "github.com/angelobenedetti29/smart-check-automation/internal/provider/google"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
 	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	consignaService "github.com/angelobenedetti29/smart-check-automation/internal/service/consigna"
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
-	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
 	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
 	oeeService "github.com/angelobenedetti29/smart-check-automation/internal/service/oee"
 	optimizador "github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
@@ -99,11 +97,6 @@ func main() {
 	log.Println("Schema de base de datos aplicado/verificado correctamente.")
 
 	// 2. Instantiate Infrastructure Adapters (Providers Layer)
-	dbRepo := database.NewPostgresRepository()
-	// El backend NO escribe el PLC: usa el stub interno para auditar/actualizar
-	// estado. La Pi ENTRADA es la única que escribe el PLC real.
-	ovenController := oven_controller.NewOvenController()
-
 	// Real PostgreSQL repositories
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
 	consignaRepo := repository.NewConsignaPostgresRepository(pgPool)
@@ -119,12 +112,6 @@ func main() {
 	reportesRepo := repository.NewReportesPostgresRepository(pgPool)
 	planificacionRepo := repository.NewPlanificacionPostgresRepository(pgPool)
 	oeeRepo := repository.NewOEERepository(pgPool)
-
-	// El override manual se encola para la Pi salvo que el actuador sea el
-	// backend (lab/debug). Mismo criterio que SetActuador del loop: "backend"
-	// es el único valor que no encola; vacío o inválido se comporta como "pi".
-	actuador := os.Getenv("CONTROL_ACTUADOR")
-	encolarOverridePi := actuador != "backend"
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
@@ -145,15 +132,14 @@ func main() {
 	controlSSEBroker := sse.NewBroker()
 
 	// 3. Instantiate Business Layer
-	hornoSvc := hornoService.NewHornoService(dbRepo, alertaRepo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	renamePushTimeout := getEnvDuration("DISPOSITIVO_RENAME_PUSH_TIMEOUT", 10*time.Second)
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker, renamePushTimeout)
 	// Autenticación de nodos: Bearer <secret> resuelto por hash contra dispositivos activos.
 	deviceVerifier := &deviceauth.Verifier{Store: deviceAuthRepo}
 	registroSvc := registroService.NewService(registrationRepo)
-	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, productoRepo, ovenController, hornoSSEBroker, alertaRepo,
-		decisionesRepo, loteSectorRepo, metricasHornoRepo, encolarOverridePi)
+	consignaSvc := consignaService.NewConsignaService(consignaRepo, productoRepo, hornoSSEBroker,
+		decisionesRepo, loteSectorRepo, metricasHornoRepo)
 
 	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
 	userSvc := userService.NewService(userRepo)
@@ -180,7 +166,7 @@ func main() {
 	}
 
 	// 4. Instantiate Presentation HTTP Handlers
-	hornoHandler := hornoController.NewHornoHandler(hornoSvc, alertaRepo, sectorRepo, loteSectorRepo, metricasHornoRepo)
+	hornoHandler := hornoController.NewHornoHandler(alertaRepo, sectorRepo, loteSectorRepo, metricasHornoRepo)
 	loteSectorSSEHandler := sseController.NewSSEHandler(loteSectorSSEBroker)
 	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc, dispositivoRepo)
 	registroHandler := registroController.NewHandler(registroSvc)
@@ -221,7 +207,6 @@ func main() {
 		LoteLookup:     loteSectorSvc,
 		ProductoRepo:   productoRepo,
 		Optimizer:      optimizer,
-		Consigna:       consignaSvc,
 		LoopCancels:    loopRegistry,
 		MetricasRepo:   metricasHornoRepo,
 		EventosRepo:    loteSectorRepo,
@@ -232,6 +217,7 @@ func main() {
 		DeviceSector:   loteSectorSvc,
 		Modelos:        predictorCliente,
 		Alertas:        alertaRepo,
+		ConsignaRepo:   consignaRepo,
 	}
 	controlHandler := controlController.NewControlHandler(controlDeps)
 	// Al abrir un lote en modo no manual, arrancar su loop de control.
@@ -267,7 +253,6 @@ func main() {
 
 	// Rutas del dominio industrial
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoHandler.GetHornoStatus)))
-	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(hornoHandler.UpdateTemperature)))))
 	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

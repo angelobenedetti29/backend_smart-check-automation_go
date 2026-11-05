@@ -36,7 +36,6 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/controller/helpers"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
@@ -103,7 +102,6 @@ type ControlDeps struct {
 	LoteLookup     LoteLookupService
 	ProductoRepo   ProductoRepo
 	Optimizer      *optimizador.Optimizer
-	Consigna       control.ConsignaDispatchService
 	LoopCancels    *LoopRegistry
 	MetricasRepo   MetricasRepo
 	EventosRepo    EventosRepo
@@ -120,6 +118,14 @@ type ControlDeps struct {
 	// Alertas persiste alertas del loop (p.ej. timeout de precalentamiento).
 	// Nil = el loop las omite.
 	Alertas alerta.Repository
+	// ConsignaRepo cierra la consigna encolada como APLICADA al recibir el ack
+	// de la Pi. Nil = se omite (tests / despliegues sin historial).
+	ConsignaRepo ConsignaAckRepo
+}
+
+// ConsignaAckRepo es el mínimo del repo de consignas que necesita el ack.
+type ConsignaAckRepo interface {
+	MarcarAplicadaPorDecision(ctx context.Context, decisionID string) error
 }
 
 // ModeloStatus es el mínimo del cliente del sidecar que necesita el handler.
@@ -154,7 +160,6 @@ func NewControlHandler(deps ControlDeps) *ControlHandler {
 		{"LoteLookup", deps.LoteLookup == nil},
 		{"ProductoRepo", deps.ProductoRepo == nil},
 		{"Optimizer", deps.Optimizer == nil},
-		{"Consigna", deps.Consigna == nil},
 		{"LoopCancels", deps.LoopCancels == nil},
 		{"MetricasRepo", deps.MetricasRepo == nil},
 		{"EventosRepo", deps.EventosRepo == nil},
@@ -260,7 +265,6 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, lote *lotesector.
 		h.deps.EventosRepo,
 		h.deps.ProductoRepo,
 		h.deps.Optimizer,
-		h.deps.Consigna,
 		h.deps.DecisionesRepo,
 		h.deps.Broker,
 	)
@@ -269,12 +273,6 @@ func (h *ControlHandler) startLoopForLote(ctx context.Context, lote *lotesector.
 		lote.VentanaEvaluacionSegundos, lote.VentanaActualizacionSegundos,
 		pesos, limites,
 	)
-	// Actuador: "pi" (default, la Pi hace pull) o "backend" (lab/debug).
-	actuador := os.Getenv("CONTROL_ACTUADOR")
-	if actuador == "" {
-		actuador = "pi"
-	}
-	loop.SetActuador(actuador)
 	// Umbral de confianza de detección; un valor inválido conserva el default.
 	confianzaMin := 0.5
 	if raw := os.Getenv("MPC_CONFIANZA_MIN"); raw != "" {
@@ -878,7 +876,7 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 	}
 
 	// 2. Fallback: última decisión pendiente persistida (SUPERVISION o
-	// AUTOMATICO con actuador "pi" esperando el ack del nodo).
+	// AUTOMATICO esperando el ack del nodo).
 	if h.deps.DecisionesRepo == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -936,9 +934,9 @@ func (h *ControlHandler) HandleConsignaPropuesta(w http.ResponseWriter, r *http.
 
 // HandleAplicarConsigna maneja POST /api/v1/lotes/{id}/aplicar-consigna (y su
 // alias /aprobar-consigna). En SUPERVISION aprueba la propuesta pendiente: el
-// operario del panel (JWT) o la propia Pi (Bearer de dispositivo). Con el
-// actuador "backend" además despacha; con "pi" sólo autoriza y responde, y la
-// aplicación real llega después por /consigna/ack.
+// operario del panel (JWT) o la propia Pi (Bearer de dispositivo). El backend
+// sólo autoriza y responde; la aplicación real llega después por
+// /consigna/ack.
 func (h *ControlHandler) HandleAplicarConsigna() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1015,33 +1013,8 @@ func (h *ControlHandler) HandleAplicarConsigna() http.HandlerFunc {
 			response.Error(w, http.StatusConflict, "La propuesta cambió; recargá antes de aprobar", nil)
 			return
 		}
-		loopAny, ok := h.deps.LoopCancels.GetLoop(loteID)
-		loop, isLoop := loopAny.(*control.Loop)
-		if ok && isLoop && loop.Actuador() == "backend" {
-			// Lab/debug: el backend también despacha. Una fila ya aprobada no
-			// es un error: el dispatch sigue siendo idempotente por consigna.
-			if aerr := h.deps.DecisionesRepo.Aprobar(r.Context(), d.ID, usuario); aerr != nil && !errors.Is(aerr, decisiones_control.ErrSinPendiente) {
-				response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
-				return
-			}
-			cons, aerr := loop.AplicarPropuesta(r.Context(), usuario)
-			if aerr != nil {
-				if errors.Is(aerr, control.ErrLoteNoAbierto) {
-					response.Error(w, http.StatusConflict, "No hay propuesta pendiente", nil)
-					return
-				}
-				writeAplicarError(w, aerr)
-				return
-			}
-			response.OK(w, "Consigna aplicada", map[string]interface{}{
-				"lote_id":  loteID,
-				"aprobada": true,
-				"aplicada": true,
-				"consigna": cons,
-			})
-			return
-		}
-		// Actuador "pi" (o sin loop en memoria): sólo se autoriza la propuesta.
+		// La Pi es la única actuadora: siempre se aprueba la propuesta y la
+		// aplicación real llega después por /consigna/ack.
 		if err := h.deps.DecisionesRepo.Aprobar(r.Context(), d.ID, usuario); err != nil {
 			if errors.Is(err, decisiones_control.ErrSinPendiente) {
 				response.Error(w, http.StatusConflict, "No hay propuesta pendiente", nil)
@@ -1050,8 +1023,10 @@ func (h *ControlHandler) HandleAplicarConsigna() http.HandlerFunc {
 			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
 			return
 		}
-		if ok && isLoop {
-			loop.AprobarPropuesta(d.ID)
+		if loopAny, ok := h.deps.LoopCancels.GetLoop(loteID); ok {
+			if loop, isLoop := loopAny.(*control.Loop); isLoop {
+				loop.AprobarPropuesta(d.ID)
+			}
 		}
 		response.OK(w, "Consigna aprobada", map[string]interface{}{
 			"lote_id":        loteID,
@@ -1150,6 +1125,13 @@ func (h *ControlHandler) HandleConsignaAck() http.HandlerFunc {
 			response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
 			return
 		}
+		// Best-effort: el ack ya es válido; si falla el cierre de la consigna
+		// sólo se loguea (la decisión ya quedó aplicada).
+		if h.deps.ConsignaRepo != nil {
+			if cerr := h.deps.ConsignaRepo.MarcarAplicadaPorDecision(r.Context(), body.DecisionID); cerr != nil {
+				log.Printf("[control] marcando consigna %s como APLICADA: %v", body.DecisionID, cerr)
+			}
+		}
 		// Best-effort: el ack ya es válido; si falla el espejo de setpoints
 		// sólo se loguea.
 		if err := h.deps.LoteRepo.UpdateSetpointsAplicados(r.Context(), loteID, *body.TempAplicado, *body.VelAplicado); err != nil {
@@ -1169,18 +1151,6 @@ func (h *ControlHandler) HandleConsignaAck() http.HandlerFunc {
 }
 
 // --- helpers ---
-
-func writeAplicarError(w http.ResponseWriter, err error) {
-	if errors.Is(err, consigna.ErrFueraDeRango) {
-		response.Error(w, http.StatusUnprocessableEntity, "Setpoint fuera de rango del producto", nil)
-		return
-	}
-	if errors.Is(err, consigna.ErrDispatchFallido) {
-		response.Error(w, http.StatusBadGateway, "El controlador físico rechazó la consigna", nil)
-		return
-	}
-	response.Error(w, http.StatusInternalServerError, "Error interno del servidor", nil)
-}
 
 // --- Registry ---
 

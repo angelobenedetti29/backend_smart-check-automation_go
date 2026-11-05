@@ -44,13 +44,11 @@ PORT=8080
 > `PREDICTOR_URL=http://predictor-svc:8090` para el contenedor `app`; fuera de
 > Compose el default del código es `http://localhost:8090`.
 
-> **PLC del horno:** el backend no necesita conexión al PLC. La Pi ENTRADA es la
-> única que escribe el PLC real con su propio `control.sensores`/`actuadores`
-> (`modbus_tcp`/`modbus_rtu`); el backend audita y actualiza el estado del horno
-> con un stub interno. Dejá `CONTROL_ACTUADOR=pi` (default).
-> `CONTROL_ACTUADOR=backend` es sólo para laboratorio: aplica contra el stub
-> interno, no contra un PLC real. Detalle en
-> [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md).
+> **PLC del horno:** el backend no necesita conexión al PLC ni mantiene un horno
+> en memoria. La Pi ENTRADA es la única que escribe el PLC real con su propio
+> `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`); el backend sólo
+> encola la consigna manual y publica propuestas del MPC para que la Pi las
+> levante por pull. Detalle en [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md).
 
 ---
 

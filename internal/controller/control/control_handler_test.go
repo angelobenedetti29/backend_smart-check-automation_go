@@ -18,7 +18,6 @@ import (
 
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
@@ -124,13 +123,22 @@ func (f *fakeDecisionesRepo) MarcarAplicada(_ context.Context, decisionID string
 	return nil
 }
 
-// fakeConsignaDispatch implementa control.ConsignaDispatchService y cuenta los
-// despachos para verificar que aprobar no despacha.
-type fakeConsignaDispatch struct{ calls int }
+// fakeConsignaAckRepo implementa ConsignaAckRepo registrando los decision_id
+// que el ack de la Pi marca como aplicados.
+type fakeConsignaAckRepo struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+}
 
-func (f *fakeConsignaDispatch) Dispatch(_ context.Context, _ consigna.ConsignaManualRequest, _ consigna.Origen, _ *string) (*consigna.Consigna, error) {
-	f.calls++
-	return nil, nil
+func (f *fakeConsignaAckRepo) MarcarAplicadaPorDecision(_ context.Context, decisionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, decisionID)
+	return nil
 }
 
 // fakeMetricasRepo implementa MetricasRepo. metricasFn permite generar métricas
@@ -274,7 +282,6 @@ func validControlDeps() ControlDeps {
 		LoteLookup:     &fakeLoteLookup{},
 		ProductoRepo:   &fakeProductoRepo{},
 		Optimizer:      optimizador.NewOptimizer(nil),
-		Consigna:       &fakeConsignaDispatch{},
 		LoopCancels:    NewLoopRegistry(),
 		MetricasRepo:   &fakeMetricasRepo{},
 		EventosRepo:    &fakeEventosRepoHandler{},
@@ -296,7 +303,6 @@ func TestNewControlHandlerPanicConDepNil(t *testing.T) {
 		{"LoteLookup", func(d *ControlDeps) { d.LoteLookup = nil }},
 		{"ProductoRepo", func(d *ControlDeps) { d.ProductoRepo = nil }},
 		{"Optimizer", func(d *ControlDeps) { d.Optimizer = nil }},
-		{"Consigna", func(d *ControlDeps) { d.Consigna = nil }},
 		{"LoopCancels", func(d *ControlDeps) { d.LoopCancels = nil }},
 		{"MetricasRepo", func(d *ControlDeps) { d.MetricasRepo = nil }},
 		{"EventosRepo", func(d *ControlDeps) { d.EventosRepo = nil }},
@@ -1062,7 +1068,6 @@ func TestControlSSEReceivePropuestaEnModoSupervision(t *testing.T) {
 		optimizador.NewOptimizer(fakePredictorHandler{out: optimizador.PrediccionSalida{
 			PctCrudos: 10, PctOk: 80, PctQuemados: 10, ModelVersion: "test",
 		}}),
-		&fakeConsignaDispatch{},
 		&fakeDecisionesRepo{},
 		broker,
 	)
@@ -1482,9 +1487,9 @@ func postAplicar(t *testing.T, srv *httptest.Server, secret []byte, path, body s
 	return resp.StatusCode, env
 }
 
-// TestHandleAplicarConsignaSupervisionApruebaSinDespachar verifica que con
-// actuador "pi" el endpoint sólo persiste la aprobación (200 aplicada=false) y
-// no despacha al horno.
+// TestHandleAplicarConsignaSupervisionApruebaSinDespachar verifica que el
+// endpoint sólo persiste la aprobación (200 aplicada=false): la Pi es la única
+// actuadora y aplica después por pull.
 func TestHandleAplicarConsignaSupervisionApruebaSinDespachar(t *testing.T) {
 	lote := &lotesector.Lote{
 		ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoSupervision,
@@ -1495,8 +1500,6 @@ func TestHandleAplicarConsignaSupervisionApruebaSinDespachar(t *testing.T) {
 	deps := validControlDeps()
 	deps.LoteLookup = &fakeLoteLookup{lote: lote}
 	deps.DecisionesRepo = repo
-	dispatch := &fakeConsignaDispatch{}
-	deps.Consigna = dispatch
 	_, srv, secret := newAplicarServer(t, deps)
 
 	status, env := postAplicar(t, srv, secret, "/api/v1/lotes/lote-1/aplicar-consigna", `{}`)
@@ -1514,9 +1517,6 @@ func TestHandleAplicarConsignaSupervisionApruebaSinDespachar(t *testing.T) {
 	}
 	if repo.aprobarUser[0] != "sup@fermar.com.ar" {
 		t.Fatalf("usuario de aprobación = %q", repo.aprobarUser[0])
-	}
-	if dispatch.calls != 0 {
-		t.Fatalf("no debe despachar en modo pi; dispatch=%d", dispatch.calls)
 	}
 }
 
@@ -1638,6 +1638,7 @@ func newAckTestHandler(t *testing.T, lote *lotesector.Lote, repo *fakeDecisiones
 	deps.LoteLookup = &fakeLoteLookup{lote: lote}
 	deps.DecisionesRepo = repo
 	deps.DeviceSector = &fakeDeviceSector{info: &loteSectorService.SectorInfo{SectorID: sector}}
+	deps.ConsignaRepo = &fakeConsignaAckRepo{}
 	h := NewControlHandler(deps)
 	t.Cleanup(h.deps.LoopCancels.StopAll)
 	return h
@@ -1760,6 +1761,30 @@ func TestHandleConsignaAckIdempotente(t *testing.T) {
 	}
 	if len(repo.marcarCalls) != 2 {
 		t.Fatalf("MarcarAplicada calls = %d, want 2", len(repo.marcarCalls))
+	}
+}
+
+// TestHandleConsignaAckMarcaConsignaAplicada verifica que el ack cierre la
+// consigna encolada con ese decision_id. Dos acks llaman dos veces al repo,
+// que es idempotente.
+func TestHandleConsignaAckMarcaConsignaAplicada(t *testing.T) {
+	lote := &lotesector.Lote{ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto, Modo: lotesector.ModoAutomatico}
+	repo := &fakeDecisionesRepo{porID: &decisiones_control.DecisionControl{ID: "dec-1", LoteID: "lote-1"}}
+	h := newAckTestHandler(t, lote, repo, "s-1")
+	consignaRepo := h.deps.ConsignaRepo.(*fakeConsignaAckRepo)
+
+	for i := 0; i < 2; i++ {
+		if rec := doAck(t, h, ackBody); rec.Code != http.StatusOK {
+			t.Fatalf("ack %d: status = %d, want 200", i+1, rec.Code)
+		}
+	}
+	if len(consignaRepo.calls) != 2 {
+		t.Fatalf("MarcarAplicadaPorDecision calls = %d, want 2", len(consignaRepo.calls))
+	}
+	for _, id := range consignaRepo.calls {
+		if id != "dec-1" {
+			t.Fatalf("decision_id = %q, want dec-1", id)
+		}
 	}
 }
 

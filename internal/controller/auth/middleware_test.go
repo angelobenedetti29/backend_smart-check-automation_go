@@ -149,7 +149,7 @@ func TestJWTMiddleware_ClaimsEnContexto(t *testing.T) {
 
 func TestRequireRole_SinClaims_401(t *testing.T) {
 	// Request sin JWTMiddleware previo (sin claims en el contexto)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/horno/temperatura", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/lotes/lote-1/control/parametros", nil)
 	rr := httptest.NewRecorder()
 
 	allowedRoles := []string{"Supervisor", "Administrador"}
@@ -160,7 +160,7 @@ func TestRequireRole_SinClaims_401(t *testing.T) {
 
 func TestRequireRole_OperarioAccediendoARutaProtegida_403Forbidden(t *testing.T) {
 	// Operario autenticado con JWT válido intentando modificar parámetros del horno
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/horno/temperatura", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/lotes/lote-1/control/parametros", nil)
 	req.AddCookie(buildValidCookie(t, "Operario"))
 	rr := httptest.NewRecorder()
 
@@ -174,7 +174,7 @@ func TestRequireRole_OperarioAccediendoARutaProtegida_403Forbidden(t *testing.T)
 }
 
 func TestRequireRole_SupervisorAccediendoARutaProtegida_200OK(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/horno/temperatura", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/lotes/lote-1/control/parametros", nil)
 	req.AddCookie(buildValidCookie(t, "Supervisor"))
 	rr := httptest.NewRecorder()
 
@@ -186,7 +186,7 @@ func TestRequireRole_SupervisorAccediendoARutaProtegida_200OK(t *testing.T) {
 }
 
 func TestRequireRole_AdministradorAccediendoARutaProtegida_200OK(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/horno/temperatura", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/lotes/lote-1/control/parametros", nil)
 	req.AddCookie(buildValidCookie(t, "Administrador"))
 	rr := httptest.NewRecorder()
 

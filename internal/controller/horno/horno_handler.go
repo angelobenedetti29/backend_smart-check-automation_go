@@ -2,13 +2,11 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/sector"
@@ -69,7 +67,6 @@ type HornoStatusDTO struct {
 
 // HornoHandler handles incoming HTTP presentation layers for Kilns/Ovens.
 type HornoHandler struct {
-	service    horno.Service
 	alertaRepo alerta.Repository
 	sectores   SectorLookup
 	lotes      LoteAbiertoLookup
@@ -77,9 +74,8 @@ type HornoHandler struct {
 }
 
 // NewHornoHandler initializes a new HornoHandler.
-func NewHornoHandler(svc horno.Service, aRepo alerta.Repository, sectores SectorLookup, lotes LoteAbiertoLookup, metricas MetricasLookup) *HornoHandler {
+func NewHornoHandler(aRepo alerta.Repository, sectores SectorLookup, lotes LoteAbiertoLookup, metricas MetricasLookup) *HornoHandler {
 	return &HornoHandler{
-		service:    svc,
 		alertaRepo: aRepo,
 		sectores:   sectores,
 		lotes:      lotes,
@@ -88,8 +84,8 @@ func NewHornoHandler(svc horno.Service, aRepo alerta.Repository, sectores Sector
 }
 
 // GetHornoStatus handles GET /api/v1/horno?sector_id=horno-1 (alias legacy: ?id=).
-// Proyecta la telemetría real (metricas_horno) del lote abierto; el horno en
-// memoria sólo se usa para comandos/auditoría y no como estado actual.
+// Proyecta la telemetría real (metricas_horno) del lote abierto. No hay horno
+// en memoria: el backend no simula estado ni aplica consignas.
 func (h *HornoHandler) GetHornoStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
@@ -210,49 +206,4 @@ func tieneConsignaEnlaceActiva(alerts []alerta.Alerta) bool {
 		}
 	}
 	return false
-}
-
-// UpdateTemperatureInput represents the JSON body schema for updating temperature.
-type UpdateTemperatureInput struct {
-	ID          string  `json:"id"`
-	Temperatura float64 `json:"temperatura"`
-}
-
-// UpdateTemperature handles POST /api/v1/horno/temperatura
-func (h *HornoHandler) UpdateTemperature(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
-		return
-	}
-
-	var input UpdateTemperatureInput
-	err := json.NewDecoder(r.Body).Decode(&input)
-	if err != nil || input.ID == "" {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o 'id' ausente", nil)
-		return
-	}
-
-	// 1. Trigger temperature update service check (applies thresholds & raises db alerts)
-	hEntity, err := h.service.UpdateTemperature(input.ID, input.Temperatura)
-	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "Error al actualizar temperatura", err.Error())
-		return
-	}
-
-	// 2. Output result and alert summary
-	alerts, _ := h.alertaRepo.GetByHornoID(input.ID)
-
-	// GetByHornoID devuelve created_at DESC: la primera es la más reciente.
-	var latestAlert *alerta.Alerta
-	if len(alerts) > 0 {
-		latestAlert = &alerts[0]
-	}
-
-	data := map[string]interface{}{
-		"horno":           hEntity,
-		"ultima_alerta":   latestAlert,
-		"alertas_totales": len(alerts),
-	}
-
-	response.OK(w, "Temperatura del horno actualizada transaccionalmente", data)
 }

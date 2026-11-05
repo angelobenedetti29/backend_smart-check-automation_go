@@ -59,11 +59,12 @@ horno conserva el último setpoint aplicado.
 Cada lote abierto puede operar en tres modos:
 
 - **MANUAL:** no corre loop de MPC. La consigna se envía a mano por
-  `POST /api/v1/horno/consigna` (se despacha y audita igual). Si
-  `CONTROL_ACTUADOR=pi`, el backend además encola la consigna como decisión ya
-  aprobada (`manual_override`) para que la Raspberry la levante por
+  `POST /api/v1/horno/consigna`, que exige un lote abierto en modo MANUAL y la
+  deja **encolada** (no aplicada) como decisión ya aprobada (`manual_override`)
+  para que la Raspberry la levante por
   `GET /api/v1/lotes/{id}/consigna-propuesta` y la aplique sin el límite de Δ
-  por ciclo.
+  por ciclo. `exitosa=true` en `historial_consignas` significa encolada, no
+  aplicada en el PLC.
 - **SUPERVISION:** el loop del MPC publica propuestas sin autorizar. Un operario
   (o la propia Pi) las aprueba con `POST /api/v1/lotes/{id}/aplicar-consigna`
   (alias `/aprobar-consigna`); la Pi las aplica y confirma con
@@ -73,17 +74,9 @@ Cada lote abierto puede operar en tres modos:
 
 **La Pi ENTRADA es la única que escribe el PLC real**, con su propio
 `control.sensores`/`control.actuadores` (`modbus_tcp`/`modbus_rtu`). El backend
-no abre conexiones Modbus ni escribe ningún PLC: usa un stub interno
-determinista (`SimulatedOvenController`, ~40 ms de latencia, siempre acepta)
-para auditar y registrar el comando de consigna. El estado real del horno es la
-telemetría de la Pi (`metricas_horno`), que `GET /api/v1/horno` proyecta.
-
-`CONTROL_ACTUADOR` acepta `pi` (default) o `backend`:
-
-- `pi`: la Pi aplica las propuestas del MPC; el backend publica, audita y encola
-  el override manual para la Pi.
-- `backend`: sólo laboratorio; el backend aplica contra el mismo stub interno,
-  nunca contra un PLC real.
+no abre conexiones Modbus ni escribe ningún PLC, y tampoco mantiene un horno en
+memoria: sólo encola/propone y audita. El estado real del horno es la telemetría
+de la Pi (`metricas_horno`), que `GET /api/v1/horno` proyecta.
 
 El loop emite `control.propuesta` por SSE; el evento incluye `autorizada`. La
 propuesta serializa `temp1`, `velocidad`, `z` y `prediccion`. Variables y puesta

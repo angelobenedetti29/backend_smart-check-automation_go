@@ -323,6 +323,8 @@ type ConsignaTrazabilidad struct {
 	VelocidadCintaObjetivo float64   `json:"velocidad_cinta_objetivo"`
 	Origen                 string    `json:"origen"`
 	Usuario                *string   `json:"usuario"`
+	DecisionID             *string   `json:"decision_id,omitempty"`
+	Estado                 string    `json:"estado"`
 	Exitosa                bool      `json:"exitosa"`
 	MotivoError            *string   `json:"motivo_error"`
 	TemperaturaPrevia      *float64  `json:"temperatura_previa"`

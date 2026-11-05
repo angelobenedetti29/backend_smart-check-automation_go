@@ -2,12 +2,11 @@
 // (SCA-400). Una instancia por lote activo; se cancela con el contexto.
 //
 // Loop (modo AUTOMATICO): calienta hasta el setpoint de receta y después corre
-// el MPC por ventana. Publica la propuesta para que la Raspberry Pi la haga
-// pull (ya autorizada); sólo el actuador "backend" (lab/debug) despacha desde
-// el servidor.
+// el MPC por ventana. Publica la propuesta ya autorizada para que la Raspberry
+// Pi la haga pull; el backend nunca aplica consignas.
 //
 // Loop (modo SUPERVISION): publica la propuesta por SSE sin autorizarla. La
-// aprueba/aplica un operario desde /aplicar-consigna.
+// aprueba un operario desde /aplicar-consigna y la Pi la aplica.
 package control
 
 import (
@@ -20,7 +19,6 @@ import (
 	"time"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
@@ -45,7 +43,7 @@ type Loop struct {
 	loteID         string
 	productoID     string
 	modo           string // MANUAL | SUPERVISION | AUTOMATICO
-	hornoID        string // id del sector (= id del horno simulado) destino del despacho
+	sectorID       string // id del sector/horno del lote
 	ventanaEvalSeg int
 	ventanaActSeg  int
 	pesos          optimizador.Pesos
@@ -56,7 +54,6 @@ type Loop struct {
 	eventos     eventosRepo
 	producto    productoLookupService
 	optimizer   *optimizador.Optimizer
-	consigna    ConsignaDispatchService
 	decisiones  decisionesRepo
 	broker      *sse.Broker
 	now         func() time.Time
@@ -87,7 +84,6 @@ type Loop struct {
 	// sinMetricas evita esperar una ventana completa cuando el lote recién
 	// arranca y la Pi todavía no publicó telemetría.
 	sinMetricas    bool
-	actuador       string  // "pi" (default) | "backend" (lab/debug)
 	confianzaMin   float64 // umbral de confianza de detección; 0 = desconocida
 	preheatPollSeg int
 	// permitirPlaceholder habilita AUTOMATICO sin modelo entrenado. Default
@@ -131,23 +127,6 @@ func (loop *Loop) PropuestaPendiente(ttlSegundos int) *PropuestaSnapshot {
 		Autorizada:    loop.propuestaAprobada,
 		Fase:          loop.fase,
 	}
-}
-
-// SetActuador define quién aplica la consigna: "pi" (default) o "backend"
-// (sólo para laboratorio/debug). Cualquier otro valor cae a "pi".
-func (loop *Loop) SetActuador(actuador string) {
-	if actuador != "pi" && actuador != "backend" {
-		actuador = "pi"
-	}
-	loop.actuador = actuador
-}
-
-// Actuador devuelve el destino de aplicación de consignas.
-func (loop *Loop) Actuador() string {
-	if loop.actuador == "" {
-		return "pi"
-	}
-	return loop.actuador
 }
 
 // SetConfianzaMin ajusta el umbral de confianza de detección. Valores <= 0
@@ -266,17 +245,9 @@ type eventosRepo interface {
 	ConfianzaPromedioEnVentana(ctx context.Context, loteID string, desde, hasta time.Time) (promedio float64, muestras int, err error)
 }
 
-// Interface mínima para despachar la consigna (reusa ConsignaService).
-type ConsignaDispatchService interface {
-	Dispatch(ctx context.Context, req consigna.ConsignaManualRequest, origen consigna.Origen, usuario *string) (*consigna.Consigna, error)
-}
-
 // Interface mínima para persistir el audit del MPC.
 type decisionesRepo interface {
 	Save(ctx context.Context, d *decisiones_control.DecisionControl) error
-	// MarcarAplicada marca la fila como aplicada por OPERARIO/MPC con los
-	// valores efectivamente despachados. Idempotente.
-	MarcarAplicada(ctx context.Context, decisionID string, tempAplicada, velAplicada float64, aplicadoPor string) error
 }
 
 // NewLoop crea un Loop configurado. La verificación de modo se hace
@@ -288,7 +259,6 @@ func NewLoop(
 	eventos eventosRepo,
 	producto productoLookupService,
 	optimizer *optimizador.Optimizer,
-	consignaSrv ConsignaDispatchService,
 	decisiones decisionesRepo,
 	broker *sse.Broker,
 ) *Loop {
@@ -299,11 +269,9 @@ func NewLoop(
 		eventos:           eventos,
 		producto:          producto,
 		optimizer:         optimizer,
-		consigna:          consignaSrv,
 		decisiones:        decisiones,
 		broker:            broker,
 		now:               time.Now,
-		actuador:          "pi",
 		confianzaMin:      0.5,
 		preheatPollSeg:    15,
 		preheatTimeoutSeg: 1800,
@@ -311,12 +279,12 @@ func NewLoop(
 }
 
 // Configurar aplica los parámetros del lote. Antes de Start, el Loop no
-// conoce ni el modo ni las ventanas del lote. `hornoID` es el id del sector
-// (= id del horno simulado) destino del despacho, provisto por el lote.
+// conoce ni el modo ni las ventanas del lote. `sectorID` es el id del
+// sector/horno del lote.
 func (loop *Loop) Configurar(
 	productoID string,
 	modo string,
-	hornoID string,
+	sectorID string,
 	ventanaEvalSeg int,
 	ventanaActSeg int,
 	pesos optimizador.Pesos,
@@ -324,7 +292,7 @@ func (loop *Loop) Configurar(
 ) {
 	loop.productoID = productoID
 	loop.modo = modo
-	loop.hornoID = hornoID
+	loop.sectorID = sectorID
 	loop.ventanaEvalSeg = ventanaEvalSeg
 	loop.ventanaActSeg = ventanaActSeg
 	loop.pesos = pesos
@@ -622,28 +590,12 @@ func (loop *Loop) tick(ctx context.Context) {
 		Prediccion:     serializarPrediccion(predXGB.Prediccion, predXGB.RestriccionRelajada),
 	}
 
-	switch {
-	case loop.modo == lote_sector.ModoAutomatico && loop.Actuador() == "backend":
-		// Lab/debug: el backend sigue despachando directo al horno.
-		loop.aplicarComoMPC(ctx, predXGB, decision)
-	case loop.modo == lote_sector.ModoAutomatico:
-		// AUTOMATICO normal: la Pi hace pull de la propuesta ya autorizada.
-		decision.AplicadoPor = decisiones_control.AplicadoPorNadie
-		if err := loop.decisiones.Save(ctx, decision); err != nil {
-			log.Printf("[control] Save decision (automatico): %v", err)
-			return
-		}
-		loop.publicarPropuesta(predXGB, decision, true)
-	default:
-		// SUPERVISION: persistir primero, publicar después. Si Save falla, NO
-		// publicamos nada: el endpoint /consigna-propuesta tampoco la verá.
-		decision.AplicadoPor = decisiones_control.AplicadoPorNadie
-		if err := loop.decisiones.Save(ctx, decision); err != nil {
-			log.Printf("[control] Save decision (supervision): %v", err)
-			return
-		}
-		loop.publicarPropuesta(predXGB, decision, false)
+	decision.AplicadoPor = decisiones_control.AplicadoPorNadie
+	if err := loop.decisiones.Save(ctx, decision); err != nil {
+		log.Printf("[control] Save decision (modo %s): %v", loop.modo, err)
+		return
 	}
+	loop.publicarPropuesta(predXGB, decision, loop.modo == lote_sector.ModoAutomatico)
 }
 
 // tickPreheat mantiene T1 en el setpoint de receta sin correr el MPC. Cuando
@@ -795,15 +747,10 @@ func (loop *Loop) alertarPreheatTimeout(ctx context.Context, lote *lote_sector.L
 	}
 
 	loteID := loop.loteID
-	var sectorID *string
-	if loop.hornoID != "" {
-		s := loop.hornoID // variable local: el puntero debe sobrevivir al loop
-		sectorID = &s
-	}
 	a := &alerta.Alerta{
-		SectorID:  sectorID,
+		SectorID:  &loop.sectorID,
 		LoteID:    &loteID,
-		HornoID:   loop.hornoID,
+		HornoID:   loop.sectorID,
 		Tipo:      alerta.TipoPrecalentamientoTimeout,
 		Severidad: alerta.SeveridadCritical,
 		Estado:    alerta.EstadoActiva,
@@ -840,22 +787,9 @@ func (loop *Loop) objetivoReceta(ctx context.Context, lote *lote_sector.Lote) (t
 	return *prod.TempSetpoint, vel, true
 }
 
-// entregar aplica la consigna según el actuador configurado. En "backend"
-// despacha y marca la decisión; en "pi" publica la propuesta para que la Pi la
-// haga pull (autorizada=true en las consignas de precalentamiento).
+// entregar publica la propuesta para que la Pi la haga pull. Las consignas de
+// precalentamiento/transición van autorizadas=true.
 func (loop *Loop) entregar(ctx context.Context, prop *optimizador.Propuesta, decision *decisiones_control.DecisionControl) {
-	if loop.Actuador() == "backend" {
-		if _, err := loop.aplicarConsigna(ctx, prop, consigna.OrigenAutomatico, ""); err != nil {
-			log.Printf("[control] dispatch precalentamiento: %v", err)
-			return
-		}
-		actx, cancel := auditCtx(ctx)
-		defer cancel()
-		if err := loop.decisiones.MarcarAplicada(actx, decision.ID, prop.Temp1, prop.Velocidad, decisiones_control.AplicadoPorMPC); err != nil {
-			log.Printf("[control] marcando decisión %s como aplicada: %v", decision.ID, err)
-		}
-		return
-	}
 	loop.publicarPropuesta(prop, decision, true)
 }
 
@@ -893,84 +827,6 @@ func (loop *Loop) calcularZObservado(
 	*pctQuemado = qPct
 	z := optimizador.ZCalidad(loop.pesos, cPct, oPct, qPct)
 	return &z, true
-}
-
-// AplicarPropuesta aplica manualmente (operario) la propuesta pendiente del
-// modo SUPERVISION. Devuelve ErrLoteNoAbierto si ya no hay propuesta.
-// `usuario` es el nombre/identificador del operario que aprobó (se persiste
-// en la auditoría para distinguirlo del despacho automático).
-func (loop *Loop) AplicarPropuesta(ctx context.Context, usuario string) (*consigna.Consigna, error) {
-	loop.muPropuesta.Lock()
-	prop := loop.propuestaPendiente
-	decisionID := loop.lastDecisionID
-	loop.propuestaPendiente = nil
-	loop.lastDecisionID = "" // ya no es pendiente
-	loop.muPropuesta.Unlock()
-	if prop == nil {
-		return nil, ErrLoteNoAbierto
-	}
-	cons, err := loop.aplicarConsigna(ctx, prop, consigna.OrigenManual, usuario)
-	if err != nil {
-		return cons, err // preservar comportamiento actual
-	}
-	if decisionID != "" {
-		actx, cancel := auditCtx(ctx)
-		err := loop.decisiones.MarcarAplicada(actx, decisionID, cons.TemperaturaObjetivo, cons.VelocidadCintaObjetivo, decisiones_control.AplicadoPorOperario)
-		cancel()
-		if err != nil {
-			log.Printf("[control] marcando decisión %s como aplicada: %v", decisionID, err)
-			// No fallar: el dispatch fue OK; el audit queda pendiente.
-		}
-	}
-	return cons, nil
-}
-
-func (loop *Loop) aplicarComoMPC(ctx context.Context, prop *optimizador.Propuesta, decision *decisiones_control.DecisionControl) {
-	cons, err := loop.aplicarConsigna(ctx, prop, consigna.OrigenAutomatico, "")
-	if err != nil {
-		// Si el controlador físico rechaza, registramos la decisión como no
-		// aplicada con motivo. El horno pasa a CONTROL_MANUAL por el flujo
-		// existente (handleFalloDeEnlace).
-		skipped := fmt.Sprintf("dispatch_fallido: %v", err)
-		decision.AplicadoPor = decisiones_control.AplicadoPorNadie
-		decision.RazonSkipped = &skipped
-		actx, cancel := auditCtx(ctx)
-		if err := loop.decisiones.Save(actx, decision); err != nil {
-			log.Printf("[control] Save decision (mpc fail): %v", err)
-		}
-		cancel()
-		return
-	}
-	temp := cons.TemperaturaObjetivo
-	vel := cons.VelocidadCintaObjetivo
-	decision.TempAplicado = &temp
-	decision.VelAplicado = &vel
-	decision.AplicadoPor = decisiones_control.AplicadoPorMPC
-	actx, cancel := auditCtx(ctx)
-	if err := loop.decisiones.Save(actx, decision); err != nil {
-		log.Printf("[control] Save decision (mpc ok): %v", err)
-	}
-	cancel()
-}
-
-// aplicarConsigna despacha la propuesta con el origen y usuario correctos.
-// `usuario` puede estar vacío cuando el origen es AUTOMATICO (MPC despacha
-// solo); en modo MANUAL el handler lo carga desde el JWT del operario.
-//
-// HornoID proviene del sector del lote: el id del sector ES el id del horno
-// simulado destino del despacho. Sin sector, la validación del service falla.
-func (loop *Loop) aplicarConsigna(ctx context.Context, prop *optimizador.Propuesta, origen consigna.Origen, usuario string) (*consigna.Consigna, error) {
-	req := consigna.ConsignaManualRequest{
-		SectorID:               loop.hornoID,
-		ProductoID:             loop.productoID,
-		TemperaturaObjetivo:    prop.Temp1,
-		VelocidadCintaObjetivo: prop.Velocidad,
-	}
-	var u *string
-	if usuario != "" {
-		u = &usuario
-	}
-	return loop.consigna.Dispatch(ctx, req, origen, u)
 }
 
 func (loop *Loop) skipSinMuestras(ctx context.Context, ventanaInicio, ventanaFin time.Time) {
@@ -1097,10 +953,3 @@ func mustJSON(v interface{}) []byte {
 }
 
 func floatPtr(x float64) *float64 { return &x }
-
-// auditCtx devuelve un ctx desacoplado del request, con timeout corto,
-// para que HandleControlStop cancelando el request no pierda el audit del
-// despacho físico que ya ocurrió.
-func auditCtx(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
-}

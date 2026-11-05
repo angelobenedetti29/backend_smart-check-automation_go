@@ -76,6 +76,8 @@ func TestApply_CreaColumnasModernas(t *testing.T) {
 		{"dispositivos", "rename_token"},
 		{"lotes_productivos", "dispositivo_id"},
 		{"historial_consignas", "dispositivo_id"},
+		{"historial_consignas", "decision_id"},
+		{"historial_consignas", "estado"},
 		{"registration_requests", "request_id"},
 		{"registration_requests", "secret"},
 		{"registration_requests", "tipo"},

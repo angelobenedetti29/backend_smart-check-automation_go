@@ -38,7 +38,7 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | # | Endpoint | Qué hace |
 |---|---|---|
 | 1 | `GET /api/v1/horno` | Consultar estado actual del horno |
-| 2 | `POST /api/v1/horno/temperatura` | Actualizar temperatura del horno (umbrales/alertas) |
+| 2 | ~~`POST /api/v1/horno/temperatura`~~ | **Eliminado**: la temperatura sólo se lee de la telemetría de la Pi |
 | 3 | `GET/POST /api/v1/productos`, `PUT/DELETE /api/v1/productos/{id}` | Catálogo maestro de productos y sus parámetros de control |
 | 4 | `GET /api/v1/dispositivos/sector` | Sector y compañeros del dispositivo autenticado |
 | 5 | `GET/POST /api/v1/sectores`, `PUT/DELETE /api/v1/sectores/{id}` | CRUD de sectores |
@@ -54,7 +54,7 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 15 | `GET /api/v1/horno/consigna/historial` | Historial de auditoría de consignas por lote |
 | 16 | `GET /api/v1/lotes/events` | SSE: ciclo de vida de lotes (`lote.creado`/`actualizado`/`cerrado`) |
 | 17 | `GET /api/v1/dispositivos/events` | SSE: telemetría de dispositivos en tiempo real |
-| 18 | `GET /api/v1/horno/events` | SSE: consignas despachadas al horno |
+| 18 | `GET /api/v1/horno/events` | SSE: consignas encoladas para la Pi |
 | 19 | `GET /health`, `GET /healthz`, `GET /` | Salud del servicio / info |
 | 20 | `GET /api/v1/lotes/{id}/control/estado` | Estado runtime del loop de control del lote |
 | 21 | `PATCH`/`PUT /api/v1/lotes/{id}/modo` | Cambiar el modo MANUAL/SUPERVISION/AUTOMATICO |
@@ -82,9 +82,9 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 Devuelve una **proyección de solo lectura** del horno del sector a partir de la
 telemetría real de la Pi (`metricas_horno`) del lote abierto, más sus alertas
 recientes. Si no hay telemetría, los campos numéricos viajan `null`: el backend
-no inventa temperatura. El horno en memoria del backend ya **no** es la fuente
-del estado: sólo registra el comando/auditoría de la última consigna y el flag
-`CONTROL_MANUAL`.
+no inventa temperatura. No hay horno en memoria: el backend no simula estado ni
+aplica consignas. `CONTROL_MANUAL` se mantiene sólo por alertas históricas
+`CONSIGNA_ENLACE` activas.
 
 **Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `sector_id` (requerido; `id` se acepta como alias legacy).
 
@@ -148,25 +148,13 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno?sector_id=horno
 
 ---
 
-## 2. `POST /api/v1/horno/temperatura` — Actualizar temperatura del horno
+## 2. ~~`POST /api/v1/horno/temperatura`~~ — Eliminado
 
-Endpoint "legacy" (previo a SCA-142/320) que actualiza la temperatura del horno con lógica de umbrales hardcodeada: `>200°C` → alerta CRITICAL + `MANTENIMIENTO`; `>180°C` → alerta WARNING + `ATENCION`; si no, `ACTIVO`. No usa `parametros_producto`.
-
-**Auth:** cookie JWT `session_token` con rol Supervisor o Administrador. Sin `Content-Type` ni límite de tamaño de body (a diferencia de casi todos los demás POST).
-
-```bash
-curl -X POST http://localhost:8080/api/v1/horno/temperatura \
-  -b "session_token=$JWT" -H "Content-Type: application/json" \
-  -d '{"id":"horno-01","temperatura":195.0}'
-```
-
-| Código | Motivo |
-|---|---|
-| 405 | Método distinto de POST |
-| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
-| 403 | Rol insuficiente (se requiere Supervisor o Administrador) |
-| 400 | JSON inválido o `id` ausente |
-| 500 | Error interno del servicio |
+Este endpoint fue eliminado junto con el horno en memoria y el
+`SimulatedOvenController`. El backend no actualiza ni simula la temperatura:
+la única fuente de estado es la telemetría real (`metricas_horno`) de la Pi.
+Cualquier escritura de consigna se hace por `POST /api/v1/horno/consigna`
+(§14), que **encola** la consigna para la Pi.
 
 ---
 
@@ -735,9 +723,17 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/dispositivos/metricas
 
 ## 14. `POST /api/v1/horno/consigna` — Envío manual de consigna térmica — SCA-320
 
-Un operario carga a mano temperatura y velocidad de cinta desde el panel. Se valida contra el rango seguro `[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto (no contra el setpoint puntual). El despacho se audita en `historial_consignas` con `origen=MANUAL` y actualiza el registro de comando en memoria (el estado real del horno se lee de `metricas_horno`, no de ese registro). El backend no escribe el PLC: el despacho va a un stub interno (`SimulatedOvenController`); la Pi ENTRADA es la única que aplica el setpoint real en el PLC.
+Un operario carga a mano temperatura y velocidad de cinta desde el panel. La
+consigna se **encola** (no se aplica en el backend): se valida contra el lote
+abierto en modo **MANUAL** y contra el rango seguro
+`[temp_min, temp_max]`/`[velocidad_cinta_min, velocidad_cinta_max]` del producto,
+se deja una decisión aprobada (`muestras=0`) para que la Pi ENTRADA la levante
+por pull como `manual_override` (ver §24) y se audita en `historial_consignas`
+con `origen=MANUAL`. La única actuadora es la Pi.
 
-Si el lote está en modo **MANUAL**, está abierto y `CONTROL_ACTUADOR=pi`, además se encola una decisión ya aprobada (`muestras=0`) para que la Pi la aplique como `manual_override` (ver §24). En **AUTOMATICO**/**SUPERVISION** el envío manual se despacha y audita igual, pero el loop del MPC sigue gobernando las propuestas siguientes.
+`loteId` es **obligatorio** y debe corresponder a un lote ABIERTO en modo
+MANUAL. `sectorId` (o el alias legacy `hornoId`) es opcional; si viene, debe
+coincidir con el `sector_id` del lote.
 
 **Auth:** cookie JWT `session_token` con rol Operario, Supervisor o Administrador. `Content-Type: application/json` obligatorio.
 
@@ -745,29 +741,36 @@ Si el lote está en modo **MANUAL**, está abierto y `CONTROL_ACTUADOR=pi`, adem
 curl -X POST http://localhost:8080/api/v1/horno/consigna \
   -b "session_token=$JWT" -H "Content-Type: application/json" \
   -d '{
+    "loteId": "1d1e9071-e707-4821-b089-10d4a404d023",
     "sectorId": "horno-1",
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
     "temperaturaObjetivo": 175,
     "velocidadCintaObjetivo": 0.25,
-    "usuario": "operario-demo",
-    "loteId": "1d1e9071-e707-4821-b089-10d4a404d023"
+    "usuario": "operario-demo"
   }'
 ```
 
 ```json
 {
-  "success": true, "message": "Consigna manual despachada al horno",
+  "success": true, "message": "Consigna encolada para la Pi",
   "data": {
     "id": "0cd37ba5-...", "hornoId": "horno-1", "loteId": "1d1e9071-...", "productoId": "a1b2c3d4-...",
     "temperaturaObjetivo": 175, "velocidadCintaObjetivo": 0.25, "origen": "MANUAL",
     "usuario": "operario-demo", "exitosa": true,
+    "decisionId": "8f14e45f-ceea-467a-9a3b-0b9a1e2f3c4d", "estado": "PENDIENTE",
     "temperaturaPrevia": 170, "velocidadCintaPrevia": 0.2, "creadaEn": "2026-08-06T12:00:00Z"
   },
   "errors": null
 }
 ```
 
-`usuario` y `loteId` son opcionales; `sectorId` (o el alias legacy `hornoId`) y `productoId` son **obligatorios**. Si se envía `loteId` de un lote existente, su `sector_id` manda y un `sectorId` distinto devuelve 422.
+`usuario` es opcional; `productoId` y `loteId` son **obligatorios**.
+`exitosa=true` y `estado=PENDIENTE` significan **aceptada y encolada para la
+Pi**; no confirman que el PLC la haya aplicado. `decisionId` es el id de la
+decisión de control encolada y `estado` el ciclo de vida de la consigna:
+`PENDIENTE` (encolada, esperando el ack), `APLICADA` (confirmada por el ack de
+la Pi) o `RECHAZADA` (no se pudo encolar; llega con `exitosa=false`, sin
+`decisionId` y con `motivoError`).
 
 | Código | Motivo |
 |---|---|
@@ -776,19 +779,17 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
 | 403 | Rol insuficiente |
 | 415 | `Content-Type` inválido |
 | 400 | JSON inválido |
-| 422 | Validación de forma falló, el producto no tiene parámetros cargados, o los valores están fuera del rango seguro |
-| 404 | El horno indicado no existe |
-| 502 | El controlador interno (stub) rechazó la consigna (queda auditado; el horno pasa a `CONTROL_MANUAL` + se genera una alerta CRITICAL). El backend no escribe el PLC |
+| 422 | Validación de forma falló (p.ej. falta `loteId`), el producto no tiene parámetros cargados, los valores están fuera del rango seguro, el sector no coincide con el del lote o el lote no tiene sector |
+| 404 | El lote no existe |
+| 409 | El lote no está ABIERTO o no está en modo MANUAL |
+| 502 | No se pudo encolar la consigna para la Pi (queda auditado con `exitosa=false`, `estado=RECHAZADA` y `motivo_error`) |
 | 500 | Error interno |
-
-Un despacho exitoso posterior restaura el horno a `ACTIVO`. La vía manual sigue
-disponible aunque el horno esté en `CONTROL_MANUAL`.
 
 ---
 
 ## 15. `GET /api/v1/horno/consigna/historial` — Historial de auditoría por lote
 
-Devuelve todas las consignas asociadas a un `loteId`, ordenadas de más reciente a más antigua. `origen='MANUAL'` corresponde al envío del panel (SCA-320); `origen='AUTOMATICO'` corresponde al despacho del loop del MPC (SCA-400) cuando el lote está en AUTOMATICO con actuador `backend`, o a registros históricos de SCA-142.
+Devuelve todas las consignas asociadas a un `loteId`, ordenadas de más reciente a más antigua. `origen='MANUAL'` corresponde al envío del panel (SCA-320) ya encolado para la Pi; `origen='AUTOMATICO'` sólo aparece en filas históricas (SCA-142/SCA-400) y ya no se escribe.
 
 **Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `loteId` (requerido).
 
@@ -800,11 +801,19 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno/consigna/histor
 {
   "success": true, "message": "Historial de consignas obtenido exitosamente",
   "data": [
-    { "id": "0cd37ba5-...", "origen": "MANUAL", "temperaturaObjetivo": 175, "exitosa": true, "creadaEn": "..." },
-    { "id": "e7727358-...", "origen": "AUTOMATICO", "temperaturaObjetivo": 170, "exitosa": true, "creadaEn": "..." }
+    { "id": "0cd37ba5-...", "origen": "MANUAL", "temperaturaObjetivo": 175, "exitosa": true,
+      "decisionId": "8f14e45f-...", "estado": "APLICADA", "creadaEn": "..." },
+    { "id": "e7727358-...", "origen": "AUTOMATICO", "temperaturaObjetivo": 170, "exitosa": true,
+      "estado": "APLICADA", "creadaEn": "..." }
   ]
 }
 ```
+
+`estado` es `PENDIENTE` mientras la consigna espera el ack de la Pi, `APLICADA`
+cuando el ack confirmó la aplicación y `RECHAZADA` cuando no se pudo encolar.
+`decisionId` viaja en las consignas nuevas encoladas y se omite en las filas
+históricas sin decisión. `exitosa` se mantiene por compatibilidad; la fuente
+fina es `estado`.
 
 | Código | Motivo |
 |---|---|
@@ -1126,9 +1135,8 @@ marca explícitamente:
 
 Aprueba la propuesta pendiente en modo SUPERVISION. Puede hacerlo un operario
 del panel (JWT) o la propia Pi (Bearer de dispositivo, sólo para lotes de su
-sector). Con `CONTROL_ACTUADOR=backend` (solo laboratorio) además despacha al
-stub interno; con `pi` (default) sólo autoriza y la aplicación real en el PLC la
-hace la Pi ENTRADA, confirmada después por `/consigna/ack`.
+sector). La Pi ENTRADA es la única actuadora: el endpoint sólo autoriza y la
+aplicación real en el PLC la confirma después `/consigna/ack`.
 
 **Auth:** dual-auth. Con JWT se requiere rol Operario, Supervisor o
 Administrador.
@@ -1148,8 +1156,6 @@ curl -X POST http://localhost:8080/api/v1/lotes/$LOTE/aplicar-consigna \
   -d '{"decision_id":"8f14e45f-..."}'
 ```
 
-Con actuador `pi`:
-
 ```json
 {
   "success": true, "message": "Consigna aprobada",
@@ -1164,9 +1170,6 @@ Con actuador `pi`:
 }
 ```
 
-Con actuador `backend`, `aplicada: true` y `consigna` con el registro de
-auditoría.
-
 | Código | Motivo |
 |---|---|
 | 405 | Método distinto de POST |
@@ -1174,8 +1177,6 @@ auditoría.
 | 403 | Rol insuficiente, dispositivo sin sector o de otro sector |
 | 404 | Lote no encontrado |
 | 409 | Lote cerrado, modo MANUAL, modo AUTOMATICO (no requiere aprobación), sin propuesta pendiente o propuesta cambiada |
-| 422 | Setpoint fuera del rango seguro del producto |
-| 502 | El controlador interno (stub) rechazó la consigna; el backend no escribe el PLC |
 | 500 | Error interno |
 
 ---
@@ -1205,7 +1206,9 @@ curl -X POST http://localhost:8080/api/v1/lotes/$LOTE/consigna/ack \
 ```
 
 `aplicado_por` es `MPC` en AUTOMATICO y `OPERARIO` en SUPERVISION. El ACK
-también actualiza los setpoints aplicados del lote.
+también actualiza los setpoints aplicados del lote y marca como `APLICADA` la
+consigna de `historial_consignas` encolada con ese `decision_id` (idempotente:
+si no hay fila o ya estaba aplicada, el ACK sigue respondiendo `200`).
 
 | Código | Motivo |
 |---|---|
@@ -1644,7 +1647,8 @@ curl -b "session_token=$JWT" \
     "consignas": [
       {"id": "c1d2e3f4-5678-90ab-cdef-1234567890ab", "creada_en": "2026-11-04T10:00:00-03:00",
        "temperatura_objetivo": 180.0, "velocidad_cinta_objetivo": 0.2, "origen": "MANUAL",
-       "usuario": "operario", "exitosa": true, "motivo_error": null,
+       "usuario": "operario", "decision_id": "d1e2f3a4-5678-90ab-cdef-1234567890ab",
+       "estado": "APLICADA", "exitosa": true, "motivo_error": null,
        "temperatura_previa": 179.0, "velocidad_cinta_previa": 0.19}
     ],
     "alertas": [
@@ -2101,7 +2105,6 @@ existe). Éxito:
 | `PUT /api/v1/dispositivos/nombre` | Bearer de dispositivo | ✅ | ✅ |
 | `PUT /api/v1/dispositivos/{id}/nombre` | JWT cookie (`session_token`), Supervisor/Admin | ✅ | ✅ |
 | `DELETE /api/v1/dispositivos` | JWT cookie (`session_token`), Supervisor/Admin | — | — |
-| `POST /api/v1/horno/temperatura` | JWT cookie, Supervisor/Admin | ❌ | ❌ |
 | `POST /api/v1/productos`, `PUT/DELETE /api/v1/productos/{id}` | JWT cookie, Supervisor/Admin | ✅ (POST/PUT) | ✅ (POST/PUT) |
 | `POST /api/v1/horno/consigna` | JWT cookie, Operario/Supervisor/Admin | ✅ | ✅ |
 | `GET /api/v1/dispositivos` | JWT cookie (`session_token`) | — | — |

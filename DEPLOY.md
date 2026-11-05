@@ -31,7 +31,6 @@ MPC opera degradado y las decisiones se auditan como `skipped`.
 | `FRONTEND_ORIGINS` | Orígenes del panel permitidos por CORS, separados por coma |
 | `PREDICTOR_URL` | URL base del sidecar predictor; en Render debe ser una URL alcanzable desde el servicio |
 | `PREDICTOR_AUTH_TOKEN` | Opcional; si se define, el backend envía `Authorization: Bearer <token>` al sidecar |
-| `CONTROL_ACTUADOR` | Quién aplica la consigna del MPC: `pi` (default) o `backend` (solo laboratorio; no escribe un PLC real) |
 | `MPC_CONFIANZA_MIN` | Confianza mínima promedio del detector para proponer cambios (default `0.5`) |
 | `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` | Timeout de precalentamiento en AUTOMATICO (default `1800`) |
 | `MPC_PREHEAT_POLL_SEGUNDOS` | Cadencia de lectura durante el precalentamiento (default `15`) |
@@ -40,17 +39,16 @@ MPC opera degradado y las decisiones se auditan como `skipped`.
 
 Claves alineadas con [`render.yaml`](render.yaml) para el backend:
 `DATABASE_URL`, `JWT_SECRET`, `GOOGLE_CLIENT_ID`, `FRONTEND_ORIGINS`,
-`PREDICTOR_URL`, `PREDICTOR_AUTH_TOKEN` y `PORT`. `CONTROL_ACTUADOR` y las
-`MPC_*` no están declaradas en `render.yaml`; si no se configuran aplican los
-defaults del código (`CONTROL_ACTUADOR=pi`). El backend no se conecta al PLC ni
-lee variables de driver Modbus.
+`PREDICTOR_URL`, `PREDICTOR_AUTH_TOKEN` y `PORT`. Las `MPC_*` no están
+declaradas en `render.yaml`; si no se configuran aplican los defaults del
+código. El backend no se conecta al PLC ni lee variables de driver Modbus.
 
 **La Pi ENTRADA es la única que escribe el PLC real** con su propio
-`control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend usa un
-stub interno determinista para auditar y registrar el comando de consigna. El
-estado real del horno es la telemetría (`metricas_horno`), expuesta por
-`GET /api/v1/horno`. En producción dejá `CONTROL_ACTUADOR=pi`; `backend` es sólo laboratorio y aplica
-contra el stub, no contra un PLC.
+`control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend no
+mantiene un horno en memoria ni aplica consignas: sólo encola la consigna
+manual y publica propuestas del MPC; la Pi las levanta por pull. El estado real
+del horno es la telemetría (`metricas_horno`), expuesta por
+`GET /api/v1/horno`.
 
 El detalle de todas las variables (incluidas las de telemetría de dispositivos)
 está en [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md) §3.

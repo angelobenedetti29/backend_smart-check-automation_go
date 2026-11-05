@@ -1,11 +1,13 @@
-# Consigna térmica al horno — SCA-142 (histórico), SCA-320 (manual) y SCA-400 (MPC)
+# Consigna térmica al horno — SCA-320 (manual) y SCA-400 (MPC)
 
-Este documento describe el diseño **actual** de la consigna del horno y conserva,
-claramente marcada, la implementación histórica de SCA-142.
+Este documento describe el diseño **actual** de la consigna del horno. La Pi
+ENTRADA es la única actuadora: hace pull por lote y escribe el PLC real. El
+backend no simula ni aplica consignas.
 
 > **Estado actual (SCA-320 + SCA-400).**
-> - La consigna manual sigue disponible en `POST /api/v1/horno/consigna`
->   (JWT, Operario/Supervisor/Admin).
+> - La consigna manual está disponible en `POST /api/v1/horno/consigna`
+>   (JWT, Operario/Supervisor/Admin) y queda **encolada** para la Pi; no se
+>   aplica en el backend.
 > - El control predictivo (MPC) de SCA-400 corre por lote en modos
 >   `SUPERVISION` y `AUTOMATICO`; en `MANUAL` no hay loop.
 > - `POST /api/v1/lotes/inicio` **ya no dispara la consigna automática de
@@ -13,11 +15,10 @@ claramente marcada, la implementación histórica de SCA-142.
 >   el loop del MPC.
 > - La Pi ENTRADA es la única que escribe el PLC real, con su propio
 >   `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend no
->   abre conexiones Modbus: usa un stub interno determinista
->   (`SimulatedOvenController`) para auditar y actualizar el estado del horno.
+>   abre conexiones Modbus ni mantiene un horno en memoria.
 > - La Raspberry aplica la consigna haciendo pull de
 >   `GET /api/v1/lotes/{id}/consigna-propuesta` y confirma con
->   `POST /api/v1/lotes/{id}/consigna/ack` cuando `CONTROL_ACTUADOR=pi`.
+>   `POST /api/v1/lotes/{id}/consigna/ack`.
 > - El predictor es un sidecar Python (`cmd/predictor_svc`, puerto `8090`) que el
 >   backend consulta por HTTP. Sin predictor, el MPC opera degradado.
 
@@ -28,26 +29,25 @@ claramente marcada, la implementación histórica de SCA-142.
 | Quién dispara | La IA del nodo de entrada al identificar el producto | Un operario/supervisor desde el panel | El loop del MPC por lote |
 | Endpoint | `POST /api/v1/lotes/inicio` (ya no despacha) | `POST /api/v1/horno/consigna` | `GET /lotes/{id}/consigna-propuesta` + `POST /lotes/{id}/consigna/ack` |
 | Valor | `temp_setpoint`/`velocidad_cinta_setpoint` del producto | Lo que ingresa el operario | Propuesta del optimizador XGBoost |
-| Validación | Producto con setpoints cargados | Rango `[temp_min,temp_max]`/`[velocidad_cinta_min,max]` del producto | Límites del producto + tuning del lote |
+| Validación | Producto con setpoints cargados | Lote abierto MANUAL + rango del producto | Límites del producto + tuning del lote |
 | Auth | Bearer del nodo | JWT `session_token` | Bearer de la Pi (pull) o JWT (panel) |
-| `origen` en auditoría | `AUTOMATICO` | `MANUAL` | `AUTOMATICO` (sólo actuador `backend`) |
-
-Las tres terminan en el mismo `ConsignaService.Dispatch`; lo único que cambia es
-el origen y quién decide el setpoint.
+| `origen` en auditoría | `AUTOMATICO` (histórico) | `MANUAL` | No escribe `historial_consignas`; audita en `decisiones_control` |
 
 ## 2. Arquitectura actual
 
 ```
-Operario (panel) ──► POST /api/v1/horno/consigna ──► ConsignaService.Dispatch
-                                                          │
-Loop MPC (por lote) ──► Optimizador ──► Predictor          ├─► stub interno SendSetpoint()
-   │                     (sidecar XGBoost)                 │     (no escribe PLC; audita/actualiza estado)
-   │                                                       ├─► historial_consignas (auditoría)
-   ├─ actuador=backend ──────────────────────────────────►┤
-   │                                                       ├─► horno.Repository.Update() (registro de comando/auditoría)
-   └─ actuador=pi ──► SSE control.propuesta                 └─► SSE horno.consigna
-                       (incluye `autorizada`)
-                       + decisiones_control (audit)
+Operario (panel) ──► POST /api/v1/horno/consigna
+                         │
+                         ▼
+                 ConsignaService.DispatchManual
+                         ├─► valida lote ABIERTO + MANUAL y rango del producto
+                         ├─► decisiones_control (override ya aprobado, muestras=0)
+                         ├─► historial_consignas (exitosa=true, estado=PENDIENTE = encolada)
+                         └─► SSE horno.consigna
+
+Loop MPC (por lote) ──► Optimizador ──► Predictor (sidecar XGBoost)
+                         ├─► decisiones_control (audit)
+                         └─► SSE control.propuesta (incluye `autorizada`)
 
 Raspberry Pi ENTRADA ◄── GET /lotes/{id}/consigna-propuesta (pull)
       ├── escribe el PLC real (control.sensores/actuadores: modbus_tcp|modbus_rtu)
@@ -59,14 +59,14 @@ Piezas principales:
 | Capa | Archivo | Qué hace |
 |---|---|---|
 | Dominio | `internal/domain/consigna/consigna.go` | `Consigna`, `ConsignaManualRequest`, orígenes y sentinels |
-| Dominio | `internal/domain/decisiones_control/` | Audit del MPC y aprobación |
-| Servicio | `internal/service/consigna/consigna_service.go` | Valida, despacha, audita, actualiza el horno y encola el override manual |
-| Servicio | `internal/service/control/control.go` | Loop por lote: precalentamiento, MPC, propuesta, aprobación y ACK |
+| Dominio | `internal/domain/decisiones_control/` | Audit del MPC, aprobación y override manual |
+| Servicio | `internal/service/consigna/consigna_service.go` | Valida el lote/rango y encola el override manual; audita |
+| Servicio | `internal/service/control/control.go` | Loop por lote: precalentamiento, MPC y publicación de propuestas |
 | Servicio | `internal/service/optimizador/optimizador.go` | MPC horizonte 1 sobre grilla de T1 y V |
 | Servicio | `internal/service/predictor/predictor.go` | Cliente HTTP al sidecar XGBoost |
-| Provider | `internal/provider/oven_controller/` | Stub interno del controlador del horno (`SimulatedOvenController`); no abre Modbus ni escribe el PLC |
 | Controller | `internal/controller/control/control_handler.go` | Endpoints de control, propuesta, aprobación y ACK |
 | Controller | `internal/controller/consigna/consigna_handler.go` | Consigna manual e historial |
+| Controller | `internal/controller/horno/horno_handler.go` | Proyección de solo lectura `GET /api/v1/horno` |
 | Sidecar | `cmd/predictor_svc/` | FastAPI + XGBoost por producto |
 
 ## 3. Modos de operación del lote
@@ -77,9 +77,9 @@ su sector).
 
 | Modo | Loop | Propuesta | Quién aplica |
 |---|---|---|---|
-| `MANUAL` | No corre | No hay MPC. Si hay override manual encolado, se sirve con `manual_override=true` | La Pi (pull); con `CONTROL_ACTUADOR=backend` (laboratorio), el stub interno |
+| `MANUAL` | No corre | No hay MPC. Si hay override manual encolado, se sirve con `manual_override=true` | La Pi (pull) |
 | `SUPERVISION` | Sí | `autorizada=false` hasta que se apruebe | Operario/Pi aprueba y luego la Pi aplica |
-| `AUTOMATICO` | Sí | `autorizada=true` | La Pi (pull); con `CONTROL_ACTUADOR=backend` (laboratorio), el stub interno |
+| `AUTOMATICO` | Sí | `autorizada=true` | La Pi (pull) |
 
 En `AUTOMATICO`, el loop arranca en fase `CALENTANDO` salvo que el lote venga
 `iniciado_manualmente`; cuando el horno se mantiene en tolerancia durante 3
@@ -88,22 +88,27 @@ muestras, pasa a `ADAPTANDO` y entrega un setpoint de transición. En
 
 ## 4. Consigna manual (SCA-320)
 
-`POST /api/v1/horno/consigna` valida el body y el rango seguro del producto, y
-despacha al stub interno del backend (no al PLC). El resultado se audita siempre
-en `historial_consignas`, incluso si el stub rechaza la consigna. La Pi ENTRADA
-es la única que aplica el setpoint real en el PLC.
+`POST /api/v1/horno/consigna` valida el body, exige un lote **ABIERTO** y en
+modo **MANUAL**, y valida el rango seguro del producto. Si todo es válido:
 
-- **MANUAL + `CONTROL_ACTUADOR=pi` + lote abierto:** además de despachar, el
-  backend encola una decisión ya aprobada (`muestras=0`) para la Pi. La Pi la
-  obtiene por `consigna-propuesta` con `manual_override=true` y la aplica **sin
-  el clamp de Δ por ciclo**; luego confirma por `/consigna/ack`.
-- **SUPERVISION/AUTOMATICO:** el envío manual se despacha y audita, pero el loop
-  del MPC sigue gobernando las propuestas siguientes. No se encola override.
-- **Sin lote o con actuador `backend`:** no se encola override; el despacho
-  manual es directo contra el stub interno.
+1. Deja una decisión en `decisiones_control` con `muestras=0`, aprobada, para
+   que la Pi la levante por `consigna-propuesta` como `manual_override=true`.
+2. Audita en `historial_consignas` con `origen=MANUAL`, `decision_id` de la
+   decisión encolada, `estado=PENDIENTE` y `exitosa=true` (**encolada**, no
+   aplicada).
+3. Emite `horno.consigna` por SSE.
 
-El request exige `hornoId`, `productoId`, `temperaturaObjetivo` y
-`velocidadCintaObjetivo`; `usuario` y `loteId` son opcionales.
+Si el encolado falla, deja la fila con `exitosa=false`, `estado=RECHAZADA`,
+`decision_id=null` y `motivo_error`, y responde `502`.
+
+- `loteId` es obligatorio. `sectorId` (o el alias legacy `hornoId`) es opcional;
+  si viene, debe coincidir con el sector del lote.
+- `productoId`, `temperaturaObjetivo` y `velocidadCintaObjetivo` son
+  obligatorios; `usuario` es opcional.
+- `exitosa=true` no confirma que el PLC haya aplicado el setpoint. El ciclo de
+  vida fino vive en `estado`: `PENDIENTE` al encolar, `APLICADA` cuando el ack
+  de la Pi lo confirma y `RECHAZADA` si no se pudo encolar. `exitosa` se
+  mantiene por compatibilidad.
 
 ## 5. Control MPC y predictor (SCA-400)
 
@@ -117,7 +122,9 @@ Cada tick del loop:
    V dentro de los Δmáx, evalúa el predictor XGBoost en cada candidato y elige
    el menor Z que cumpla los umbrales de aceptación. Si ninguno cumple, devuelve
    el mejor Z absoluto con `restriccion_relajada=true`.
-4. Persiste la decisión en `decisiones_control` y publica la propuesta.
+4. Persiste la decisión en `decisiones_control` y publica la propuesta por SSE
+   (`autorizada=true` en AUTOMATICO, `false` en SUPERVISION). El backend no
+   aplica nada.
 
 El predictor:
 
@@ -134,36 +141,21 @@ El predictor:
 - Si el sidecar no responde, el optimizador no propone y la decisión se audita
   como `skipped`; el horno conserva el último setpoint aplicado.
 
-En `AUTOMATICO`, una predicción de placeholder no se aplica salvo
+En `AUTOMATICO`, una predicción de placeholder no se publica salvo
 `MPC_PERMITIR_PLACEHOLDER=true` (solo demo/tesis); la decisión se audita como
 `modelo_no_entrenado`. En `SUPERVISION` la propuesta se publica igual para que
 el operario vea el warning.
 
-## 6. Actuador, aprobación y ACK
-
-`CONTROL_ACTUADOR` decide quién aplica la consigna del **loop MPC**:
-
-- **`pi` (default):** el backend publica la propuesta; la Raspberry hace pull de
-  `GET /api/v1/lotes/{id}/consigna-propuesta` y aplica en el PLC real. La
-  propuesta incluye `autorizada` (`true` en AUTOMATICO; `false` en SUPERVISION
-  hasta aprobar) y, cuando corresponde, `manual_override`.
-- **`backend` (solo laboratorio/debug):** el backend despacha contra el stub
-  interno, nunca contra un PLC real. En AUTOMATICO aplica solo; en SUPERVISION
-  el operario aprueba con `POST /api/v1/lotes/{id}/aplicar-consigna`.
-
-La consigna **manual** (`POST /api/v1/horno/consigna`) siempre pasa por
-`ConsignaService.dispatch` y llama al stub interno, con independencia de
-`CONTROL_ACTUADOR`; el actuador sólo decide si además se encola el override para
-que la Pi lo levante en modo MANUAL. La Pi ENTRADA es la única que escribe el
-PLC real.
+## 6. Aprobación y ACK
 
 Aprobación en SUPERVISION:
 
 - `POST /api/v1/lotes/{id}/aplicar-consigna` (alias `/aprobar-consigna`).
 - El body opcional `decision_id` evita aprobar una propuesta distinta de la que
   el operario está viendo.
-- La aprobación se persiste en `decisiones_control.aprobada_por` y
-  `aprobada_at`.
+- El endpoint sólo autoriza; la aprobación se persiste en
+  `decisiones_control.aprobada_por` y `aprobada_at`. La aplicación real la hace
+  la Pi.
 
 ACK:
 
@@ -171,7 +163,10 @@ ACK:
   `decision_id`, `temp_aplicado` y `vel_aplicado`.
 - Marca la decisión como aplicada (`aplicado_por=OPERARIO` en SUPERVISION,
   `MPC` en AUTOMATICO) y actualiza los setpoints aplicados del lote.
-- Es idempotente: un reenvío del mismo ACK vuelve a responder `200`.
+- Cierra como `APLICADA` la consigna de `historial_consignas` encolada con ese
+  `decision_id` (update best-effort: si falla, el ack igual responde `200`).
+- Es idempotente: un reenvío del mismo ACK vuelve a responder `200` (no hay
+  fila pendiente o ya está `APLICADA`).
 
 ## 7. SSE y estado real del horno
 
@@ -179,35 +174,29 @@ ACK:
   lote. El evento incluye `lote_id`, `propuesta`, `decision_id`, `autorizada` y
   `ventana`. La `propuesta` serializa `temp1`, `velocidad`, `z` y `prediccion`.
 - `GET /api/v1/horno/events` emite `horno.consigna` con el resultado de cada
-  despacho.
+  encolado manual.
 - `GET /api/v1/horno?sector_id=horno-1` devuelve una **proyección de solo
   lectura** del horno (`data.horno.id` es el id del sector): lote abierto +
-  último sample de `metricas_horno`. El horno en memoria del backend ya no es
-  fuente de estado; sólo conserva el comando/auditoría de la última consigna y
-  el flag `CONTROL_MANUAL` (alerta `CONSIGNA_ENLACE` ACTIVA). Sin telemetría,
-  T/V y el resto de las lecturas viajan `null`.
+  último sample de `metricas_horno`. No hay horno en memoria; `CONTROL_MANUAL`
+  sólo se mantiene por alertas históricas `CONSIGNA_ENLACE` activas. Sin
+  telemetría, T/V y el resto de las lecturas viajan `null`.
 - La telemetría real (T1, combustión, humedad, ambiente, velocidad y setpoints
   observados) llega por `POST /api/v1/lotes/{id}/metricas-horno`; es el estado
   real del horno y el panel la lee por `GET /api/v1/horno` (o cruda con
   `GET /api/v1/lotes/{id}/metricas-horno`).
 
-## 8. Fallo de enlace
+## 8. Fallo de encolado
 
-Si el stub interno (`SimulatedOvenController.SendSetpoint`) devuelve
-`Aplicada=false` —con el stub actual siempre acepta, así que este camino queda
-como salvaguarda—:
+Si no se puede persistir o aprobar la decisión del override manual:
 
-1. El intento se audita en `historial_consignas` con `exitosa=false` y
-   `motivo_error`.
-2. El horno pasa a `CONTROL_MANUAL`.
-3. Se genera una alerta `CRITICAL` (`CONSIGNA_ENLACE`) visible en
-   `GET /api/v1/horno` (`alertas_recientes`) y en `GET /api/v1/alertas`.
-4. Un despacho exitoso posterior restaura `Estado="ACTIVO"`.
+1. El intento se audita en `historial_consignas` con `exitosa=false`,
+   `estado=RECHAZADA` y `motivo_error`.
+2. Se responde `502` ("No se pudo encolar la consigna para la Pi").
+3. La Pi no ve ninguna propuesta nueva; el horno sigue con el último setpoint
+   aplicado.
 
-En el código actual no hay un bloqueo explícito por `CONTROL_MANUAL` en los
-endpoints de consigna: el estado se usa como señal operativa y el loop sigue
-operando. La vía de escape manual (`POST /api/v1/horno/consigna`) sigue
-disponible.
+No se generan alertas `CONSIGNA_ENLACE` ni se cambia el estado del horno: el
+backend no tiene un actuador propio cuyo enlace pueda fallar.
 
 ## 9. Cómo probarlo
 
@@ -239,17 +228,18 @@ curl -X POST http://localhost:8080/api/v1/horno/consigna \
   -b "session_token=<JWT>" \
   -H "Content-Type: application/json" \
   -d '{
+    "loteId": "<lote abierto MANUAL>",
     "sectorId": "horno-1",
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
     "temperaturaObjetivo": 195,
     "velocidadCintaObjetivo": 0.22,
-    "usuario": "operario-demo",
-    "loteId": "<loteId opcional>"
+    "usuario": "operario-demo"
   }'
 ```
 
-Esperado: `200`, `origen: "MANUAL"`. Un valor fuera del rango del producto
-responde `422`.
+Esperado: `200`, `origen: "MANUAL"`, `exitosa: true` (encolada para la Pi). Un
+lote cerrado, no MANUAL o inexistente responde `409`/`404`; un valor fuera del
+rango del producto responde `422`.
 
 ### 9.4 Flujo MPC en SUPERVISION
 
@@ -265,13 +255,13 @@ responde `422`.
 Abrir el lote con `modo: "AUTOMATICO"`. La propuesta se publica con
 `autorizada: true`; la Pi la aplica y ackea. Sin modelo entrenado y con
 `MPC_PERMITIR_PLACEHOLDER=false`, la decisión se audita como
-`modelo_no_entrenado` y no se aplica.
+`modelo_no_entrenado` y no se publica.
 
 ### 9.6 Verificar auditoría
 
 ```bash
 docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
-  "SELECT horno_id, lote_id, origen, exitosa, motivo_error, creada_en
+  "SELECT horno_id, lote_id, origen, decision_id, estado, exitosa, motivo_error, creada_en
    FROM historial_consignas ORDER BY creada_en DESC LIMIT 10;"
 
 docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
@@ -299,9 +289,9 @@ Decisiones históricas que siguen siendo válidas conceptualmente:
 - `historial_consignas.lote_id` no tiene FK a propósito: el lote podía no estar
   persistido al momento del despacho.
 - La auditoría se guardaba incluso en fallos.
-- El controlador físico era simulado en SCA-142. Hoy el backend usa un stub
-  interno y la Pi ENTRADA es la única que escribe el PLC real; el driver Modbus
-  del backend fue eliminado.
+- El controlador físico era simulado en SCA-142. Hoy la Pi ENTRADA es la única
+  que escribe el PLC real; el backend no tiene driver Modbus ni horno en
+  memoria.
 
 Diferencias con el presente:
 
@@ -311,8 +301,8 @@ Diferencias con el presente:
 - El MPC no depende exclusivamente de `temp_setpoint` del producto: propone
   setpoints por ventana y usa el setpoint del producto sólo como receta de
   arranque cuando el lote no tiene setpoints propios.
-- La consigna ya no es manual-only: conviven `MANUAL`, `SUPERVISION` y
-  `AUTOMATICO`, con el MPC de SCA-400 gobernando los dos últimos.
+- La consigna manual se encola para la Pi; las filas `origen=AUTOMATICO` de
+  `historial_consignas` quedan sólo como histórico y ya no se escriben.
 
 ## 11. Referencias
 

@@ -71,7 +71,7 @@ backend_smart-check-automation_go/
 │   │   ├── dispositivo/                             # POST /api/v1/dispositivos/ping, GET|PUT /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
 │   │   ├── devicetoken/                             # Middleware BeforeMux: auth Bearer de nodos Raspberry Pi
 │   │   ├── dualauth/                                # Auth dual (Bearer de dispositivo o cookie JWT)
-│   │   ├── horno/                                   # GET /api/v1/horno, POST /api/v1/horno/temperatura
+│   │   ├── horno/                                   # GET /api/v1/horno (proyección de telemetría)
 │   │   ├── lote_sector/                             # GET /api/v1/dispositivos/sector, POST /api/v1/lotes/inicio|{id}/eventos|{id}/cierre, GET /api/v1/lotes|/lotes/abierto
 │   │   ├── metricashorno/                           # POST|GET /api/v1/lotes/{id}/metricas-horno
 │   │   ├── producto/                                # GET/POST /api/v1/productos, PUT|DELETE /api/v1/productos/{id}
@@ -84,7 +84,6 @@ backend_smart-check-automation_go/
 │   │   ├── consigna/                                # Modelo Consigna (auditoría) + ConsignaManualRequest
 │   │   ├── decisiones_control/                      # Audit del MPC (decisiones, predicción, aprobación)
 │   │   ├── dispositivo/                             # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo + DeviceRead
-│   │   ├── horno/                                   # Modelo Horno
 │   │   ├── lote_sector/                             # Modelo Lote + Evento + modo/ventanas + interfaces Repository/Service
 │   │   ├── metricashorno/                           # Telemetría cruda del horno (metricas_horno)
 │   │   ├── producto/                                # Modelo Producto (catálogo maestro + parámetros de control)
@@ -92,9 +91,8 @@ backend_smart-check-automation_go/
 │   │   ├── sector/                                  # Modelo Sector + contrato Repository
 │   │   └── user/                                    # Entidad User, constantes de roles, errores centinela
 │   ├── provider/
-│   │   ├── database/                                # NewPostgresPool, repos en memoria, StateStore
+│   │   ├── database/                                # NewPostgresPool, StateStore en memoria
 │   │   ├── google/                                  # Implementa user.GoogleVerifier vía google/api/idtoken
-│   │   ├── oven_controller/                         # Stub interno del controlador del horno (SimulatedOvenController); no abre Modbus ni escribe un PLC
 │   ├── repository/
 │   │   ├── lote_sector_repo.go                      # PostgreSQL — ciclo de lote por sector
 │   │   ├── sector_repo.go                           # PostgreSQL — sectores y relación con dispositivos
@@ -135,7 +133,7 @@ backend_smart-check-automation_go/
 - **dispositivos** & **metricas_dispositivo**: Nodos Raspberry Pi y telemetría (CPU/RAM/Temp).
 - **metricas_horno**: Telemetría cruda del horno reportada por la Pi ENTRADA (T1, combustión, humedad, ambiente, velocidad y setpoints observados). Es la fuente de la ventana de evaluación del MPC.
 - **decisiones_control**: Audit del MPC. Cada fila registra la observación, la predicción XGBoost, la propuesta, el resultado (`aplicado_por`), el motivo de skip y la aprobación (`aprobada_por`/`aprobada_at`) cuando el modo es SUPERVISION.
-- **historial_consignas**: Auditoría de las consignas despachadas al horno. `origen='MANUAL'` corresponde a SCA-320 y `origen='AUTOMATICO'` al despacho del MPC (SCA-400) cuando el actuador es `backend`; con actuador `pi`, el MPC sólo publica la propuesta y la aplicación se confirma por `/consigna/ack`. El trigger automático de SCA-142 desde `/lotes/inicio` ya no existe.
+- **historial_consignas**: Auditoría de las consignas manuales encoladas para la Pi (`origen='MANUAL'`, SCA-320); `origen='AUTOMATICO'` sólo queda en filas históricas (SCA-142/SCA-400). El MPC ya no escribe esta tabla: sus propuestas/aplicaciones viven en `decisiones_control`. `decision_id` guarda la decisión encolada para la Pi (sin FK a `decisiones_control`) y `estado` el ciclo de vida: `PENDIENTE` (encolada), `APLICADA` (ack de la Pi) o `RECHAZADA` (no se pudo encolar). `exitosa` queda por compatibilidad. El trigger automático de SCA-142 desde `/lotes/inicio` ya no existe.
 - **registration_requests**: Solicitudes de enrolamiento de nodos (`PENDING`/`APPROVED`/`REJECTED`/`EXPIRED`) con `request_id` y secret de un solo uso.
 - **eventos_lote**: Detecciones individuales reportadas por los nodos, deduplicadas por `evento_id`, que alimentan los conteos del lote.
 - **device_lifecycle_audit**: Traza de auditoría del ciclo de vida de dispositivos (approve/reject del alta, baja lógica) con actor y estados anterior/nuevo.
@@ -156,7 +154,6 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | POST | /api/v1/admin/usuarios | JWT cookie | Administrador |
 | PATCH | /api/v1/admin/usuarios/{id} | JWT cookie | Administrador |
 | GET | /api/v1/horno | JWT cookie | cualquier rol |
-| POST | /api/v1/horno/temperatura | JWT cookie | Supervisor, Admin |
 | GET | /api/v1/productos | Bearer dispositivo o JWT cookie | — |
 | POST | /api/v1/productos | JWT cookie | Supervisor, Admin |
 | PUT | /api/v1/productos/{id} | JWT cookie | Supervisor, Admin |
@@ -211,12 +208,12 @@ arranca el loop del MPC (SCA-400), que es quien propone/aplica consignas.
 - **Bcrypt para contraseñas locales**: `DefaultCost`. Usuarios Google-only tienen `password_hash = NULL`.
 - **Estado de dispositivos en caché en memoria + historial en PostgreSQL**: `MemoryDispositivoStateStore` para lecturas rápidas; historial append-only en `metricas_dispositivo`.
 - **Detección de offline con reaper en background**: `StartReaper` corre cada `DISPOSITIVO_REAPER_INTERVAL`.
-- **Consigna manual y MPC**: `ConsignaService.Dispatch` es el camino único; `DispatchManual` (SCA-320) usa `origen=MANUAL` y el loop del MPC (SCA-400) usa `origen=AUTOMATICO`. El trigger automático de SCA-142 desde `/lotes/inicio` fue retirado.
+- **Consigna manual y MPC**: `ConsignaService.DispatchManual` (SCA-320) es el único camino manual: valida lote ABIERTO/MANUAL y el rango del producto, y encola el override para la Pi. El loop del MPC (SCA-400) sólo publica propuestas (`decisiones_control` + SSE); el backend nunca aplica. El trigger automático de SCA-142 desde `/lotes/inicio` fue retirado y `origen=AUTOMATICO` en `historial_consignas` sólo queda como histórico.
 - **Modos de operación por lote**: `MANUAL` no corre loop; `SUPERVISION` publica propuestas que requieren aprobación; `AUTOMATICO` publica propuestas ya autorizadas. El modo se persiste en `lotes_productivos.modo` y se cambia con `PATCH` (panel) o `PUT` (Pi) `/api/v1/lotes/{id}/modo`.
-- **Actuador configurable**: para el loop MPC, `CONTROL_ACTUADOR=pi` (default) hace que la Pi ENTRADA aplique la consigna haciendo pull; `backend` (solo laboratorio) despacha contra el stub interno del backend, nunca contra un PLC real. La consigna manual siempre pasa por `ConsignaService.dispatch` y llama al stub; el actuador sólo decide si además se encola el override.
-- **PLC del horno**: el backend no abre conexiones Modbus ni escribe ningún PLC. La Pi ENTRADA es la única escritora del PLC real, con su propio `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend usa `SimulatedOvenController` (stub determinista, ~40 ms de latencia, siempre acepta) para auditar y registrar el comando de consigna.
-- **Estado del horno**: `GET /api/v1/horno` es una proyección de solo lectura de `metricas_horno` (último sample del lote abierto) + lote + alertas. Estados: `SIN_LOTE`, `SIN_TELEMETRIA`, `SIN_DATOS`, `ACTIVO`, `DESACTUALIZADO` (>30 s) y `CONTROL_MANUAL` (alerta `CONSIGNA_ENLACE` activa). Sin telemetría los campos van `null`. El horno en memoria (`horno.Repository`/`Ensure`) sólo registra comandos/auditoría y sirve al endpoint legacy `POST /api/v1/horno/temperatura`; no es fuente de estado.
-- **Override manual encolado**: en modo `MANUAL`, con actuador `pi` y lote abierto, `POST /api/v1/horno/consigna` deja una decisión ya aprobada con `muestras=0`. La Pi la obtiene por `consigna-propuesta` con `manual_override=true` y la aplica sin el clamp de Δ por ciclo; luego confirma por `/consigna/ack`.
+- **Actuador único**: la Pi ENTRADA es la única actuadora. Hace pull de `/consigna-propuesta` y confirma con `/consigna/ack`. No existe `CONTROL_ACTUADOR` ni despacho desde el backend.
+- **PLC del horno**: el backend no abre conexiones Modbus ni escribe ningún PLC. La Pi ENTRADA es la única escritora del PLC real, con su propio `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`).
+- **Estado del horno**: `GET /api/v1/horno` es una proyección de solo lectura de `metricas_horno` (último sample del lote abierto) + lote + alertas. Estados: `SIN_LOTE`, `SIN_TELEMETRIA`, `SIN_DATOS`, `ACTIVO`, `DESACTUALIZADO` (>30 s) y `CONTROL_MANUAL` (alerta histórica `CONSIGNA_ENLACE` activa). Sin telemetría los campos van `null`. No hay horno en memoria ni endpoint de actualización de temperatura.
+- **Override manual encolado**: `POST /api/v1/horno/consigna` exige `loteId` de un lote abierto en modo `MANUAL`; `sectorId` es opcional y debe coincidir. Deja una decisión ya aprobada con `muestras=0`; la Pi la obtiene por `consigna-propuesta` con `manual_override=true` y la aplica sin el clamp de Δ por ciclo. La consigna queda `estado=PENDIENTE`/`exitosa=true` (encolada); el ack de la Pi la cierra como `APLICADA`, y un fallo de encolado deja `estado=RECHAZADA`/`exitosa=false` con `motivoError`.
 - **SSE de control**: el loop emite `control.propuesta` con `autorizada` (true en AUTOMATICO, false en SUPERVISION hasta la aprobación). La `Propuesta` serializa `temp1`, `velocidad`, `z` y `prediccion`.
 - **Predictor sidecar**: cliente HTTP con timeout de 2s; si el sidecar falla, el optimizador no propone y la decisión se audita como `skipped`. Los artefactos entrenados son JSON (`save_raw(raw_format="json")`) por producto en `models_xgb/`.
 - **Aprobación y ACK**: en SUPERVISION la aprobación se persiste en `decisiones_control.aprobada_por`; el ACK de la Pi marca `aplicado_por` y los setpoints efectivamente aplicados.
@@ -237,7 +234,6 @@ arranca el loop del MPC (SCA-400), que es quien propone/aplica consignas.
 | `DISPOSITIVO_OFFLINE_THRESHOLD` | Umbral de inactividad (default 90s) |
 | `PREDICTOR_URL` | URL base del sidecar predictor (default `http://localhost:8090`) |
 | `PREDICTOR_AUTH_TOKEN` | Opcional — Bearer para autenticar contra el sidecar |
-| `CONTROL_ACTUADOR` | `pi` (default; la Pi aplica en el PLC) o `backend` (solo laboratorio; aplica contra el stub interno, no contra un PLC) |
 | `MPC_CONFIANZA_MIN` | Confianza mínima promedio para proponer (default `0.5`) |
 | `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` | Timeout de precalentamiento (default `1800`) |
 | `MPC_PREHEAT_POLL_SEGUNDOS` | Cadencia durante precalentamiento (default `15`) |

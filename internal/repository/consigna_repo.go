@@ -27,7 +27,7 @@ func NewConsignaPostgresRepository(db *pgxpool.Pool) *ConsignaPostgresRepository
 const selectHistorialConsignasColumns = `
 	id, dispositivo_id, horno_id, lote_id, producto_id,
 	temperatura_objetivo, velocidad_cinta_objetivo,
-	origen, usuario, exitosa, motivo_error,
+	origen, usuario, exitosa, motivo_error, decision_id, estado,
 	temperatura_previa, velocidad_cinta_previa,
 	creada_en`
 
@@ -35,14 +35,17 @@ const selectHistorialConsignasColumns = `
 // Devuelve consigna.ErrParametrosNoExiste si producto_id no existe en el catálogo
 // (violación de FK), aunque en la práctica el Service ya valida su existencia antes.
 func (r *ConsignaPostgresRepository) Save(ctx context.Context, c *consigna.Consigna) error {
+	if c.Estado == "" {
+		c.Estado = consigna.EstadoConsignaPendiente
+	}
 	const query = `
 		INSERT INTO historial_consignas (
 			dispositivo_id, horno_id, lote_id, producto_id,
 			temperatura_objetivo, velocidad_cinta_objetivo,
-			origen, usuario, exitosa, motivo_error,
+			origen, usuario, exitosa, motivo_error, decision_id, estado,
 			temperatura_previa, velocidad_cinta_previa
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 		)
 		RETURNING id, creada_en`
 
@@ -57,6 +60,8 @@ func (r *ConsignaPostgresRepository) Save(ctx context.Context, c *consigna.Consi
 		c.Usuario,
 		c.Exitosa,
 		c.MotivoError,
+		c.DecisionID,
+		c.Estado,
 		c.TemperaturaPrevia,
 		c.VelocidadCintaPrevia,
 	).Scan(&c.ID, &c.CreadaEn)
@@ -95,6 +100,7 @@ func scanHistorialConsignas(rows pgx.Rows) ([]consigna.Consigna, error) {
 			&c.ID, &c.DispositivoID, &c.HornoID, &c.LoteID, &c.ProductoID,
 			&c.TemperaturaObjetivo, &c.VelocidadCintaObjetivo,
 			&c.Origen, &c.Usuario, &c.Exitosa, &c.MotivoError,
+			&c.DecisionID, &c.Estado,
 			&c.TemperaturaPrevia, &c.VelocidadCintaPrevia,
 			&c.CreadaEn,
 		); err != nil {
@@ -106,4 +112,18 @@ func scanHistorialConsignas(rows pgx.Rows) ([]consigna.Consigna, error) {
 		return nil, fmt.Errorf("rows iteration error: %w", err)
 	}
 	return items, nil
+}
+
+// MarcarAplicadaPorDecision marca como APLICADA la consigna encolada con ese
+// decision_id. Sólo transiciona desde PENDIENTE, así que un ack reenviado (o un
+// decision_id sin fila) afecta 0 filas sin devolver error.
+func (r *ConsignaPostgresRepository) MarcarAplicadaPorDecision(ctx context.Context, decisionID string) error {
+	const query = `
+		UPDATE historial_consignas
+		SET estado='APLICADA', exitosa=true, motivo_error=NULL
+		WHERE decision_id=$1 AND estado='PENDIENTE'`
+	if _, err := r.db.Exec(ctx, query, decisionID); err != nil {
+		return fmt.Errorf("failed to mark historial_consignas aplicada: %w", err)
+	}
+	return nil
 }
