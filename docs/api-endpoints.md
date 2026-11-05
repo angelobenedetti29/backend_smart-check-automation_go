@@ -1,4 +1,4 @@
-# Referencia de la API — Smart-Check Automation Backend
+# Referencia de la API — SmartCheck Automation Backend
 
 Documentación detallada de los endpoints de dominio del backend, con su propósito, contrato exacto y un ejemplo real. No cubre auth de usuarios ni administración: para el inventario completo (auth, admin de usuarios, registration-requests y `dispositivos/nombre`) ver `CLAUDE.md`, y para el contrato de enrolamiento `docs/device-registration-contract.md`. Los ejemplos usan `curl` contra `http://localhost:8080` (o el `PORT` configurado).
 
@@ -71,9 +71,9 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 32 | `GET /api/v1/reportes/lotes` | Detalle paginado por cursor de lotes del período (kg y métricas derivadas) |
 | 33 | `GET /api/v1/reportes/trazabilidad` | Snapshot completo de un lote para el PDF de trazabilidad |
 | 34 | `GET /api/v1/reportes/alertas` | Export de alertas del período con filtros y total/truncada |
-| 35 | `POST /api/v1/planificacion/{plan,paradas,energia}/import` | Importación CSV de plan de producción, paradas y lecturas de energía |
-| 36 | `GET /api/v1/reportes/oee` | OEE estándar (A/P/Q) y consumo específico de energía, global y por sector |
-| 37 | `GET/DELETE /api/v1/planificacion/{plan,paradas,energia}[/{id}]` | Listar lo importado por período y borrar una fila |
+| 35 | `POST /api/v1/planificacion/{plan,paradas}/import` | Importación CSV de plan de producción y paradas |
+| 36 | `GET /api/v1/reportes/oee` | OEE estándar (A/P/Q), global y por sector |
+| 37 | `GET/DELETE /api/v1/planificacion/{plan,paradas}[/{id}]` | Listar lo importado por período y borrar una fila |
 
 ---
 
@@ -1740,11 +1740,11 @@ curl -b "session_token=$JWT" \
 
 ---
 
-## 35. `POST /api/v1/planificacion/{plan,paradas,energia}/import` — Importación CSV para OEE
+## 35. `POST /api/v1/planificacion/{plan,paradas}/import` — Importación CSV para OEE
 
-Importa el plan de producción, los eventos de parada y las lecturas de energía
-que alimentan los indicadores de OEE. Cada endpoint recibe un único archivo CSV
-en un body `multipart/form-data` con el campo `file`.
+Importa el plan de producción y los eventos de parada que alimentan los
+indicadores de OEE. Cada endpoint recibe un único archivo CSV en un body
+`multipart/form-data` con el campo `file`.
 
 **Auth:** cookie JWT `session_token`, roles **Supervisor** o **Administrador**.
 
@@ -1752,7 +1752,6 @@ en un body `multipart/form-data` con el campo `file`.
 |---|---|---|
 | `POST /api/v1/planificacion/plan/import` | `plan_produccion` | `(sector_id, inicio_at, producto_id)` |
 | `POST /api/v1/planificacion/paradas/import` | `eventos_parada` | `(sector_id, inicio_at, causa_codigo)` |
-| `POST /api/v1/planificacion/energia/import` | `lecturas_energia` | `(sector_id, periodo_inicio, periodo_fin)` |
 
 ### Formato y reglas comunes
 
@@ -1784,15 +1783,12 @@ en un body `multipart/form-data` con el campo `file`.
 |---|---|
 | Plan | `sector_id,fecha,turno,producto_id,inicio,fin,kg_plan` |
 | Paradas | `sector_id,lote_id,causa_codigo,tipo,inicio,fin,notas` |
-| Energía | `sector_id,lote_id,periodo_inicio,periodo_fin,kwh,gas_m3` |
 
 Reglas por columna:
 
 - **Plan:** `turno` ∈ `mañana|tarde|noche`; `kg_plan > 0`; `fin > inicio`.
 - **Paradas:** `lote_id` vacío = sin lote; `tipo` ∈ `PLANIFICADA|NO_PLANIFICADA`;
   `causa_codigo` requerido; `notas` opcional; `fin > inicio`.
-- **Energía:** `lote_id` y `gas_m3` opcionales; `kwh >= 0`; `gas_m3 >= 0` si
-  viene; `periodo_fin > periodo_inicio`.
 
 ### Ejemplo
 
@@ -1851,11 +1847,10 @@ Si alguna fila falla:
 
 ---
 
-## 36. `GET /api/v1/reportes/oee` — OEE y consumo específico de energía
+## 36. `GET /api/v1/reportes/oee` — OEE estándar
 
-Calcula el OEE estándar del período, **global** y **por sector**, más el
-consumo específico de energía. Usa el plan de producción, las paradas, los
-lotes cerrados y las lecturas de energía cargados por la importación CSV
+Calcula el OEE estándar del período, **global** y **por sector**. Usa el plan
+de producción, las paradas y los lotes cerrados cargados por la importación CSV
 (sección 35).
 
 **Auth:** cookie JWT `session_token`, cualquier rol.
@@ -1874,9 +1869,9 @@ las paradas no se pueden desagregar de forma consistente por producto/turno.
 
 ### Fórmulas
 
-El período se traduce a `[desde 00:00, hasta+1día 00:00)` ART. Plan, paradas y
-energía se prorratean por su **solape** con esa ventana; los lotes se cuentan
-por `inicio_at` dentro de la ventana (sin prorrateo).
+El período se traduce a `[desde 00:00, hasta+1día 00:00)` ART. Plan y paradas
+se prorratean por su **solape** con esa ventana; los lotes se cuentan por
+`inicio_at` dentro de la ventana (sin prorrateo).
 
 - **Tiempo planificado** = suma del solape del plan, en minutos.
 - **Horas planificadas por producto** = solape por producto / 3600.
@@ -1888,8 +1883,7 @@ por `inicio_at` dentro de la ventana (sin prorrateo).
 - **unplanned_downtime** = solape de paradas `NO_PLANIFICADA`.
 - **operating** = `max(0, tiempo_planificado - unplanned_downtime)`.
 - **kg_plan** = suma de `kg_plan` de las filas de plan **prorrateada por su
-  solape** con el período (`kg_plan × solape / duración del plan`), igual que la
-  energía.
+  solape** con el período (`kg_plan × solape / duración del plan`).
 - **kg_producidos** = Σ `COALESCE(correctos_kg,0)+COALESCE(crudos_kg,0)+COALESCE(quemados_kg,0)`
   de lotes `CERRADO`.
 - **kg_ok** = Σ `COALESCE(correctos_kg,0)` de esos lotes.
@@ -1900,19 +1894,14 @@ por `inicio_at` dentro de la ventana (sin prorrateo).
 - **Quality** = `kg_ok / kg_producidos × 100`. Sin producción: `null` y motivo
   `sin_produccion`.
 - **OEE** = `A × P × Q / 10000`. Si falta A, P o Q, es `null`.
-- **Energía** = suma de lecturas que solapan el período. `gas_m3` suma sólo
-  lecturas no nulas y es `null` si ninguna mide gas. Sin lecturas: `energy` es
-  `null` y se agrega `sin_lecturas_energia` (no bloquea el OEE).
-- `kwh_por_kg_ok = kwh / kg_ok` y `gas_m3_por_kg_ok = gas_m3 / kg_ok` sólo si
-  `kg_ok > 0`.
 
-Redondeos: porcentajes a **2** decimales, kg y consumos específicos (kWh/kg,
-m³/kg) a **3**, minutos a **1**. `calculable` es `true` sólo si A, P y Q están
-calculados. `motivos` siempre es un array (vacío si no hay faltantes).
+Redondeos: porcentajes a **2** decimales, kg a **3**, minutos a **1**.
+`calculable` es `true` sólo si A, P y Q están calculados. `motivos` siempre es
+un array (vacío si no hay faltantes).
 
 ### Sectores incluidos
 
-`por_sector` incluye los sectores con datos de plan, lotes, paradas o energía
+`por_sector` incluye los sectores con datos de plan, lotes o paradas
 en el período. Si se filtró `sector_id`, se incluye ese sector aunque no tenga
 datos (`calculable=false` con sus motivos). Sin datos y sin filtro,
 `por_sector` es `[]` y `global` queda `calculable=false` con
@@ -1950,13 +1939,7 @@ curl -b "session_token=$JWT" \
       "kg_plan": 1000.0,
       "kg_producidos": 600.0,
       "kg_ok": 570.0,
-      "capacidad_teorica_kg": 700.0,
-      "energy": {
-        "kwh": 300.0,
-        "gas_m3": null,
-        "kwh_por_kg_ok": 0.526,
-        "gas_m3_por_kg_ok": null
-      }
+      "capacidad_teorica_kg": 700.0
     },
     "por_sector": [
       {
@@ -1975,13 +1958,7 @@ curl -b "session_token=$JWT" \
         "kg_plan": 1000.0,
         "kg_producidos": 600.0,
         "kg_ok": 570.0,
-        "capacidad_teorica_kg": 700.0,
-        "energy": {
-          "kwh": 300.0,
-          "gas_m3": null,
-          "kwh_por_kg_ok": 0.526,
-          "gas_m3_por_kg_ok": null
-        }
+        "capacidad_teorica_kg": 700.0
       }
     ]
   }
@@ -1998,7 +1975,7 @@ curl -b "session_token=$JWT" \
 
 ---
 
-## 37. `GET`/`DELETE /api/v1/planificacion/{plan,paradas,energia}` — Listado y borrado de lo importado
+## 37. `GET`/`DELETE /api/v1/planificacion/{plan,paradas}` — Listado y borrado de lo importado
 
 Lista lo importado en un período para revisarlo y permite borrar una fila por
 id. La corrección se hace reimportando el CSV (UPSERT de la sección 35).
@@ -2009,10 +1986,8 @@ id. La corrección se hace reimportando el CSV (UPSERT de la sección 35).
 |---|---|
 | `GET /api/v1/planificacion/plan` | `plan_produccion` |
 | `GET /api/v1/planificacion/paradas` | `eventos_parada` |
-| `GET /api/v1/planificacion/energia` | `lecturas_energia` |
 | `DELETE /api/v1/planificacion/plan/{id}` | `plan_produccion` |
 | `DELETE /api/v1/planificacion/paradas/{id}` | `eventos_parada` |
-| `DELETE /api/v1/planificacion/energia/{id}` | `lecturas_energia` |
 
 ### Parámetros del listado
 
@@ -2024,7 +1999,7 @@ id. La corrección se hace reimportando el CSV (UPSERT de la sección 35).
 | `limite` | 500 | entero; no numérico → **400**; no positivo usa el default; máximo 2000 |
 
 - Rango máximo: **366 días** inclusive. `desde > hasta` → **400**.
-- Orden: `inicio_at` (plan, paradas) o `periodo_inicio` (energía) **descendente**.
+- Orden: `inicio_at` (plan, paradas) **descendente**.
 - `total` es el count con los mismos filtros, sin límite; `truncada` indica
   `total > len(items)`.
 - El count y la lista salen de una transacción read-only `REPEATABLE READ`.
@@ -2036,8 +2011,6 @@ Items:
   turno, inicio_at, fin_at, kg_plan`.
 - **Paradas:** `id, sector_id, sector_nombre, lote_id (null), inicio_at, fin_at,
   causa_codigo, tipo, notas (null)`.
-- **Energía:** `id, sector_id, sector_nombre, lote_id (null), periodo_inicio,
-  periodo_fin, kwh, gas_m3 (null)`.
 
 ### Borrado
 
@@ -2129,8 +2102,7 @@ existe). Éxito:
 | `GET /api/v1/reportes/alertas` | JWT cookie (`session_token`), cualquier rol | — | — |
 | `POST /api/v1/planificacion/plan/import` | JWT cookie, Supervisor/Admin | ✅ multipart | ✅ 5 MB |
 | `POST /api/v1/planificacion/paradas/import` | JWT cookie, Supervisor/Admin | ✅ multipart | ✅ 5 MB |
-| `POST /api/v1/planificacion/energia/import` | JWT cookie, Supervisor/Admin | ✅ multipart | ✅ 5 MB |
-| `GET /api/v1/planificacion/{plan,paradas,energia}` | JWT cookie, Supervisor/Admin | — | — |
-| `DELETE /api/v1/planificacion/{plan,paradas,energia}/{id}` | JWT cookie, Supervisor/Admin | — | — |
+| `GET /api/v1/planificacion/{plan,paradas}` | JWT cookie, Supervisor/Admin | — | — |
+| `DELETE /api/v1/planificacion/{plan,paradas}/{id}` | JWT cookie, Supervisor/Admin | — | — |
 | `GET /api/v1/reportes/oee` | JWT cookie (`session_token`), cualquier rol | — | — |
 | Otros `GET` | Según la sección del endpoint | — | — |

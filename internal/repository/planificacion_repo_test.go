@@ -91,34 +91,6 @@ func TestPlanificacionRepository_UpsertEIdempotencia(t *testing.T) {
 		`SELECT notas FROM eventos_parada WHERE sector_id=$1 AND inicio_at=$2 AND causa_codigo=$3`,
 		planTestSectorID, inicio, "FALLA").Scan(&notas))
 	assert.Equal(t, "actualizada", notas)
-
-	// Energía: idempotencia por (sector_id, periodo_inicio, periodo_fin).
-	gas := 10.5
-	energia := planificacion.EnergiaRow{
-		SectorID: planTestSectorID, LoteID: planTestLoteID,
-		PeriodoInicio: inicio, PeriodoFin: fin, Kwh: 100, GasM3: &gas,
-	}
-	ins, upd, err = repo.UpsertEnergia(ctx, []planificacion.EnergiaRow{energia})
-	require.NoError(t, err)
-	assert.Equal(t, 1, ins)
-	assert.Equal(t, 0, upd)
-
-	nuevoGas := 20.5
-	energia.GasM3 = &nuevoGas
-	energia.Kwh = 120
-	ins, upd, err = repo.UpsertEnergia(ctx, []planificacion.EnergiaRow{energia})
-	require.NoError(t, err)
-	assert.Equal(t, 0, ins)
-	assert.Equal(t, 1, upd)
-
-	var kwh float64
-	var gasDB *float64
-	require.NoError(t, repo.db.QueryRow(ctx,
-		`SELECT kwh, gas_m3 FROM lecturas_energia WHERE sector_id=$1 AND periodo_inicio=$2 AND periodo_fin=$3`,
-		planTestSectorID, inicio, fin).Scan(&kwh, &gasDB))
-	assert.Equal(t, 120.0, kwh)
-	require.NotNil(t, gasDB)
-	assert.Equal(t, 20.5, *gasDB)
 }
 
 func TestPlanificacionRepository_FKsInvalidas(t *testing.T) {
@@ -160,10 +132,6 @@ func TestPlanificacionRepository_Listados(t *testing.T) {
 		CausaCodigo: "X", Tipo: "PLANIFICADA",
 	}})
 	require.NoError(t, err)
-	_, _, err = repo.UpsertEnergia(ctx, []planificacion.EnergiaRow{{
-		SectorID: planTestSectorID, PeriodoInicio: inicio, PeriodoFin: inicio.Add(time.Hour), Kwh: 1,
-	}})
-	require.NoError(t, err)
 
 	planes, err := repo.ListPlan(ctx, planTestSectorID, inicio, inicio.Add(24*time.Hour))
 	require.NoError(t, err)
@@ -172,17 +140,12 @@ func TestPlanificacionRepository_Listados(t *testing.T) {
 	paradas, err := repo.ListParadas(ctx, planTestSectorID, inicio, inicio.Add(24*time.Hour))
 	require.NoError(t, err)
 	require.Len(t, paradas, 1)
-
-	energias, err := repo.ListEnergia(ctx, planTestSectorID, inicio, inicio.Add(24*time.Hour))
-	require.NoError(t, err)
-	require.Len(t, energias, 1)
 }
 
 func TestPlanificacionRepository_ListadoItemsYDelete(t *testing.T) {
 	ctx := context.Background()
 	repo := setupPlanificacionRepo(t)
 	inicio := time.Date(2026, 11, 4, 6, 0, 0, 0, time.UTC)
-	gas := 10.5
 
 	_, err := repo.db.Exec(ctx, `INSERT INTO sectores (id, nombre) VALUES ('sector-plan-2', 'Sector Plan 2')`)
 	require.NoError(t, err)
@@ -201,11 +164,6 @@ func TestPlanificacionRepository_ListadoItemsYDelete(t *testing.T) {
 		_, _, err = repo.UpsertParadas(ctx, []planificacion.ParadaRow{{
 			SectorID: sector, LoteID: planTestLoteID, InicioAt: ini, FinAt: ini.Add(10 * time.Minute),
 			CausaCodigo: causa, Tipo: "PLANIFICADA",
-		}})
-		require.NoError(t, err)
-		_, _, err = repo.UpsertEnergia(ctx, []planificacion.EnergiaRow{{
-			SectorID: sector, PeriodoInicio: ini, PeriodoFin: ini.Add(10 * time.Minute),
-			Kwh: float64(1 + i), GasM3: &gas,
 		}})
 		require.NoError(t, err)
 	}
@@ -245,20 +203,6 @@ func TestPlanificacionRepository_ListadoItemsYDelete(t *testing.T) {
 	require.NotEmpty(t, paradas.Items[0].LoteID)
 	assert.Equal(t, planTestLoteID, *paradas.Items[0].LoteID)
 
-	energias, err := repo.ListEnergiaItems(ctx, filtro)
-	require.NoError(t, err)
-	assert.Equal(t, 3, energias.Total)
-	assert.False(t, energias.Truncada)
-	require.NotNil(t, energias.Items[0].GasM3)
-	assert.Equal(t, gas, *energias.Items[0].GasM3)
-
-	filtroSector2 := filtro
-	filtroSector2.SectorID = "sector-plan-2"
-	energiasSector2, err := repo.ListEnergiaItems(ctx, filtroSector2)
-	require.NoError(t, err)
-	require.Equal(t, 1, energiasSector2.Total)
-	assert.Equal(t, "Sector Plan 2", energiasSector2.Items[0].SectorNombre)
-
 	// Delete: existente true, repetido/inexistente false.
 	borrado, err := repo.DeletePlan(ctx, planes.Items[0].ID)
 	require.NoError(t, err)
@@ -270,14 +214,6 @@ func TestPlanificacionRepository_ListadoItemsYDelete(t *testing.T) {
 	borrado, err = repo.DeleteParada(ctx, paradas.Items[0].ID)
 	require.NoError(t, err)
 	assert.True(t, borrado)
-
-	borrado, err = repo.DeleteEnergia(ctx, energias.Items[0].ID)
-	require.NoError(t, err)
-	assert.True(t, borrado)
-
-	borrado, err = repo.DeleteEnergia(ctx, "00000000-0000-0000-0000-000000000000")
-	require.NoError(t, err)
-	assert.False(t, borrado)
 }
 
 func TestPlanificacionRepository_PlanSolapados(t *testing.T) {

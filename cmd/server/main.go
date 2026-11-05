@@ -61,7 +61,7 @@ import (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	log.Println("Initializing Smart-Check Automation Backend...")
+	log.Println("Initializing SmartCheck Automation Backend...")
 
 	// 0. Load environment variables from .env file
 	if err := godotenv.Load(); err != nil {
@@ -343,7 +343,6 @@ func main() {
 	}
 	mux.HandleFunc("/api/v1/planificacion/plan/import", planificacionImport(planificacionHandler.HandlePlanImport))
 	mux.HandleFunc("/api/v1/planificacion/paradas/import", planificacionImport(planificacionHandler.HandleParadasImport))
-	mux.HandleFunc("/api/v1/planificacion/energia/import", planificacionImport(planificacionHandler.HandleEnergiaImport))
 	// Listado y borrado de lo importado: mismas rutas exactas de arriba ganan
 	// para POST /import; el subtree atiende GET y DELETE.
 	mux.HandleFunc("/api/v1/planificacion/", planificacionImport(planificacionHandler.HandleSubtree))
@@ -517,7 +516,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\n"))
+	_, _ = w.Write([]byte("SmartCheck Automation Backend running.\n"))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

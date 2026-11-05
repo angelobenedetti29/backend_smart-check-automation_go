@@ -55,12 +55,11 @@ func TestListarPlanOK200(t *testing.T) {
 	assert.Equal(t, "-03:00", env.Data.Items[0].InicioAt.Format("-07:00"))
 }
 
-func TestListarParadasYEnergiaOK200(t *testing.T) {
+func TestListarParadasOK200(t *testing.T) {
 	h := NewHandler(&fakePlanificacionService{})
 
 	for path, message := range map[string]string{
 		"/api/v1/planificacion/paradas": "Paradas obtenidas",
-		"/api/v1/planificacion/energia": "Energía obtenida",
 	} {
 		rec := httptest.NewRecorder()
 		h.HandleSubtree(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -83,7 +82,7 @@ func TestListarErrorInterno500(t *testing.T) {
 	h := NewHandler(&fakePlanificacionService{listaErr: errors.New("db caída")})
 
 	rec := httptest.NewRecorder()
-	h.HandleSubtree(rec, httptest.NewRequest(http.MethodGet, "/api/v1/planificacion/energia", nil))
+	h.HandleSubtree(rec, httptest.NewRequest(http.MethodGet, "/api/v1/planificacion/plan", nil))
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
@@ -103,7 +102,7 @@ func TestEliminarIDInvalido400(t *testing.T) {
 	h := NewHandler(&fakePlanificacionService{delErr: planificacion.ErrIDInvalido})
 
 	rec := httptest.NewRecorder()
-	h.HandleSubtree(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/planificacion/energia/no-uuid", nil))
+	h.HandleSubtree(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/planificacion/paradas/no-uuid", nil))
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }

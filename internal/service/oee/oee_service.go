@@ -1,6 +1,6 @@
 // Package oee expone la lógica de negocio del cálculo de OEE: parseo y
-// validación del período, y cálculo puro de Availability/Performance/Quality y
-// del consumo específico de energía, por sector y global.
+// validación del período, y cálculo puro de Availability/Performance/Quality,
+// por sector y global.
 package oee
 
 import (
@@ -120,9 +120,6 @@ func calcular(periodo domain.Periodo, filtros domain.Filtros, datos *domain.Dato
 	for _, r := range datos.Paradas {
 		ids[r.SectorID] = true
 	}
-	for _, r := range datos.Energia {
-		ids[r.SectorID] = true
-	}
 	for _, r := range datos.Lotes {
 		ids[r.SectorID] = true
 	}
@@ -228,45 +225,6 @@ func calcularSector(sectorID, nombre string, desde, hasta time.Time, datos *doma
 	s.KgProducidos = round3(kgTotal)
 	s.KgOK = round3(kgOK)
 	s.CapacidadTeoricaKg = round3(capacidadTeorica)
-
-	energia := filtrar(datos.Energia, sectorID, func(e domain.EnergiaOEE) string { return e.SectorID })
-	var kwh, gas float64
-	hayGas, incluidas := false, 0
-	for _, e := range energia {
-		dur := e.PeriodoFin.Sub(e.PeriodoInicio).Seconds()
-		if dur <= 0 {
-			continue
-		}
-		seg := solapeSegundos(e.PeriodoInicio, e.PeriodoFin, desde, hasta)
-		if seg <= 0 {
-			continue
-		}
-		incluidas++
-		factor := seg / dur
-		kwh += e.Kwh * factor
-		if e.GasM3 != nil {
-			gas += *e.GasM3 * factor
-			hayGas = true
-		}
-	}
-	if incluidas == 0 {
-		s.Motivos = append(s.Motivos, "sin_lecturas_energia")
-	} else {
-		resumenEnergia := &domain.EnergiaResumen{Kwh: round3(kwh)}
-		if hayGas {
-			g := round3(gas)
-			resumenEnergia.GasM3 = &g
-		}
-		if kgOK > 0 {
-			v := round3(kwh / kgOK)
-			resumenEnergia.KwhPorKgOK = &v
-			if hayGas {
-				g := round3(gas / kgOK)
-				resumenEnergia.GasM3PorKgOK = &g
-			}
-		}
-		s.Energy = resumenEnergia
-	}
 
 	return s
 }

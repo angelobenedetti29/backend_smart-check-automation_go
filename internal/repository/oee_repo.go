@@ -82,27 +82,6 @@ func (r *OEERepository) Datos(ctx context.Context, q oee.Query) (*oee.Datos, err
 		return nil, fmt.Errorf("oee: rows paradas: %w", err)
 	}
 
-	energia, err := tx.Query(ctx, `
-		SELECT sector_id, periodo_inicio, periodo_fin, kwh::float8, gas_m3::float8
-		FROM lecturas_energia
-		WHERE ($1::text IS NULL OR sector_id = $1) AND periodo_inicio < $2 AND periodo_fin > $3
-		ORDER BY sector_id, periodo_inicio`, filtroSector, hasta, q.Periodo.Desde)
-	if err != nil {
-		return nil, fmt.Errorf("oee: list energia: %w", err)
-	}
-	for energia.Next() {
-		var row oee.EnergiaOEE
-		if err := energia.Scan(&row.SectorID, &row.PeriodoInicio, &row.PeriodoFin, &row.Kwh, &row.GasM3); err != nil {
-			energia.Close()
-			return nil, fmt.Errorf("oee: scan energia: %w", err)
-		}
-		datos.Energia = append(datos.Energia, row)
-	}
-	energia.Close()
-	if err := energia.Err(); err != nil {
-		return nil, fmt.Errorf("oee: rows energia: %w", err)
-	}
-
 	// Los lotes usan el mismo criterio que el resumen: CERRADOS con inicio_at
 	// dentro del período (sin prorratear).
 	lotes, err := tx.Query(ctx, `

@@ -1,4 +1,4 @@
-# Deploy — Smart-Check Automation Backend
+# Deploy — SmartCheck Automation Backend
 
 ## Infraestructura actual
 

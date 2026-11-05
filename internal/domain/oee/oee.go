@@ -1,5 +1,5 @@
 // Package oee define los tipos y el contrato de persistencia del cálculo de
-// OEE (Availability, Performance, Quality) y del consumo específico de energía.
+// OEE (Availability, Performance, Quality).
 //
 // El período se expresa en días ART (America/Argentina/Buenos_Aires) e incluye
 // ambas fechas. El repositorio traduce ese período a un rango de timestamptz
@@ -69,16 +69,6 @@ type ParadaOEE struct {
 	Tipo     string
 }
 
-// EnergiaOEE es una lectura de energía que solapa el período. GasM3 nil
-// representa una lectura sin medición de gas.
-type EnergiaOEE struct {
-	SectorID      string
-	PeriodoInicio time.Time
-	PeriodoFin    time.Time
-	Kwh           float64
-	GasM3         *float64
-}
-
 // LoteOEE es un lote CERRADO con inicio_at dentro del período.
 type LoteOEE struct {
 	SectorID   string
@@ -93,39 +83,29 @@ type LoteOEE struct {
 type Datos struct {
 	Plan        []PlanOEE
 	Paradas     []ParadaOEE
-	Energia     []EnergiaOEE
 	Lotes       []LoteOEE
 	Capacidades map[string]*float64
 	Sectores    map[string]string
 }
 
-// EnergiaResumen es el consumo del período y su intensidad por kg conforme.
-type EnergiaResumen struct {
-	Kwh          float64  `json:"kwh"`
-	GasM3        *float64 `json:"gas_m3"`
-	KwhPorKgOK   *float64 `json:"kwh_por_kg_ok"`
-	GasM3PorKgOK *float64 `json:"gas_m3_por_kg_ok"`
-}
-
 // ResumenSector es el bloque de indicadores de un sector o del global.
 type ResumenSector struct {
-	SectorID             string          `json:"sector_id"`
-	SectorNombre         string          `json:"sector_nombre"`
-	Calculable           bool            `json:"calculable"`
-	Motivos              []string        `json:"motivos"`
-	AvailabilityPct      *float64        `json:"availability_pct"`
-	PerformancePct       *float64        `json:"performance_pct"`
-	QualityPct           *float64        `json:"quality_pct"`
-	OEEPct               *float64        `json:"oee_pct"`
-	PlannedTimeMin       float64         `json:"planned_time_min"`
-	PlannedDowntimeMin   float64         `json:"planned_downtime_min"`
-	UnplannedDowntimeMin float64         `json:"unplanned_downtime_min"`
-	OperatingTimeMin     float64         `json:"operating_time_min"`
-	KgPlan               float64         `json:"kg_plan"`
-	KgProducidos         float64         `json:"kg_producidos"`
-	KgOK                 float64         `json:"kg_ok"`
-	CapacidadTeoricaKg   float64         `json:"capacidad_teorica_kg"`
-	Energy               *EnergiaResumen `json:"energy"`
+	SectorID             string   `json:"sector_id"`
+	SectorNombre         string   `json:"sector_nombre"`
+	Calculable           bool     `json:"calculable"`
+	Motivos              []string `json:"motivos"`
+	AvailabilityPct      *float64 `json:"availability_pct"`
+	PerformancePct       *float64 `json:"performance_pct"`
+	QualityPct           *float64 `json:"quality_pct"`
+	OEEPct               *float64 `json:"oee_pct"`
+	PlannedTimeMin       float64  `json:"planned_time_min"`
+	PlannedDowntimeMin   float64  `json:"planned_downtime_min"`
+	UnplannedDowntimeMin float64  `json:"unplanned_downtime_min"`
+	OperatingTimeMin     float64  `json:"operating_time_min"`
+	KgPlan               float64  `json:"kg_plan"`
+	KgProducidos         float64  `json:"kg_producidos"`
+	KgOK                 float64  `json:"kg_ok"`
+	CapacidadTeoricaKg   float64  `json:"capacidad_teorica_kg"`
 }
 
 // Resumen es el cuerpo de GET /api/v1/reportes/oee.
@@ -138,8 +118,8 @@ type Resumen struct {
 
 // Repository define el contrato de persistencia del cálculo de OEE.
 type Repository interface {
-	// Datos trae, en un único snapshot, el plan, las paradas y las lecturas
-	// que solapan el período, los lotes CERRADOS con inicio_at dentro del
-	// período, y las capacidades/nombres de sectores.
+	// Datos trae, en un único snapshot, el plan y las paradas que solapan el
+	// período, los lotes CERRADOS con inicio_at dentro del período, y las
+	// capacidades/nombres de sectores.
 	Datos(ctx context.Context, q Query) (*Datos, error)
 }

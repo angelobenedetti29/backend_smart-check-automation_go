@@ -57,9 +57,6 @@ func datosBase() *domain.Datos {
 			SectorID: "s1", InicioAt: fecha(2, 10), FinAt: fecha(2, 11), Tipo: "NO_PLANIFICADA",
 		}},
 		Lotes: []domain.LoteOEE{{SectorID: "s1", ProductoID: "p1", KgTotal: 600, KgOK: 570}},
-		Energia: []domain.EnergiaOEE{{
-			SectorID: "s1", PeriodoInicio: fecha(2, 0), PeriodoFin: fecha(2, 8), Kwh: 300,
-		}},
 	}
 }
 
@@ -92,11 +89,6 @@ func TestOEE_CasoCompleto(t *testing.T) {
 	require.InDelta(t, 600.0, g.KgProducidos, 1e-9)
 	require.InDelta(t, 570.0, g.KgOK, 1e-9)
 	require.InDelta(t, 700.0, g.CapacidadTeoricaKg, 1e-9)
-	require.NotNil(t, g.Energy)
-	require.InDelta(t, 300.0, g.Energy.Kwh, 1e-9)
-	require.Nil(t, g.Energy.GasM3)
-	require.InDelta(t, 0.526, *g.Energy.KwhPorKgOK, 1e-9)
-	require.Nil(t, g.Energy.GasM3PorKgOK)
 
 	require.Len(t, res.PorSector, 1)
 	require.Equal(t, "s1", res.PorSector[0].SectorID)
@@ -143,14 +135,13 @@ func TestOEE_SinPlan(t *testing.T) {
 	require.Nil(t, g.PerformancePct)
 	require.InDelta(t, 90.0, *g.QualityPct, 1e-9)
 	require.Nil(t, g.OEEPct)
-	require.Nil(t, g.Energy)
-	require.Equal(t, []string{"sin_plan_produccion", "sin_lecturas_energia"}, g.Motivos)
+	require.Equal(t, []string{"sin_plan_produccion"}, g.Motivos)
 	require.InDelta(t, 0.0, g.PlannedTimeMin, 1e-9)
 
 	require.Len(t, res.PorSector, 1)
 	require.Equal(t, "s2", res.PorSector[0].SectorID)
 	require.False(t, res.PorSector[0].Calculable)
-	require.Equal(t, []string{"sin_plan_produccion", "sin_lecturas_energia"}, res.PorSector[0].Motivos)
+	require.Equal(t, []string{"sin_plan_produccion"}, res.PorSector[0].Motivos)
 }
 
 func TestOEE_SinCapacidad(t *testing.T) {
@@ -187,112 +178,6 @@ func TestOEE_SinProduccion(t *testing.T) {
 	require.Nil(t, g.QualityPct)
 	require.Nil(t, g.OEEPct)
 	require.Equal(t, []string{"sin_produccion"}, g.Motivos)
-	require.NotNil(t, g.Energy)
-	require.Nil(t, g.Energy.KwhPorKgOK)
-}
-
-func TestOEE_SinEnergia(t *testing.T) {
-	datos := datosBase()
-	datos.Energia = nil
-
-	res, err := servicioDePrueba(&fakeRepo{datos: datos}).OEE(context.Background(),
-		Query{Desde: "2026-11-01", Hasta: "2026-11-04"})
-	require.NoError(t, err)
-
-	g := res.Global
-	require.True(t, g.Calculable)
-	require.Nil(t, g.Energy)
-	require.Equal(t, []string{"sin_lecturas_energia"}, g.Motivos)
-}
-
-func TestOEE_EnergiaProrrateada(t *testing.T) {
-	llave := func(kwh float64, gas *float64) domain.EnergiaOEE {
-		return domain.EnergiaOEE{SectorID: "s1", Kwh: kwh, GasM3: gas}
-	}
-
-	casos := []struct {
-		nombre   string
-		lecturas []domain.EnergiaOEE
-		kwh      float64
-		gas      *float64
-	}{
-		{
-			// Lectura de 8 h que arranca 4 h antes del período: aporta la mitad.
-			nombre: "parcial solapa mitad",
-			lecturas: []domain.EnergiaOEE{
-				llave(300, ptr(10)),
-			},
-			kwh: 150,
-			gas: ptr(5),
-		},
-		{
-			nombre: "completamente dentro",
-			lecturas: []domain.EnergiaOEE{
-				llave(300, ptr(10)),
-			},
-			kwh: 300,
-			gas: ptr(10),
-		},
-		{
-			nombre: "dos parciales con gas opcional",
-			lecturas: []domain.EnergiaOEE{
-				llave(300, ptr(10)),
-				llave(300, nil),
-			},
-			kwh: 300,
-			gas: ptr(5),
-		},
-	}
-	// Primer caso: lectura 2026-11-01 20:00 → 2026-11-02 04:00 (mitad dentro).
-	casos[0].lecturas[0].PeriodoInicio = fecha(1, 20)
-	casos[0].lecturas[0].PeriodoFin = fecha(2, 4)
-	// Segundo caso: lectura 2026-11-02 00:00 → 08:00 (toda dentro).
-	casos[1].lecturas[0].PeriodoInicio = fecha(2, 0)
-	casos[1].lecturas[0].PeriodoFin = fecha(2, 8)
-	// Tercero: 20:00 → 04:00 del día siguiente y 20:00 → 04:00 siguiente.
-	casos[2].lecturas[0].PeriodoInicio = fecha(1, 20)
-	casos[2].lecturas[0].PeriodoFin = fecha(2, 4)
-	casos[2].lecturas[1].PeriodoInicio = fecha(2, 20)
-	casos[2].lecturas[1].PeriodoFin = fecha(3, 4)
-
-	for _, c := range casos {
-		t.Run(c.nombre, func(t *testing.T) {
-			datos := &domain.Datos{
-				Sectores:    map[string]string{"s1": "Sector 1"},
-				Capacidades: map[string]*float64{},
-				Energia:     c.lecturas,
-			}
-			res, err := servicioDePrueba(&fakeRepo{datos: datos}).OEE(context.Background(),
-				Query{Desde: "2026-11-02", Hasta: "2026-11-02"})
-			require.NoError(t, err)
-
-			g := res.Global
-			require.NotNil(t, g.Energy)
-			require.InDelta(t, c.kwh, g.Energy.Kwh, 1e-9)
-			if c.gas == nil {
-				require.Nil(t, g.Energy.GasM3)
-			} else {
-				require.InDelta(t, *c.gas, *g.Energy.GasM3, 1e-9)
-			}
-		})
-	}
-}
-
-func TestOEE_EnergiaFueraDelPeriodo(t *testing.T) {
-	datos := &domain.Datos{
-		Sectores:    map[string]string{"s1": "Sector 1"},
-		Capacidades: map[string]*float64{},
-		Energia: []domain.EnergiaOEE{{
-			SectorID: "s1", PeriodoInicio: fecha(1, 0), PeriodoFin: fecha(1, 8), Kwh: 300,
-		}},
-	}
-
-	res, err := servicioDePrueba(&fakeRepo{datos: datos}).OEE(context.Background(),
-		Query{Desde: "2026-11-02", Hasta: "2026-11-02"})
-	require.NoError(t, err)
-
-	require.Nil(t, res.Global.Energy)
-	require.Equal(t, []string{"sin_plan_produccion", "sin_produccion", "sin_lecturas_energia"}, res.Global.Motivos)
 }
 
 func TestOEE_DosSectores(t *testing.T) {
@@ -313,7 +198,6 @@ func TestOEE_DosSectores(t *testing.T) {
 	require.InDelta(t, 72.19, *g.OEEPct, 1e-9)
 	require.InDelta(t, 700.0, g.KgProducidos, 1e-9)
 	require.InDelta(t, 660.0, g.KgOK, 1e-9)
-	require.InDelta(t, 0.455, *g.Energy.KwhPorKgOK, 1e-9)
 	require.Empty(t, g.Motivos)
 
 	require.Len(t, res.PorSector, 2)
@@ -327,7 +211,7 @@ func TestOEE_DosSectores(t *testing.T) {
 	require.False(t, s2.Calculable)
 	require.Nil(t, s2.AvailabilityPct)
 	require.InDelta(t, 90.0, *s2.QualityPct, 1e-9)
-	require.Equal(t, []string{"sin_plan_produccion", "sin_lecturas_energia"}, s2.Motivos)
+	require.Equal(t, []string{"sin_plan_produccion"}, s2.Motivos)
 }
 
 func TestOEE_Redondeos(t *testing.T) {
@@ -341,9 +225,6 @@ func TestOEE_Redondeos(t *testing.T) {
 			KgPlan:   10,
 		}},
 		Lotes: []domain.LoteOEE{{SectorID: "s1", ProductoID: "p1", KgTotal: 100.0004, KgOK: 90.0004}},
-		Energia: []domain.EnergiaOEE{{
-			SectorID: "s1", PeriodoInicio: fecha(2, 0), PeriodoFin: fecha(2, 8), Kwh: 10.0004,
-		}},
 	}
 
 	res, err := servicioDePrueba(&fakeRepo{datos: datos}).OEE(context.Background(),
@@ -358,8 +239,6 @@ func TestOEE_Redondeos(t *testing.T) {
 	require.InDelta(t, 90.0, g.KgOK, 1e-9)
 	require.InDelta(t, 98.33, *g.PerformancePct, 1e-9)
 	require.InDelta(t, 90.0, *g.QualityPct, 1e-9)
-	require.InDelta(t, 10.0, g.Energy.Kwh, 1e-9)
-	require.InDelta(t, 0.111, *g.Energy.KwhPorKgOK, 1e-9)
 }
 
 func TestOEE_FiltroSectorSinDatos(t *testing.T) {
@@ -374,7 +253,7 @@ func TestOEE_FiltroSectorSinDatos(t *testing.T) {
 	require.NotNil(t, res.Filtros.SectorID)
 	require.Equal(t, "s1", *res.Filtros.SectorID)
 	require.False(t, res.Global.Calculable)
-	require.Equal(t, []string{"sin_plan_produccion", "sin_produccion", "sin_lecturas_energia"}, res.Global.Motivos)
+	require.Equal(t, []string{"sin_plan_produccion", "sin_produccion"}, res.Global.Motivos)
 	require.Len(t, res.PorSector, 1)
 	require.Equal(t, "Sector 1", res.PorSector[0].SectorNombre)
 	require.False(t, res.PorSector[0].Calculable)

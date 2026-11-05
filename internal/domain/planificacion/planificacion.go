@@ -1,6 +1,6 @@
 // Package planificacion define los modelos de importación del plan de
-// producción, las paradas de línea y las lecturas de energía (fase 1 de OEE),
-// junto con su contrato de persistencia.
+// producción y las paradas de línea (fase 1 de OEE), junto con su contrato de
+// persistencia.
 package planificacion
 
 import (
@@ -47,17 +47,6 @@ type ParadaRow struct {
 	Notas       string
 }
 
-// EnergiaRow es una fila validada de lectura de energía. GasM3 nil representa
-// una lectura sin medición de gas (NULL en la base).
-type EnergiaRow struct {
-	SectorID      string
-	LoteID        string
-	PeriodoInicio time.Time
-	PeriodoFin    time.Time
-	Kwh           float64
-	GasM3         *float64
-}
-
 // PlanItem es una fila del listado editable del plan de producción, ya con los
 // nombres de sector y producto resueltos.
 type PlanItem struct {
@@ -84,18 +73,6 @@ type ParadaItem struct {
 	CausaCodigo  string    `json:"causa_codigo"`
 	Tipo         string    `json:"tipo"`
 	Notas        *string   `json:"notas"`
-}
-
-// EnergiaItem es una fila del listado de lecturas de energía.
-type EnergiaItem struct {
-	ID            string    `json:"id"`
-	SectorID      string    `json:"sector_id"`
-	SectorNombre  string    `json:"sector_nombre"`
-	LoteID        *string   `json:"lote_id"`
-	PeriodoInicio time.Time `json:"periodo_inicio"`
-	PeriodoFin    time.Time `json:"periodo_fin"`
-	Kwh           float64   `json:"kwh"`
-	GasM3         *float64  `json:"gas_m3"`
 }
 
 // FiltroListado son los filtros ya validados de un listado. Desde es inclusivo
@@ -143,8 +120,6 @@ type Repository interface {
 	UpsertPlan(ctx context.Context, rows []PlanRow) (insertadas, actualizadas int, err error)
 	// UpsertParadas inserta o actualiza filas por (sector_id, inicio_at, causa_codigo).
 	UpsertParadas(ctx context.Context, rows []ParadaRow) (insertadas, actualizadas int, err error)
-	// UpsertEnergia inserta o actualiza filas por (sector_id, periodo_inicio, periodo_fin).
-	UpsertEnergia(ctx context.Context, rows []EnergiaRow) (insertadas, actualizadas int, err error)
 
 	// ListPlan lista el plan de un sector en una ventana (desde/hasta inclusive);
 	// sectorID vacío no filtra por sector.
@@ -152,9 +127,6 @@ type Repository interface {
 	// ListParadas lista las paradas de un sector en una ventana; sectorID vacío
 	// no filtra por sector.
 	ListParadas(ctx context.Context, sectorID string, desde, hasta time.Time) ([]ParadaRow, error)
-	// ListEnergia lista las lecturas de un sector en una ventana; sectorID vacío
-	// no filtra por sector.
-	ListEnergia(ctx context.Context, sectorID string, desde, hasta time.Time) ([]EnergiaRow, error)
 	// PlanSolapados lista el plan del sector que solapa [desde, hasta) con
 	// semántica half-open: inicio_at < hasta AND fin_at > desde.
 	PlanSolapados(ctx context.Context, sectorID string, desde, hasta time.Time) ([]PlanRow, error)
@@ -164,13 +136,9 @@ type Repository interface {
 	ListPlanItems(ctx context.Context, f FiltroListado) (Listado[PlanItem], error)
 	// ListParadaItems lista las paradas del mismo modo.
 	ListParadaItems(ctx context.Context, f FiltroListado) (Listado[ParadaItem], error)
-	// ListEnergiaItems lista las lecturas del mismo modo.
-	ListEnergiaItems(ctx context.Context, f FiltroListado) (Listado[EnergiaItem], error)
 
 	// DeletePlan elimina una fila del plan por id; false si no existía.
 	DeletePlan(ctx context.Context, id string) (bool, error)
 	// DeleteParada elimina una parada por id; false si no existía.
 	DeleteParada(ctx context.Context, id string) (bool, error)
-	// DeleteEnergia elimina una lectura por id; false si no existía.
-	DeleteEnergia(ctx context.Context, id string) (bool, error)
 }

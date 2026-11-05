@@ -1,6 +1,6 @@
 // Package controller expone GET /api/v1/reportes/oee: cálculo de OEE estándar
-// (Availability, Performance, Quality) y consumo específico de energía para un
-// período ART, global y por sector.
+// (Availability, Performance, Quality) para un período ART, global y por
+// sector.
 package controller
 
 import (

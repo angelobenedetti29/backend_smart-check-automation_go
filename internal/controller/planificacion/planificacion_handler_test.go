@@ -40,10 +40,6 @@ func (f *fakePlanificacionService) ImportarParadas(context.Context, io.Reader) (
 	return f.res, f.err
 }
 
-func (f *fakePlanificacionService) ImportarEnergia(context.Context, io.Reader) (planificacion.ImportResult, error) {
-	return f.res, f.err
-}
-
 func (f *fakePlanificacionService) ListarPlan(context.Context, service.Query) (planificacion.Listado[planificacion.PlanItem], error) {
 	return f.planListado, f.listaErr
 }
@@ -52,19 +48,11 @@ func (f *fakePlanificacionService) ListarParadas(context.Context, service.Query)
 	return planificacion.Listado[planificacion.ParadaItem]{Items: []planificacion.ParadaItem{}}, f.listaErr
 }
 
-func (f *fakePlanificacionService) ListarEnergia(context.Context, service.Query) (planificacion.Listado[planificacion.EnergiaItem], error) {
-	return planificacion.Listado[planificacion.EnergiaItem]{Items: []planificacion.EnergiaItem{}}, f.listaErr
-}
-
 func (f *fakePlanificacionService) EliminarPlan(context.Context, string) error {
 	return f.delErr
 }
 
 func (f *fakePlanificacionService) EliminarParada(context.Context, string) error {
-	return f.delErr
-}
-
-func (f *fakePlanificacionService) EliminarEnergia(context.Context, string) error {
 	return f.delErr
 }
 

@@ -12,7 +12,7 @@ import (
 )
 
 // PlanificacionPostgresRepository implementa planificacion.Repository sobre
-// las tablas plan_produccion, eventos_parada y lecturas_energia.
+// las tablas plan_produccion y eventos_parada.
 type PlanificacionPostgresRepository struct {
 	db *pgxpool.Pool
 }
@@ -140,43 +140,6 @@ func (r *PlanificacionPostgresRepository) UpsertParadas(ctx context.Context, row
 	return insertadas, actualizadas, nil
 }
 
-// UpsertEnergia inserta o actualiza lecturas por (sector_id, periodo_inicio, periodo_fin).
-func (r *PlanificacionPostgresRepository) UpsertEnergia(ctx context.Context, rows []planificacion.EnergiaRow) (int, int, error) {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return 0, 0, fmt.Errorf("planificacion: begin energia: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	insertadas, actualizadas := 0, 0
-	for _, row := range rows {
-		var insertada bool
-		err := tx.QueryRow(ctx, `
-			INSERT INTO lecturas_energia
-				(sector_id, lote_id, periodo_inicio, periodo_fin, kwh, gas_m3)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (sector_id, periodo_inicio, periodo_fin) DO UPDATE SET
-				lote_id = EXCLUDED.lote_id,
-				kwh = EXCLUDED.kwh,
-				gas_m3 = EXCLUDED.gas_m3
-			RETURNING (xmax = 0)`,
-			row.SectorID, nullIfEmpty(row.LoteID), row.PeriodoInicio, row.PeriodoFin,
-			row.Kwh, row.GasM3).Scan(&insertada)
-		if err != nil {
-			return 0, 0, fmt.Errorf("planificacion: upsert energia: %w", err)
-		}
-		if insertada {
-			insertadas++
-		} else {
-			actualizadas++
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, 0, fmt.Errorf("planificacion: commit energia: %w", err)
-	}
-	return insertadas, actualizadas, nil
-}
-
 // nullIfEmpty convierte una cadena vacía en NULL para columnas nullable.
 func nullIfEmpty(s string) any {
 	if s == "" {
@@ -277,39 +240,6 @@ func (r *PlanificacionPostgresRepository) ListParadas(ctx context.Context, secto
 	return out, nil
 }
 
-// ListEnergia lista las lecturas del sector (vacío = todos) en [desde, hasta).
-func (r *PlanificacionPostgresRepository) ListEnergia(ctx context.Context, sectorID string, desde, hasta time.Time) ([]planificacion.EnergiaRow, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT sector_id, lote_id::text, periodo_inicio, periodo_fin, kwh, gas_m3
-		FROM lecturas_energia
-		WHERE ($1 = '' OR sector_id = $1) AND periodo_inicio >= $2 AND periodo_inicio < $3
-		ORDER BY periodo_inicio`, sectorID, desde, hasta)
-	if err != nil {
-		return nil, fmt.Errorf("planificacion: list energia: %w", err)
-	}
-	defer rows.Close()
-
-	out := []planificacion.EnergiaRow{}
-	for rows.Next() {
-		var (
-			row    planificacion.EnergiaRow
-			loteID *string
-		)
-		if err := rows.Scan(&row.SectorID, &loteID, &row.PeriodoInicio,
-			&row.PeriodoFin, &row.Kwh, &row.GasM3); err != nil {
-			return nil, fmt.Errorf("planificacion: scan energia: %w", err)
-		}
-		if loteID != nil {
-			row.LoteID = *loteID
-		}
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("planificacion: rows energia: %w", err)
-	}
-	return out, nil
-}
-
 // art es la zona de negocio para serializar timestamps como -03:00.
 var art = time.FixedZone("ART", -3*60*60)
 
@@ -360,29 +290,6 @@ func (r *PlanificacionPostgresRepository) ListParadaItems(ctx context.Context, f
 		})
 }
 
-// ListEnergiaItems lista las lecturas con el nombre del sector.
-func (r *PlanificacionPostgresRepository) ListEnergiaItems(ctx context.Context, f planificacion.FiltroListado) (planificacion.Listado[planificacion.EnergiaItem], error) {
-	const where = ` WHERE ($1 = '' OR l.sector_id = $1) AND l.periodo_inicio >= $2 AND l.periodo_inicio < $3`
-	args := []any{f.SectorID, f.Desde, f.Hasta}
-	return listarItems(ctx, r.db,
-		`SELECT count(*) FROM lecturas_energia l`+where,
-		`SELECT l.id::text, l.sector_id, s.nombre, l.lote_id::text, l.periodo_inicio,
-		        l.periodo_fin, l.kwh, l.gas_m3
-		 FROM lecturas_energia l
-		 JOIN sectores s ON s.id = l.sector_id`+where+`
-		 ORDER BY l.periodo_inicio DESC
-		 LIMIT $4`,
-		args, append(args, f.Limite),
-		func(rows pgx.Rows) (planificacion.EnergiaItem, error) {
-			var it planificacion.EnergiaItem
-			err := rows.Scan(&it.ID, &it.SectorID, &it.SectorNombre, &it.LoteID,
-				&it.PeriodoInicio, &it.PeriodoFin, &it.Kwh, &it.GasM3)
-			it.PeriodoInicio = it.PeriodoInicio.In(art)
-			it.PeriodoFin = it.PeriodoFin.In(art)
-			return it, err
-		})
-}
-
 // listarItems corre el count y la lista en una tx read-only REPEATABLE READ
 // para que total e items sean consistentes.
 func listarItems[T any](ctx context.Context, db *pgxpool.Pool, countSQL, listSQL string, args, listArgs []any, scan func(pgx.Rows) (T, error)) (planificacion.Listado[T], error) {
@@ -427,11 +334,6 @@ func (r *PlanificacionPostgresRepository) DeletePlan(ctx context.Context, id str
 // DeleteParada elimina un evento de parada por id.
 func (r *PlanificacionPostgresRepository) DeleteParada(ctx context.Context, id string) (bool, error) {
 	return r.deleteByID(ctx, `DELETE FROM eventos_parada WHERE id = $1`, id)
-}
-
-// DeleteEnergia elimina una lectura de energía por id.
-func (r *PlanificacionPostgresRepository) DeleteEnergia(ctx context.Context, id string) (bool, error) {
-	return r.deleteByID(ctx, `DELETE FROM lecturas_energia WHERE id = $1`, id)
 }
 
 func (r *PlanificacionPostgresRepository) deleteByID(ctx context.Context, query, id string) (bool, error) {

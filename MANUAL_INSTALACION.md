@@ -1,4 +1,4 @@
-# Manual de instalación — Backend Smart-Check Automation + sidecar predictor
+# Manual de instalación — Backend SmartCheck Automation + sidecar predictor
 
 Este manual cubre instalación, configuración, ejecución y tests del backend Go
 y del sidecar predictor XGBoost.
@@ -142,7 +142,9 @@ PORT=8080
 
 La primera ejecución descarga imágenes y compila; las siguientes son más
 rápidas. El `db` crea las tablas y el seed la primera vez que se inicializa el
-volumen. En cada arranque, el backend vuelve a aplicar el schema idempotente.
+volumen. En cada arranque, el backend vuelve a aplicar el schema idempotente:
+crea los objetos faltantes, pero no actualiza definiciones existentes. Para un
+cambio estructural hay que recrear el volumen o aplicar una migración manual.
 
 ### 4.3 Logs esperados
 
@@ -205,7 +207,8 @@ psql "$DATABASE_URL" -f database/schema.sql
 
 El backend también aplica el schema al arrancar, pero ejecutarlo manualmente
 sirve para provisionar la base antes del primer deploy o para verificar
-permisos.
+permisos. Aplicarlo sobre una base existente solo crea objetos faltantes; no
+propaga cambios estructurales.
 
 ### 5.2 Backend
 
@@ -374,7 +377,7 @@ funcionando en modo degradado: la decisión se audita como `skipped`.
 |---|---|---|
 | Salud del backend | `curl http://localhost:8080/health` | `{"status":"healthy"}` |
 | Salud para Render/healthcheck | `curl http://localhost:8080/healthz` | `{"status":"healthy"}` |
-| Raíz | `curl http://localhost:8080/` | `Smart-Check Automation Backend running.` |
+| Raíz | `curl http://localhost:8080/` | `SmartCheck Automation Backend running.` |
 | Salud del predictor | `curl http://localhost:8090/health` | JSON con `"status":"ok"` |
 | Productos con JWT | `curl -b "session_token=<JWT>" http://localhost:8080/api/v1/productos` | Listado de productos del seed |
 | Logs de DB | `docker compose logs db` | `database system is ready to accept connections` |
@@ -480,7 +483,7 @@ repositorio.
 | `database system is ready...` no aparece | El contenedor `db` no arrancó | `docker compose ps` y `docker compose logs db`; verificar `POSTGRES_*` en `.env` |
 | El backend no arranca y menciona `GOOGLE_CLIENT_ID y JWT_SECRET son requeridos` | Falta una de esas variables | Completarlas en `.env` o en el entorno; ejecutar desde la raíz para que `godotenv` lea `.env` |
 | `DATABASE_URL no configurada` | Falta la variable | Definirla en `.env` o exportarla |
-| El schema no está aplicado | El volumen ya existía y el initdb no vuelve a correr | El backend aplica el schema en cada arranque; verificar el log `Schema de base de datos aplicado/verificado correctamente.` o ejecutar `psql "$DATABASE_URL" -f database/schema.sql` |
+| El schema no está aplicado | El volumen ya existía y el initdb no vuelve a correr | El backend aplica el schema en cada arranque; verificar el log `Schema de base de datos aplicado/verificado correctamente.` o ejecutar `psql "$DATABASE_URL" -f database/schema.sql`. Si faltan cambios estructurales, recrear el volumen o migrar manualmente |
 | Errores de CORS en el panel | `FRONTEND_ORIGINS` no coincide exactamente con el origen | Incluir esquema, host y puerto exactos, separados por coma. Un `OPTIONS` de un origen no permitido responde `403`; una escritura de gestión responde `403 origin_not_allowed` |
 | El predictor no responde | `PREDICTOR_URL` incorrecta o contenedor caído | En Compose debe ser `http://predictor-svc:8090`; fuera de Compose, `http://localhost:8090`. Verificar `curl http://localhost:8090/health` y `docker compose logs predictor-svc` |
 | El MPC no propone cambios y audita `skipped` | Predictor caído o inalcanzable | Es el modo degradado esperado; restablecer el sidecar. El horno sigue con el último setpoint |
@@ -488,7 +491,7 @@ repositorio.
 | `bind: address already in use` en 8080 | Otro proceso usa el puerto | Liberar el puerto o cambiar `PORT` en `.env` (Compose mapea `${PORT}:${PORT}`) |
 | Conflicto en 5432 | Otra PostgreSQL local ocupa el puerto | Detener ese proceso o ajustar el mapeo del servicio `db` en `docker-compose.yml` |
 | Conflicto en 8090 | Otro proceso usa el puerto del predictor | Liberar `8090`; Compose y el contrato del backend lo fijan |
-| Cambios de schema no aparecen tras actualizar el repo | Volumen viejo o backend no reiniciado | Reiniciar `app` (aplica el schema idempotente). `docker compose down -v` solo si aceptás borrar datos y modelos |
+| Cambios de schema no aparecen tras actualizar el repo | El schema aplicado no migra bases existentes | Recrear el volumen (`docker compose down -v`, borra datos y modelos) o aplicar una migración manual. Reiniciar `app` solo crea objetos faltantes |
 | `go: go.mod requires go >= 1.25.0` | Toolchain de Go anterior | Instalar Go 1.25 o usar el build Docker (`golang:1.25-alpine`) |
 | La consigna no llega al PLC real | El backend no escribe el PLC por diseño | Verificar que la Pi ENTRADA esté aplicando las propuestas del MPC (`consigna-propuesta` + `consigna/ack`); el backend sólo publica y audita |
 

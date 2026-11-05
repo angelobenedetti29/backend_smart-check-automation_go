@@ -12,7 +12,7 @@ import (
 )
 
 // TestOEERepo_DatosIntegracion cubre el snapshot completo del OEE: plan y
-// paradas que solapan el período, lotes CERRADOS dentro del período, energía,
+// paradas que solapan el período, lotes CERRADOS dentro del período,
 // capacidades y nombres de sectores, y el resumen resultante.
 func TestOEERepo_DatosIntegracion(t *testing.T) {
 	ctx := context.Background()
@@ -81,21 +81,6 @@ func TestOEERepo_DatosIntegracion(t *testing.T) {
 		productoID, sectorID, time.Date(2026, 10, 1, 15, 0, 0, 0, art))
 	require.NoError(t, err)
 
-	_, err = pool.Exec(ctx, `
-		INSERT INTO lecturas_energia (sector_id, periodo_inicio, periodo_fin, kwh, gas_m3)
-		VALUES
-			($1, $2, $3, 300, 10),
-			($1, $4, $5, 100, NULL),
-			($1, $6, $7, 200, 4)`,
-		sectorID,
-		time.Date(2026, 10, 1, 0, 0, 0, 0, art),
-		time.Date(2026, 10, 1, 8, 0, 0, 0, art),
-		time.Date(2026, 10, 1, 20, 0, 0, 0, art),
-		time.Date(2026, 10, 1, 23, 0, 0, 0, art),
-		time.Date(2026, 9, 30, 20, 0, 0, 0, art),
-		time.Date(2026, 10, 1, 4, 0, 0, 0, art))
-	require.NoError(t, err)
-
 	repo := NewOEERepository(pool)
 	periodo := oeeDomain.Periodo{
 		Desde: time.Date(2026, 10, 1, 0, 0, 0, 0, art),
@@ -106,14 +91,6 @@ func TestOEERepo_DatosIntegracion(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, datos.Plan, 2)
 	require.Len(t, datos.Paradas, 2)
-	require.Len(t, datos.Energia, 3)
-	// ORDER BY periodo_inicio: la lectura parcial del día anterior va primero.
-	require.True(t, time.Date(2026, 9, 30, 20, 0, 0, 0, art).Equal(datos.Energia[0].PeriodoInicio))
-	require.True(t, time.Date(2026, 10, 1, 4, 0, 0, 0, art).Equal(datos.Energia[0].PeriodoFin))
-	require.True(t, time.Date(2026, 10, 1, 0, 0, 0, 0, art).Equal(datos.Energia[1].PeriodoInicio))
-	require.True(t, time.Date(2026, 10, 1, 8, 0, 0, 0, art).Equal(datos.Energia[1].PeriodoFin))
-	require.True(t, time.Date(2026, 10, 1, 20, 0, 0, 0, art).Equal(datos.Energia[2].PeriodoInicio))
-	require.True(t, time.Date(2026, 10, 1, 23, 0, 0, 0, art).Equal(datos.Energia[2].PeriodoFin))
 	require.Len(t, datos.Lotes, 1)
 	require.Equal(t, 100.0, *datos.Capacidades[productoID])
 	require.Equal(t, "Sector OEE", datos.Sectores[sectorID])
@@ -139,12 +116,6 @@ func TestOEERepo_DatosIntegracion(t *testing.T) {
 	require.InDelta(t, 600.0, g.KgPlan, 1e-9)
 	require.InDelta(t, 100.0, g.KgProducidos, 1e-9)
 	require.InDelta(t, 1000.0, g.CapacidadTeoricaKg, 1e-9)
-	require.NotNil(t, g.Energy)
-	// 300 + 100 completas + 200 * (4h/8h) de la lectura parcial.
-	require.InDelta(t, 500.0, g.Energy.Kwh, 1e-9)
-	require.InDelta(t, 12.0, *g.Energy.GasM3, 1e-9)
-	require.InDelta(t, 5.556, *g.Energy.KwhPorKgOK, 1e-9)
-	require.InDelta(t, 0.133, *g.Energy.GasM3PorKgOK, 1e-9)
 
 	require.Len(t, resumen.PorSector, 1)
 	require.Equal(t, sectorID, resumen.PorSector[0].SectorID)

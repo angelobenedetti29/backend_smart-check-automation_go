@@ -1,5 +1,5 @@
-// Package service implementa la importación CSV del plan de producción,
-// paradas y lecturas de energía (fase 1 de OEE).
+// Package service implementa la importación CSV del plan de producción y las
+// paradas (fase 1 de OEE).
 package service
 
 import (
@@ -36,9 +36,8 @@ const (
 var uuidRegexp = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 var (
-	headersPlan    = []string{"sector_id", "fecha", "turno", "producto_id", "inicio", "fin", "kg_plan"}
-	headersParada  = []string{"sector_id", "lote_id", "causa_codigo", "tipo", "inicio", "fin", "notas"}
-	headersEnergia = []string{"sector_id", "lote_id", "periodo_inicio", "periodo_fin", "kwh", "gas_m3"}
+	headersPlan   = []string{"sector_id", "fecha", "turno", "producto_id", "inicio", "fin", "kg_plan"}
+	headersParada = []string{"sector_id", "lote_id", "causa_codigo", "tipo", "inicio", "fin", "notas"}
 
 	turnosValidos = map[string]bool{"mañana": true, "tarde": true, "noche": true}
 	tiposParada   = map[string]bool{"PLANIFICADA": true, "NO_PLANIFICADA": true}
@@ -97,15 +96,6 @@ func (s *Service) ListarParadas(ctx context.Context, q Query) (planificacion.Lis
 	return s.repo.ListParadaItems(ctx, f)
 }
 
-// ListarEnergia devuelve las lecturas de energía del período para el panel.
-func (s *Service) ListarEnergia(ctx context.Context, q Query) (planificacion.Listado[planificacion.EnergiaItem], error) {
-	f, err := s.parseFiltro(q)
-	if err != nil {
-		return planificacion.Listado[planificacion.EnergiaItem]{}, err
-	}
-	return s.repo.ListEnergiaItems(ctx, f)
-}
-
 // EliminarPlan borra una fila del plan por id.
 func (s *Service) EliminarPlan(ctx context.Context, id string) error {
 	return s.eliminar(ctx, id, s.repo.DeletePlan)
@@ -114,11 +104,6 @@ func (s *Service) EliminarPlan(ctx context.Context, id string) error {
 // EliminarParada borra un evento de parada por id.
 func (s *Service) EliminarParada(ctx context.Context, id string) error {
 	return s.eliminar(ctx, id, s.repo.DeleteParada)
-}
-
-// EliminarEnergia borra una lectura de energía por id.
-func (s *Service) EliminarEnergia(ctx context.Context, id string) error {
-	return s.eliminar(ctx, id, s.repo.DeleteEnergia)
 }
 
 func (s *Service) eliminar(ctx context.Context, id string, del func(context.Context, string) (bool, error)) error {
@@ -360,68 +345,6 @@ func (s *Service) ImportarParadas(ctx context.Context, input io.Reader) (planifi
 	return res, nil
 }
 
-// ImportarEnergia procesa un CSV de lecturas de energía.
-func (s *Service) ImportarEnergia(ctx context.Context, input io.Reader) (planificacion.ImportResult, error) {
-	records, err := leerCSV(input, headersEnergia)
-	res := planificacion.ImportResult{Procesadas: len(records), Errores: []planificacion.ErrorImportacion{}}
-	if err != nil {
-		return res, err
-	}
-
-	type pendiente struct {
-		fila int
-		row  planificacion.EnergiaRow
-	}
-	var pendientes []pendiente
-	for i, rec := range records {
-		row, msg := parseEnergiaRow(rec, len(headersEnergia))
-		if msg != "" {
-			res.Errores = append(res.Errores, planificacion.ErrorImportacion{Fila: i + 2, Mensaje: msg})
-			continue
-		}
-		pendientes = append(pendientes, pendiente{fila: i + 2, row: row})
-	}
-
-	idsSector := make([]string, 0, len(pendientes))
-	idsLote := make([]string, 0, len(pendientes))
-	for _, p := range pendientes {
-		idsSector = append(idsSector, p.row.SectorID)
-		if p.row.LoteID != "" {
-			idsLote = append(idsLote, p.row.LoteID)
-		}
-	}
-	sectores, err := s.repo.SectoresExistentes(ctx, uniqueStrings(idsSector))
-	if err != nil {
-		return res, err
-	}
-	lotes, err := s.repo.LotesExistentes(ctx, uniqueStrings(idsLote))
-	if err != nil {
-		return res, err
-	}
-
-	validas := make([]planificacion.EnergiaRow, 0, len(pendientes))
-	for _, p := range pendientes {
-		switch {
-		case !sectores[p.row.SectorID]:
-			res.Errores = append(res.Errores, planificacion.ErrorImportacion{Fila: p.fila, Mensaje: "sector_id inexistente"})
-		case p.row.LoteID != "" && !lotes[p.row.LoteID]:
-			res.Errores = append(res.Errores, planificacion.ErrorImportacion{Fila: p.fila, Mensaje: "lote_id inexistente"})
-		default:
-			validas = append(validas, p.row)
-		}
-	}
-	ordenarErrores(&res)
-
-	if len(validas) == 0 {
-		return res, nil
-	}
-	res.Insertadas, res.Actualizadas, err = s.repo.UpsertEnergia(ctx, validas)
-	if err != nil {
-		return res, err
-	}
-	return res, nil
-}
-
 // leerCSV valida la cabecera exacta (tolerando BOM UTF-8) y devuelve las filas
 // de datos. Un error de estructura se envuelve con ErrFormatoCSV.
 func leerCSV(input io.Reader, esperada []string) ([][]string, error) {
@@ -561,42 +484,6 @@ func parseParadaRow(rec []string, columnas int) (planificacion.ParadaRow, string
 		return row, "fin debe ser posterior a inicio"
 	}
 	row.Notas = strings.TrimSpace(rec[6])
-	return row, ""
-}
-
-// parseEnergiaRow valida y normaliza una fila de lectura de energía.
-func parseEnergiaRow(rec []string, columnas int) (planificacion.EnergiaRow, string) {
-	var row planificacion.EnergiaRow
-	if len(rec) != columnas {
-		return row, fmt.Sprintf("cantidad de columnas inválida (se esperaban %d)", columnas)
-	}
-
-	row.SectorID = strings.TrimSpace(rec[0])
-	if row.SectorID == "" {
-		return row, "sector_id es requerido"
-	}
-	row.LoteID = strings.TrimSpace(rec[1])
-	var err error
-	if row.PeriodoInicio, err = parseTimestamp(rec[2]); err != nil {
-		return row, "periodo_inicio inválido (YYYY-MM-DD HH:MM o RFC3339)"
-	}
-	if row.PeriodoFin, err = parseTimestamp(rec[3]); err != nil {
-		return row, "periodo_fin inválido (YYYY-MM-DD HH:MM o RFC3339)"
-	}
-	if !row.PeriodoFin.After(row.PeriodoInicio) {
-		return row, "periodo_fin debe ser posterior a periodo_inicio"
-	}
-	row.Kwh, err = strconv.ParseFloat(strings.TrimSpace(rec[4]), 64)
-	if err != nil || row.Kwh < 0 {
-		return row, "kwh debe ser un número mayor o igual a 0"
-	}
-	if gas := strings.TrimSpace(rec[5]); gas != "" {
-		v, err := strconv.ParseFloat(gas, 64)
-		if err != nil || v < 0 {
-			return row, "gas_m3 debe ser un número mayor o igual a 0"
-		}
-		row.GasM3 = &v
-	}
 	return row, ""
 }
 

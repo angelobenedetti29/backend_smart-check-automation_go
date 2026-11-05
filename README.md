@@ -1,4 +1,4 @@
-# Smart-Check Automation — Backend
+# SmartCheck Automation — Backend
 
 Backend REST en Go para el sistema de supervisión inteligente de hornos túnel de
 Fermar S.A. Registra y consulta lotes productivos, monitorea temperaturas de
@@ -31,13 +31,15 @@ internal/
   domain/                       # Modelos y contratos (interfaces)
   repository/                   # Repositorios reales contra PostgreSQL
   provider/database/            # Conexión al pool de PostgreSQL
-database/schema.sql             # DDL idempotente: tablas, constraints, índices, seed
+database/schema.sql             # Esquema canónico de instalación limpia: tablas, constraints, índices, seed
 docker-compose.yml              # db + app + predictor-svc
 ```
 
 El backend aplica `database/schema.sql` embebido en cada arranque
 (`database/schema.go`); el contenedor `db` también lo ejecuta al inicializar un
-volumen vacío.
+volumen vacío. La aplicación es idempotente pero **no migra bases existentes**:
+solo crea los objetos que faltan. Un cambio estructural requiere recrear la
+base/volumen o aplicar una migración manual.
 
 ## Servicios de Docker Compose
 

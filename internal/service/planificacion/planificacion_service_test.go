@@ -20,18 +20,16 @@ type fakePlanificacionRepo struct {
 	lotes     map[string]bool
 	existsErr error
 
-	planRows    []planificacion.PlanRow
-	paradaRows  []planificacion.ParadaRow
-	energiaRows []planificacion.EnergiaRow
+	planRows   []planificacion.PlanRow
+	paradaRows []planificacion.ParadaRow
 
 	planesExistentes []planificacion.PlanRow
 	solapadosErr     error
 
-	planIns, planUpd       int
-	paradaIns, paradaUpd   int
-	energiaIns, energiaUpd int
-	upsertErr              error
-	upsertCalls            int
+	planIns, planUpd     int
+	paradaIns, paradaUpd int
+	upsertErr            error
+	upsertCalls          int
 
 	listadoFiltro planificacion.FiltroListado
 	listadoErr    error
@@ -64,21 +62,11 @@ func (f *fakePlanificacionRepo) UpsertParadas(_ context.Context, rows []planific
 	return f.paradaIns, f.paradaUpd, f.upsertErr
 }
 
-func (f *fakePlanificacionRepo) UpsertEnergia(_ context.Context, rows []planificacion.EnergiaRow) (int, int, error) {
-	f.upsertCalls++
-	f.energiaRows = rows
-	return f.energiaIns, f.energiaUpd, f.upsertErr
-}
-
 func (f *fakePlanificacionRepo) ListPlan(context.Context, string, time.Time, time.Time) ([]planificacion.PlanRow, error) {
 	return nil, nil
 }
 
 func (f *fakePlanificacionRepo) ListParadas(context.Context, string, time.Time, time.Time) ([]planificacion.ParadaRow, error) {
-	return nil, nil
-}
-
-func (f *fakePlanificacionRepo) ListEnergia(context.Context, string, time.Time, time.Time) ([]planificacion.EnergiaRow, error) {
 	return nil, nil
 }
 
@@ -105,22 +93,12 @@ func (f *fakePlanificacionRepo) ListParadaItems(_ context.Context, filtro planif
 	return planificacion.Listado[planificacion.ParadaItem]{}, f.listadoErr
 }
 
-func (f *fakePlanificacionRepo) ListEnergiaItems(_ context.Context, filtro planificacion.FiltroListado) (planificacion.Listado[planificacion.EnergiaItem], error) {
-	f.listadoFiltro = filtro
-	return planificacion.Listado[planificacion.EnergiaItem]{}, f.listadoErr
-}
-
 func (f *fakePlanificacionRepo) DeletePlan(context.Context, string) (bool, error) {
 	f.deleteLlamado = true
 	return f.deleteOK, f.deleteErr
 }
 
 func (f *fakePlanificacionRepo) DeleteParada(context.Context, string) (bool, error) {
-	f.deleteLlamado = true
-	return f.deleteOK, f.deleteErr
-}
-
-func (f *fakePlanificacionRepo) DeleteEnergia(context.Context, string) (bool, error) {
 	f.deleteLlamado = true
 	return f.deleteOK, f.deleteErr
 }
@@ -341,25 +319,6 @@ func TestImportarParadas_CSVValidoConLoteOpcional(t *testing.T) {
 	assert.Empty(t, repo.paradaRows[1].LoteID)
 }
 
-func TestImportarEnergia_CSVValidoConGasOpcional(t *testing.T) {
-	repo := fakePlanRepoValido()
-	repo.energiaIns = 2
-	svc := NewService(repo)
-
-	csv := "sector_id,lote_id,periodo_inicio,periodo_fin,kwh,gas_m3\n" +
-		"s1,lote-1,2026-11-04 06:00,2026-11-04 14:00,120.5,30.25\n" +
-		"s1,,2026-11-04 14:00,2026-11-04 22:00,0,\n"
-	res, err := svc.ImportarEnergia(context.Background(), strings.NewReader(csv))
-	require.NoError(t, err)
-	assert.Equal(t, 2, res.Procesadas)
-	assert.Equal(t, 2, res.Insertadas)
-	require.Len(t, repo.energiaRows, 2)
-	require.NotNil(t, repo.energiaRows[0].GasM3)
-	assert.Equal(t, 30.25, *repo.energiaRows[0].GasM3)
-	assert.Nil(t, repo.energiaRows[1].GasM3)
-	assert.Equal(t, "lote-1", repo.energiaRows[0].LoteID)
-}
-
 func servicioListado() (*Service, *fakePlanificacionRepo) {
 	repo := &fakePlanificacionRepo{}
 	svc := NewService(repo)
@@ -392,12 +351,12 @@ func TestListarParadas_FiltroSectorYLimiteTope(t *testing.T) {
 	assert.Equal(t, limiteMaximo, repo.listadoFiltro.Limite)
 
 	// Limite no positivo cae al default.
-	_, err = svc.ListarEnergia(context.Background(), Query{Limite: "0"})
+	_, err = svc.ListarParadas(context.Background(), Query{Limite: "0"})
 	require.NoError(t, err)
 	assert.Equal(t, limiteDefault, repo.listadoFiltro.Limite)
 }
 
-func TestListarEnergia_Validaciones(t *testing.T) {
+func TestListarPlan_Validaciones(t *testing.T) {
 	svc := NewService(&fakePlanificacionRepo{})
 
 	casos := []struct {
@@ -412,7 +371,7 @@ func TestListarEnergia_Validaciones(t *testing.T) {
 	}
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
-			_, err := svc.ListarEnergia(context.Background(), c.q)
+			_, err := svc.ListarPlan(context.Background(), c.q)
 			assert.ErrorIs(t, err, c.err)
 		})
 	}
@@ -431,5 +390,5 @@ func TestEliminar_ValidacionUUIDYNoEncontrado(t *testing.T) {
 	assert.ErrorIs(t, err, planificacion.ErrNoEncontrado)
 
 	repo.deleteOK = true
-	assert.NoError(t, svc.EliminarEnergia(ctx, "11111111-1111-1111-1111-111111111111"))
+	assert.NoError(t, svc.EliminarParada(ctx, "11111111-1111-1111-1111-111111111111"))
 }

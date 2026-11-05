@@ -1,4 +1,4 @@
-# Smart-Check Automation — Backend (Go)
+# SmartCheck Automation — Backend (Go)
 
 ## Contexto del proyecto
 Sistema de supervisión inteligente para hornos túnel (Fermar S.A.).

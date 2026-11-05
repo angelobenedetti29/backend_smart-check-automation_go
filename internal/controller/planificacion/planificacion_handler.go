@@ -1,5 +1,5 @@
-// Package controller expone los endpoints de importación CSV de planificación,
-// paradas y energía (fase 1 de OEE).
+// Package controller expone los endpoints de importación CSV de planificación y
+// paradas (fase 1 de OEE).
 package controller
 
 import (
@@ -30,15 +30,12 @@ const (
 type PlanificacionService interface {
 	ImportarPlan(ctx context.Context, input io.Reader) (planificacion.ImportResult, error)
 	ImportarParadas(ctx context.Context, input io.Reader) (planificacion.ImportResult, error)
-	ImportarEnergia(ctx context.Context, input io.Reader) (planificacion.ImportResult, error)
 
 	ListarPlan(ctx context.Context, q service.Query) (planificacion.Listado[planificacion.PlanItem], error)
 	ListarParadas(ctx context.Context, q service.Query) (planificacion.Listado[planificacion.ParadaItem], error)
-	ListarEnergia(ctx context.Context, q service.Query) (planificacion.Listado[planificacion.EnergiaItem], error)
 
 	EliminarPlan(ctx context.Context, id string) error
 	EliminarParada(ctx context.Context, id string) error
-	EliminarEnergia(ctx context.Context, id string) error
 }
 
 // Handler maneja las importaciones CSV de planificación.
@@ -71,17 +68,7 @@ func (h *Handler) HandleParadasImport(w http.ResponseWriter, r *http.Request) {
 	h.respond(w, err, "Paradas importadas", res)
 }
 
-// HandleEnergiaImport maneja POST /api/v1/planificacion/energia/import.
-func (h *Handler) HandleEnergiaImport(w http.ResponseWriter, r *http.Request) {
-	data, ok := readCSVBody(w, r)
-	if !ok {
-		return
-	}
-	res, err := h.service.ImportarEnergia(r.Context(), bytes.NewReader(data))
-	h.respond(w, err, "Energía importada", res)
-}
-
-// HandleSubtree maneja /api/v1/planificacion/{plan|paradas|energia}[/{id}]:
+// HandleSubtree maneja /api/v1/planificacion/{plan|paradas}[/{id}]:
 // GET lista el período y DELETE {id} borra un registro. Los POST de import
 // tienen rutas exactas propias y no pasan por acá.
 func (h *Handler) HandleSubtree(w http.ResponseWriter, r *http.Request) {
@@ -130,9 +117,6 @@ func (h *Handler) listar(w http.ResponseWriter, r *http.Request, tipo string) {
 	case "paradas":
 		res, err := h.service.ListarParadas(r.Context(), query)
 		h.responderListado(w, err, "Paradas obtenidas", res)
-	case "energia":
-		res, err := h.service.ListarEnergia(r.Context(), query)
-		h.responderListado(w, err, "Energía obtenida", res)
 	default:
 		response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
 	}
@@ -146,8 +130,6 @@ func (h *Handler) eliminar(w http.ResponseWriter, r *http.Request, tipo, id stri
 		err = h.service.EliminarPlan(r.Context(), id)
 	case "paradas":
 		err = h.service.EliminarParada(r.Context(), id)
-	case "energia":
-		err = h.service.EliminarEnergia(r.Context(), id)
 	default:
 		response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
 		return

@@ -1,5 +1,5 @@
 -- ============================================================================
--- Smart-Check Automation — Fermar S.A.
+-- SmartCheck Automation — Fermar S.A.
 -- Esquema de Base de Datos PostgreSQL (MVP)
 -- Versión: 1.1
 -- Motor:  PostgreSQL 16 (Supabase)
@@ -15,14 +15,14 @@
 
 BEGIN;
 
--- Defensas de la migración: si otra sesión retiene un lock o el DDL se cuelga,
--- abortamos en vez de bloquear el arranque indefinidamente. El advisory lock de
--- abajo queda acotado por lock_timeout; el resto de la migración por
--- statement_timeout.
+-- Defensas de la aplicación del esquema: si otra sesión retiene un lock o el
+-- DDL se cuelga, abortamos en vez de bloquear el arranque indefinidamente. El
+-- advisory lock de abajo queda acotado por lock_timeout; el resto de la
+-- aplicación por statement_timeout.
 SET lock_timeout = '3s';
 SET statement_timeout = '60s';
 
--- Serialize the complete migration before any extension, table or seed DDL.
+-- Serialize the complete schema application before any extension, table or seed DDL.
 SELECT pg_advisory_xact_lock(hashtextextended('smart-check:schema', 0));
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -31,281 +31,57 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- TABLA 1: productos (Catálogo maestro de productos panificados)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS productos (
-    id          UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    nombre      VARCHAR(100)    NOT NULL,
-    capacidad_nominal_kg_h NUMERIC(10,3),
-    created_at  TIMESTAMPTZ     NOT NULL DEFAULT now()
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    nombre character varying(100) NOT NULL,
+    capacidad_nominal_kg_h numeric(10,3),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    peso_referencia_kg numeric(10,3) NOT NULL,
+    tolerancia_peso_pct numeric(5,2) NOT NULL,
+    dimension_base_cm numeric(6,2) NOT NULL,
+    tolerancia_dimension_cm numeric(6,2) NOT NULL,
+    temp_min numeric(6,2) NOT NULL,
+    temp_max numeric(6,2) NOT NULL,
+    velocidad_cinta_min numeric(6,2) NOT NULL,
+    velocidad_cinta_max numeric(6,2) NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    temp_setpoint numeric(6,2),
+    velocidad_cinta_setpoint numeric(6,2),
+    activo boolean DEFAULT true NOT NULL,
+    delta_temp1_max_c numeric(5,2) DEFAULT 10.0 NOT NULL,
+    delta_vel_max numeric(5,3) DEFAULT 0.05 NOT NULL,
+    CONSTRAINT chk_productos_capacidad_nominal_positiva CHECK (((capacidad_nominal_kg_h IS NULL) OR (capacidad_nominal_kg_h > (0)::numeric))),
+    CONSTRAINT chk_productos_delta_temp1_pos CHECK ((delta_temp1_max_c > (0)::numeric)),
+    CONSTRAINT chk_productos_delta_vel_pos CHECK ((delta_vel_max > (0)::numeric)),
+    CONSTRAINT chk_productos_dimension_positiva CHECK ((dimension_base_cm > (0)::numeric)),
+    CONSTRAINT chk_productos_peso_positivo CHECK ((peso_referencia_kg > (0)::numeric)),
+    CONSTRAINT chk_productos_temp_rango CHECK ((temp_max > temp_min)),
+    CONSTRAINT chk_productos_temp_setpoint_rango CHECK (((temp_setpoint IS NULL) OR ((temp_setpoint >= temp_min) AND (temp_setpoint <= temp_max)))),
+    CONSTRAINT chk_productos_tolerancia_dimension CHECK ((tolerancia_dimension_cm >= (0)::numeric)),
+    CONSTRAINT chk_productos_tolerancia_peso CHECK ((tolerancia_peso_pct >= (0)::numeric)),
+    CONSTRAINT chk_productos_velocidad_rango CHECK ((velocidad_cinta_max > velocidad_cinta_min)),
+    CONSTRAINT chk_productos_velocidad_setpoint_rango CHECK (((velocidad_cinta_setpoint IS NULL) OR ((velocidad_cinta_setpoint >= velocidad_cinta_min) AND (velocidad_cinta_setpoint <= velocidad_cinta_max)))),
+    CONSTRAINT productos_pkey PRIMARY KEY (id)
 );
 
-COMMENT ON TABLE  productos      IS 'Catálogo maestro de productos panificados de Fermar S.A.';
-COMMENT ON COLUMN productos.id   IS 'Identificador único universal del producto';
+COMMENT ON TABLE productos IS 'Catálogo maestro de productos panificados de Fermar S.A.';
+COMMENT ON COLUMN productos.id IS 'Identificador único universal del producto';
 COMMENT ON COLUMN productos.nombre IS 'Nombre descriptivo del producto (ej: Tostada Integral, Pan Francés)';
-
--- ============================================================================
--- Unificación con parametros_producto (idempotente, ejecuta una sola vez)
--- Los parámetros de control de horneado pasan a ser columnas del producto.
--- ============================================================================
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS peso_referencia_kg      NUMERIC(10,3);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS tolerancia_peso_pct     NUMERIC(5,2);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS dimension_base_cm       NUMERIC(6,2);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS tolerancia_dimension_cm NUMERIC(6,2);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS temp_min                NUMERIC(6,2);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS temp_max                NUMERIC(6,2);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_min     NUMERIC(6,2);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_max     NUMERIC(6,2);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS updated_at              TIMESTAMPTZ     NOT NULL DEFAULT now();
--- Setpoints puntuales opcionales: sólo se usan si se reactiva el despacho
--- automático de consigna (SCA-142). Nullable.
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS temp_setpoint             NUMERIC(6,2);
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS velocidad_cinta_setpoint  NUMERIC(6,2);
--- Capacidad nominal de producción del producto (kg/h); nullable hasta que se
--- cargue por catálogo o por importación.
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS capacidad_nominal_kg_h    NUMERIC(10,3);
-
-COMMENT ON COLUMN productos.peso_referencia_kg      IS 'Peso patrón/ideal de una unidad del producto (kg)';
-COMMENT ON COLUMN productos.tolerancia_peso_pct     IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
-COMMENT ON COLUMN productos.dimension_base_cm       IS 'Dimensión base/tamaño ideal del producto (cm)';
+COMMENT ON COLUMN productos.capacidad_nominal_kg_h IS 'Capacidad nominal de producción del producto en kg por hora; nullable, si se informa debe ser mayor a 0';
+COMMENT ON COLUMN productos.peso_referencia_kg IS 'Peso patrón/ideal de una unidad del producto (kg)';
+COMMENT ON COLUMN productos.tolerancia_peso_pct IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
+COMMENT ON COLUMN productos.dimension_base_cm IS 'Dimensión base/tamaño ideal del producto (cm)';
 COMMENT ON COLUMN productos.tolerancia_dimension_cm IS 'Tolerancia de tamaño admitida sobre la dimensión base (cm)';
-COMMENT ON COLUMN productos.temp_min                IS 'Temperatura mínima aceptable de horneado (°C)';
-COMMENT ON COLUMN productos.temp_max                IS 'Temperatura máxima aceptable de horneado (°C)';
-COMMENT ON COLUMN productos.velocidad_cinta_min     IS 'Velocidad mínima aceptable de la cinta transportadora (m/s)';
-COMMENT ON COLUMN productos.velocidad_cinta_max     IS 'Velocidad máxima aceptable de la cinta transportadora (m/s)';
-COMMENT ON COLUMN productos.updated_at              IS 'Marca temporal de la última modificación del registro';
-COMMENT ON COLUMN productos.temp_setpoint             IS 'Temperatura objetivo dentro de [temp_min, temp_max]; nullable, opcional, sólo usado si se reactiva el despacho automático (SCA-142)';
+COMMENT ON COLUMN productos.temp_min IS 'Temperatura mínima aceptable de horneado (°C)';
+COMMENT ON COLUMN productos.temp_max IS 'Temperatura máxima aceptable de horneado (°C)';
+COMMENT ON COLUMN productos.velocidad_cinta_min IS 'Velocidad mínima aceptable de la cinta transportadora (m/s)';
+COMMENT ON COLUMN productos.velocidad_cinta_max IS 'Velocidad máxima aceptable de la cinta transportadora (m/s)';
+COMMENT ON COLUMN productos.updated_at IS 'Marca temporal de la última modificación del registro';
+COMMENT ON COLUMN productos.temp_setpoint IS 'Temperatura objetivo dentro de [temp_min, temp_max]; nullable, opcional, sólo usado si se reactiva el despacho automático (SCA-142)';
 COMMENT ON COLUMN productos.velocidad_cinta_setpoint IS 'Velocidad objetivo dentro de [velocidad_cinta_min, velocidad_cinta_max]; nullable, opcional';
-COMMENT ON COLUMN productos.capacidad_nominal_kg_h   IS 'Capacidad nominal de producción del producto en kg por hora; nullable, si se informa debe ser mayor a 0';
+COMMENT ON COLUMN productos.activo IS 'Vigencia del producto en el catálogo: false = retirado (no se ofrece para elegir, sigue resolviendo lotes históricos)';
+COMMENT ON COLUMN productos.delta_temp1_max_c IS 'Máxima variación permitida de T1 por ciclo del optimizador (°C/cycle)';
+COMMENT ON COLUMN productos.delta_vel_max IS 'Máxima variación permitida de velocidad de cinta por ciclo (m/s/cycle)';
 
--- Backfill desde la tabla legada parametros_producto (si existe) antes de dropearla.
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'parametros_producto') THEN
-    UPDATE productos p SET
-      peso_referencia_kg      = pp.peso_referencia_kg,
-      tolerancia_peso_pct     = pp.tolerancia_peso_pct,
-      dimension_base_cm       = pp.dimension_base_cm,
-      tolerancia_dimension_cm = pp.tolerancia_dimension_cm,
-      temp_min                = pp.temp_min,
-      temp_max                = pp.temp_max,
-      velocidad_cinta_min     = pp.velocidad_cinta_min,
-      velocidad_cinta_max     = pp.velocidad_cinta_max,
-      updated_at              = pp.updated_at
-    FROM parametros_producto pp
-    WHERE p.id = pp.producto_id;
-  END IF;
-END $$;
-
--- Backfill defensivo: cualquier fila NULL se rellena con valores seguros
--- antes de promover a NOT NULL. Los seeds ya cargan valores válidos.
-UPDATE productos SET peso_referencia_kg = 0.001 WHERE peso_referencia_kg IS NULL;
-UPDATE productos SET tolerancia_peso_pct = 0 WHERE tolerancia_peso_pct IS NULL;
-UPDATE productos SET dimension_base_cm = 0.001 WHERE dimension_base_cm IS NULL;
-UPDATE productos SET tolerancia_dimension_cm = 0 WHERE tolerancia_dimension_cm IS NULL;
-UPDATE productos SET temp_min = 0 WHERE temp_min IS NULL;
-UPDATE productos SET temp_max = 0.001 WHERE temp_max IS NULL;
-UPDATE productos SET velocidad_cinta_min = 0 WHERE velocidad_cinta_min IS NULL;
-UPDATE productos SET velocidad_cinta_max = 0.001 WHERE velocidad_cinta_max IS NULL;
-
--- Traslada los CHECK constraints de chk_parametros_* a chk_productos_*.
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'parametros_producto') THEN
-    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_peso_positivo;
-    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_tolerancia_peso;
-    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_dimension_positiva;
-    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_tolerancia_dimension;
-    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_temp_rango;
-    ALTER TABLE parametros_producto DROP CONSTRAINT IF EXISTS chk_parametros_velocidad_rango;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_peso_positivo') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_peso_positivo CHECK (peso_referencia_kg > 0);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_tolerancia_peso') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_tolerancia_peso CHECK (tolerancia_peso_pct >= 0);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_dimension_positiva') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_dimension_positiva CHECK (dimension_base_cm > 0);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_tolerancia_dimension') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_tolerancia_dimension CHECK (tolerancia_dimension_cm >= 0);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_temp_rango') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_temp_rango CHECK (temp_max > temp_min);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_velocidad_rango') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_velocidad_rango CHECK (velocidad_cinta_max > velocidad_cinta_min);
-  END IF;
-END $$;
-
--- Rangos de los setpoints opcionales (NULL siempre permitido).
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_temp_setpoint_rango') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_temp_setpoint_rango
-      CHECK (temp_setpoint IS NULL OR (temp_setpoint >= temp_min AND temp_setpoint <= temp_max));
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_velocidad_setpoint_rango') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_velocidad_setpoint_rango
-      CHECK (velocidad_cinta_setpoint IS NULL OR (velocidad_cinta_setpoint >= velocidad_cinta_min AND velocidad_cinta_setpoint <= velocidad_cinta_max));
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_capacidad_nominal_positiva') THEN
-    ALTER TABLE productos ADD CONSTRAINT chk_productos_capacidad_nominal_positiva
-      CHECK (capacidad_nominal_kg_h IS NULL OR capacidad_nominal_kg_h > 0);
-  END IF;
-END $$;
-
--- La tabla legada queda sin uso una vez migrados los datos.
-DROP TABLE IF EXISTS parametros_producto;
-
--- Promueve los parámetros de control a NOT NULL. El backfill defensivo de
--- arriba garantiza que no queden NULL; ALTER COLUMN SET NOT NULL es idempotente.
-DO $$
-DECLARE
-  null_count INTEGER;
-BEGIN
-  SELECT COUNT(*) INTO null_count FROM productos WHERE peso_referencia_kg IS NULL;
-  IF null_count = 0 THEN
-    ALTER TABLE productos ALTER COLUMN peso_referencia_kg SET NOT NULL;
-  END IF;
-
-  SELECT COUNT(*) INTO null_count FROM productos WHERE tolerancia_peso_pct IS NULL;
-  IF null_count = 0 THEN
-    ALTER TABLE productos ALTER COLUMN tolerancia_peso_pct SET NOT NULL;
-  END IF;
-
-  SELECT COUNT(*) INTO null_count FROM productos WHERE dimension_base_cm IS NULL;
-  IF null_count = 0 THEN
-    ALTER TABLE productos ALTER COLUMN dimension_base_cm SET NOT NULL;
-  END IF;
-
-  SELECT COUNT(*) INTO null_count FROM productos WHERE tolerancia_dimension_cm IS NULL;
-  IF null_count = 0 THEN
-    ALTER TABLE productos ALTER COLUMN tolerancia_dimension_cm SET NOT NULL;
-  END IF;
-
-  SELECT COUNT(*) INTO null_count FROM productos WHERE temp_min IS NULL;
-  IF null_count = 0 THEN
-    ALTER TABLE productos ALTER COLUMN temp_min SET NOT NULL;
-  END IF;
-
-  SELECT COUNT(*) INTO null_count FROM productos WHERE temp_max IS NULL;
-  IF null_count = 0 THEN
-    ALTER TABLE productos ALTER COLUMN temp_max SET NOT NULL;
-  END IF;
-
-  SELECT COUNT(*) INTO null_count FROM productos WHERE velocidad_cinta_min IS NULL;
-  IF null_count = 0 THEN
-    ALTER TABLE productos ALTER COLUMN velocidad_cinta_min SET NOT NULL;
-  END IF;
-
-  SELECT COUNT(*) INTO null_count FROM productos WHERE velocidad_cinta_max IS NULL;
-  IF null_count = 0 THEN
-    ALTER TABLE productos ALTER COLUMN velocidad_cinta_max SET NOT NULL;
-  END IF;
-END $$;
-
--- ============================================================================
--- TABLA 2: lotes_productivos (Registro transaccional de lotes horneados)
--- ============================================================================
-CREATE TABLE IF NOT EXISTS lotes_productivos (
-    id                  UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    producto_id         UUID            NOT NULL,
-    turno               VARCHAR(10)     NOT NULL,
-    inicio_at           TIMESTAMPTZ     NOT NULL,
-    fin_at              TIMESTAMPTZ     NOT NULL,
-    total_unidades      INTEGER         NOT NULL,
-    correctos           INTEGER         NOT NULL,
-    quemados            INTEGER         NOT NULL,
-    crudas              INTEGER,
-    correctos_kg        NUMERIC(12,3)   NOT NULL,
-    quemados_kg         NUMERIC(12,3)   NOT NULL,
-    crudos_kg           NUMERIC(12,3),
-    temp_horno_1        NUMERIC(6,2),
-    temp_comb_horno_1   NUMERIC(6,2),
-    velocidad_cinta     NUMERIC(6,2),
-    created_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
-
-    -- FOREIGN KEY: garantiza integridad referencial con la tabla maestra
-    CONSTRAINT fk_lotes_productos
-        FOREIGN KEY (producto_id)
-        REFERENCES productos (id)
-        ON DELETE RESTRICT
-        ON UPDATE CASCADE,
-
-    -- RESTRICCIONES DE DOMINIO (Check Constraints)
-
-    -- Turno limitado a los 3 valores definidos por el negocio
-    CONSTRAINT chk_lotes_turno
-        CHECK (turno IN ('mañana', 'tarde', 'noche')),
-
-    -- Total de unidades no negativo (permite lote vacío para cero operativo)
-    CONSTRAINT chk_lotes_total_unidades_no_negativo
-        CHECK (total_unidades >= 0),
-
-    -- Los panes correctos no pueden ser negativos
-    CONSTRAINT chk_lotes_correctos_no_negativo
-        CHECK (correctos >= 0),
-
-    -- Los panes quemados no pueden ser negativos
-    CONSTRAINT chk_lotes_quemados_no_negativo
-        CHECK (quemados >= 0),
-
-    -- Los panes crudos no pueden ser negativos
-    CONSTRAINT chk_lotes_crudas_no_negativo
-        CHECK (crudas >= 0),
-
-    -- Consistencia: la suma de correctos + quemados + crudas no puede exceder el total
-    CONSTRAINT chk_lotes_sum_unidades_consistente
-        CHECK (correctos + quemados + COALESCE(crudas, 0) <= total_unidades),
-
-    -- Consistencia temporal: fin no puede ser anterior a inicio
-    CONSTRAINT chk_lotes_fin_after_inicio
-        CHECK (fin_at >= inicio_at)
-);
-
-COMMENT ON TABLE  lotes_productivos          IS 'Registro transaccional de lotes productivos horneados. Cada fila representa una horneada completa de un producto en un turno.';
-COMMENT ON COLUMN lotes_productivos.id        IS 'Identificador UUID del lote productivo';
-COMMENT ON COLUMN lotes_productivos.producto_id IS 'FK al catálogo de productos';
-COMMENT ON COLUMN lotes_productivos.turno     IS 'Turno de producción: mañana, tarde o noche';
-COMMENT ON COLUMN lotes_productivos.inicio_at IS 'Marca temporal de inicio de la horneada';
-COMMENT ON COLUMN lotes_productivos.fin_at    IS 'Marca temporal de fin de la horneada';
-COMMENT ON COLUMN lotes_productivos.total_unidades IS 'Total de unidades horneadas en el lote';
-COMMENT ON COLUMN lotes_productivos.correctos IS 'Unidades en estado correcto (aprobadas)';
-COMMENT ON COLUMN lotes_productivos.quemados  IS 'Unidades quemadas (rechazadas)';
-COMMENT ON COLUMN lotes_productivos.crudas    IS 'Unidades crudas / sin clasificar (nullable)';
-COMMENT ON COLUMN lotes_productivos.correctos_kg IS 'Peso total ESTIMADO en kg de panes correctos = correctos × productos.peso_referencia_kg (3 decimales)';
-COMMENT ON COLUMN lotes_productivos.quemados_kg  IS 'Peso total ESTIMADO en kg de panes quemados = quemados × productos.peso_referencia_kg (3 decimales)';
-COMMENT ON COLUMN lotes_productivos.crudos_kg    IS 'Peso total ESTIMADO en kg de panes crudos = crudas × productos.peso_referencia_kg (3 decimales, nullable)';
-COMMENT ON COLUMN lotes_productivos.temp_horno_1 IS 'Temperatura del horno 1 al inicio (°C)';
-COMMENT ON COLUMN lotes_productivos.temp_comb_horno_1 IS 'Temperatura de la cámara de combustión del horno 1 (°C, nullable)';
-COMMENT ON COLUMN lotes_productivos.velocidad_cinta IS 'Velocidad de la cinta transportadora del horno (m/s)';
-
--- ============================================================================
--- ÍNDICES (Indexes)
--- ============================================================================
-
--- Índice para búsquedas por producto (FK lookup)
-CREATE INDEX IF NOT EXISTS idx_lotes_producto_id
-    ON lotes_productivos (producto_id);
-
--- Índice para filtros por rango de fecha de inicio
-CREATE INDEX IF NOT EXISTS idx_lotes_inicio_at
-    ON lotes_productivos (inicio_at);
-
--- Índice compuesto para la consulta más frecuente: todos los lotes de un
--- producto en un rango de fechas
-CREATE INDEX IF NOT EXISTS idx_lotes_producto_fecha
-    ON lotes_productivos (producto_id, inicio_at);
-
--- Índice para ordenamiento por creación
-CREATE INDEX IF NOT EXISTS idx_lotes_created_at
-    ON lotes_productivos (created_at);
-
--- ============================================================================
--- SEED: Datos de catálogo de productos
--- El producto de referencia incluye sus parámetros de control embebidos.
--- ============================================================================
 INSERT INTO productos (
     id, nombre,
     peso_referencia_kg, tolerancia_peso_pct,
@@ -319,185 +95,6 @@ INSERT INTO productos (
 )
 ON CONFLICT (id) DO NOTHING;
 
--- ============================================================================
--- TABLA 4: dispositivos (Catálogo de nodos Raspberry Pi / SBC de monitoreo)
--- ============================================================================
-CREATE TABLE IF NOT EXISTS dispositivos (
-    id             UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
-    nombre         VARCHAR(100)   NOT NULL,
-    rename_url     TEXT,
-    rename_token   TEXT,
-    created_at     TIMESTAMPTZ    NOT NULL DEFAULT now()
-);
-
-COMMENT ON TABLE  dispositivos     IS 'Catálogo de nodos Raspberry Pi que reportan telemetría al backend';
-COMMENT ON COLUMN dispositivos.id        IS 'Identificador UUID del dispositivo';
-COMMENT ON COLUMN dispositivos.nombre    IS 'Nombre descriptivo del dispositivo (ej: Raspberry Pi Horno 1)';
-
--- ============================================================================
--- TABLA 5: metricas_dispositivo (Historial append-only de telemetría)
--- ============================================================================
-CREATE TABLE IF NOT EXISTS metricas_dispositivo (
-    id                    UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    dispositivo_id        UUID            NOT NULL,
-    cpu_pct               NUMERIC(5,2)    NOT NULL CHECK (cpu_pct BETWEEN 0 AND 100),
-    mem_ram_disponible_mb NUMERIC(10,2)   NOT NULL CHECK (mem_ram_disponible_mb >= 0),
-    mem_ram_total_mb      NUMERIC(10,2),
-    almacenamiento_disponible_mb NUMERIC(12,2),
-    almacenamiento_total_mb      NUMERIC(12,2),
-    temp_chip             NUMERIC(6,2)    NOT NULL,
-    ai_processor_pct      NUMERIC(5,2)    NOT NULL CHECK (ai_processor_pct BETWEEN 0 AND 100),
-    received_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
-
-    -- FOREIGN KEY: garantiza integridad referencial con el catálogo de dispositivos
-    CONSTRAINT fk_metricas_dispositivo_dispositivo
-        FOREIGN KEY (dispositivo_id)
-        REFERENCES dispositivos (id)
-        ON DELETE CASCADE
-        ON UPDATE CASCADE
-);
-
-COMMENT ON TABLE  metricas_dispositivo            IS 'Historial append-only de telemetría reportada por cada dispositivo (CPU, RAM, almacenamiento y temperatura del chip)';
-COMMENT ON COLUMN metricas_dispositivo.id                    IS 'Identificador UUID del registro de métricas';
-COMMENT ON COLUMN metricas_dispositivo.dispositivo_id        IS 'FK al catálogo de dispositivos';
-COMMENT ON COLUMN metricas_dispositivo.cpu_pct               IS 'Uso de CPU en porcentaje (0-100)';
-COMMENT ON COLUMN metricas_dispositivo.mem_ram_disponible_mb IS 'Memoria RAM disponible en MB';
-COMMENT ON COLUMN metricas_dispositivo.temp_chip             IS 'Temperatura interna del chip en °C';
-COMMENT ON COLUMN metricas_dispositivo.received_at           IS 'Marca temporal en que el backend recibió la métrica';
-
--- Índice para la consulta más frecuente: historial por dispositivo ordenado por tiempo
-CREATE INDEX IF NOT EXISTS idx_metricas_dispositivo_disp_received
-    ON metricas_dispositivo (dispositivo_id, received_at DESC);
-
--- ============================================================================
--- ALTER: metricas_dispositivo — uso del procesador de IA (NPU) (SCA-172)
--- Idempotente para bases existentes: agrega la columna solo si falta.
--- ============================================================================
-ALTER TABLE metricas_dispositivo
-    ADD COLUMN IF NOT EXISTS ai_processor_pct NUMERIC(5,2) NOT NULL DEFAULT 0
-        CHECK (ai_processor_pct BETWEEN 0 AND 100);
-
-COMMENT ON COLUMN metricas_dispositivo.ai_processor_pct IS 'Uso del procesador de IA (NPU) en porcentaje (0-100)';
-
--- ============================================================================
--- ALTER: metricas_dispositivo — capacidad de memoria y almacenamiento (SCA-36)
--- Idempotente para bases existentes. Las columnas quedan nullable para aceptar
--- pings legacy que solo informan memoria RAM disponible.
--- ============================================================================
-ALTER TABLE metricas_dispositivo
-    ADD COLUMN IF NOT EXISTS mem_ram_total_mb NUMERIC(10,2),
-    ADD COLUMN IF NOT EXISTS almacenamiento_disponible_mb NUMERIC(12,2),
-    ADD COLUMN IF NOT EXISTS almacenamiento_total_mb NUMERIC(12,2);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_mem_ram_total_no_negativo') THEN
-        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_mem_ram_total_no_negativo
-            CHECK (mem_ram_total_mb IS NULL OR mem_ram_total_mb >= 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_mem_ram_disponible_no_supera_total') THEN
-        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_mem_ram_disponible_no_supera_total
-            CHECK (mem_ram_total_mb IS NULL OR mem_ram_disponible_mb <= mem_ram_total_mb);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_almacenamiento_disponible_no_negativo') THEN
-        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_almacenamiento_disponible_no_negativo
-            CHECK (almacenamiento_disponible_mb IS NULL OR almacenamiento_disponible_mb >= 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_almacenamiento_total_no_negativo') THEN
-        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_almacenamiento_total_no_negativo
-            CHECK (almacenamiento_total_mb IS NULL OR almacenamiento_total_mb >= 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_almacenamiento_par') THEN
-        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_almacenamiento_par
-            CHECK ((almacenamiento_disponible_mb IS NULL) = (almacenamiento_total_mb IS NULL));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_metricas_almacenamiento_disponible_no_supera_total') THEN
-        ALTER TABLE metricas_dispositivo ADD CONSTRAINT chk_metricas_almacenamiento_disponible_no_supera_total
-            CHECK (almacenamiento_total_mb IS NULL OR almacenamiento_disponible_mb IS NULL OR almacenamiento_disponible_mb <= almacenamiento_total_mb);
-    END IF;
-END $$;
-
-COMMENT ON COLUMN metricas_dispositivo.mem_ram_total_mb IS 'Memoria RAM total en MB (nullable para compatibilidad con pings legacy)';
-COMMENT ON COLUMN metricas_dispositivo.almacenamiento_disponible_mb IS 'Almacenamiento disponible en MB (nullable para compatibilidad con pings legacy)';
-COMMENT ON COLUMN metricas_dispositivo.almacenamiento_total_mb IS 'Almacenamiento total en MB (nullable para compatibilidad con pings legacy)';
-
--- ============================================================================
--- ALTER: dispositivos — cámara/stream WHEP y credencial de registro
--- Idempotente para bases existentes. whep_url y secret_hash quedan nullable:
--- un dispositivo sin cámara no expone stream y uno no registrado no tiene secret.
--- ============================================================================
-ALTER TABLE dispositivos
-    ADD COLUMN IF NOT EXISTS whep_url VARCHAR(500),
-    ADD COLUMN IF NOT EXISTS auth_status VARCHAR(12) NOT NULL DEFAULT 'unenrolled',
-    ADD COLUMN IF NOT EXISTS auth_updated_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS secret_hash VARCHAR(64);
-
--- El registro por solicitud/aprobación reemplaza la identidad Ed25519: el secret
--- se persiste sólo como SHA-256 hexadecimal (64 chars) y se resuelve por ese hash.
-ALTER TABLE dispositivos DROP COLUMN IF EXISTS current_key_fingerprint;
-DROP INDEX IF EXISTS idx_dispositivos_current_key;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_dispositivos_auth_status') THEN
-        ALTER TABLE dispositivos ADD CONSTRAINT chk_dispositivos_auth_status
-            CHECK (auth_status IN ('unenrolled', 'active', 'disabled', 'revoked'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_dispositivos_secret_revoked') THEN
-        ALTER TABLE dispositivos ADD CONSTRAINT chk_dispositivos_secret_revoked
-            CHECK (secret_hash IS NULL OR auth_status <> 'revoked');
-    END IF;
-END $$;
-
-CREATE UNIQUE INDEX IF NOT EXISTS uq_dispositivos_secret_hash
-    ON dispositivos (secret_hash) WHERE secret_hash IS NOT NULL;
-
-COMMENT ON COLUMN dispositivos.whep_url IS 'URL del stream WHEP de la cámara asociada al dispositivo (nullable: sin cámara configurada)';
-COMMENT ON COLUMN dispositivos.auth_status IS 'Estado de admisión del dispositivo (unenrolled/active/disabled/revoked), independiente del heartbeat';
-COMMENT ON COLUMN dispositivos.secret_hash IS 'SHA-256 hexadecimal del secret del dispositivo; NULL si no está registrado o fue revocado';
-
--- ============================================================================
--- ALTER: dispositivos — tipo de dispositivo (ENTRADA_HORNO/SALIDA_HORNO)
--- Idempotente para bases existentes. Nullable para no invalidar filas legadas.
--- ============================================================================
-ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS tipo VARCHAR(16);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_dispositivos_tipo') THEN
-        ALTER TABLE dispositivos ADD CONSTRAINT chk_dispositivos_tipo
-            CHECK (tipo IS NULL OR tipo IN ('ENTRADA_HORNO', 'SALIDA_HORNO'));
-    END IF;
-END $$;
-
-COMMENT ON COLUMN dispositivos.tipo IS 'Tipo/ubicación funcional del nodo en la línea: ENTRADA_HORNO o SALIDA_HORNO (nullable para filas legadas)';
-
--- ============================================================================
--- ALTER: dispositivos — URL de renombre del nodo y credencial del push
--- Idempotente para bases existentes. Reemplaza el anuncio previo por par
--- (listen_address/listen_port): se eliminan esas columnas y su CHECK, y se
--- agrega rename_url, la URL completa (esquema + host + puerto) que el nodo
--- expone para el push de renombre. rename_token es la credencial Bearer de un
--- solo uso que el backend usa para empujar el renombre. Ambas nullable: una Pi
--- legacy no anuncia URL y no recibe token (su push queda deshabilitado sin
--- romper el alta).
--- ============================================================================
-ALTER TABLE dispositivos DROP CONSTRAINT IF EXISTS chk_dispositivos_listen_port;
-ALTER TABLE dispositivos
-    DROP COLUMN IF EXISTS listen_address,
-    DROP COLUMN IF EXISTS listen_port;
-
-ALTER TABLE dispositivos
-    ADD COLUMN IF NOT EXISTS rename_url TEXT,
-    ADD COLUMN IF NOT EXISTS rename_token TEXT;
-
-COMMENT ON COLUMN dispositivos.rename_url IS 'URL completa (esquema + host + puerto) que el nodo expone para el push de renombre (PUT {rename_url}/api/v1/dispositivos/nombre); NULL = no anunciada (legacy)';
-COMMENT ON COLUMN dispositivos.rename_token IS 'Credencial Bearer entregada al nodo en el pickup; el backend la usa para empujar el renombre. Plaintext, NULL para dispositivos legacy o sin push';
-
--- ============================================================================
--- SEED: catálogo completo de las 6 variedades de panificados (SCA-142)
--- Incluye los parámetros de control embebidos de cada producto.
--- ============================================================================
 INSERT INTO productos (
     id, nombre,
     peso_referencia_kg, tolerancia_peso_pct,
@@ -512,40 +109,241 @@ INSERT INTO productos (
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
+-- TABLA 2: usuarios (Usuarios corporativos autorizados para la plataforma)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS usuarios (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    email character varying(254) NOT NULL,
+    nombre character varying(150) NOT NULL,
+    rol character varying(20) NOT NULL,
+    password_hash character varying(255),
+    activo boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_usuarios_email_formato CHECK (((email)::text ~* '^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$'::text)),
+    CONSTRAINT chk_usuarios_rol CHECK (rol IN ('Administrador', 'Supervisor', 'Operario')),
+    CONSTRAINT usuarios_email_key UNIQUE (email),
+    CONSTRAINT usuarios_pkey PRIMARY KEY (id)
+);
+
+COMMENT ON TABLE usuarios IS 'Usuarios corporativos autorizados para acceder a la plataforma Smart-Check.';
+COMMENT ON COLUMN usuarios.email IS 'Correo corporativo. Debe existir aquí para poder autenticarse.';
+COMMENT ON COLUMN usuarios.rol IS 'Nivel de acceso: Administrador, Supervisor u Operario.';
+COMMENT ON COLUMN usuarios.password_hash IS 'Hash bcrypt de la contraseña para autenticación local (nullable si solo usa OAuth).';
+COMMENT ON COLUMN usuarios.activo IS 'Revocar acceso sin eliminar el registro (activo=false)';
+
+INSERT INTO usuarios (email, nombre, rol, password_hash) VALUES
+    ('admin@fermar.com.ar',      'Administrador Fermar',  'Administrador', crypt('password123', gen_salt('bf', 10))),
+    ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    crypt('password123', gen_salt('bf', 10))),
+    ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      crypt('password123', gen_salt('bf', 10)))
+ON CONFLICT (email) DO NOTHING;
+
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_usuarios_email
+    ON usuarios USING btree (email);
+
+-- ============================================================================
+-- TABLA 3: sectores (Sectores de producción: línea ENTRADA/SALIDA)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS sectores (
+    id character varying(50) NOT NULL,
+    nombre character varying(100) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sectores_pkey PRIMARY KEY (id)
+);
+
+COMMENT ON TABLE sectores IS 'Sectores de producción: agrupan un dispositivo ENTRADA_HORNO y uno SALIDA_HORNO de la misma línea.';
+COMMENT ON COLUMN sectores.id IS 'Identificador legible del sector (ej: horno-1)';
+COMMENT ON COLUMN sectores.nombre IS 'Nombre para mostrar del sector (ej: Horno 1)';
+COMMENT ON COLUMN sectores.created_at IS 'Marca temporal de alta del sector';
+
+-- ============================================================================
+-- TABLA 4: dispositivos (Catálogo de nodos Raspberry Pi / SBC de monitoreo)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS dispositivos (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    nombre character varying(100) NOT NULL,
+    rename_url text,
+    rename_token text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    whep_url character varying(500),
+    auth_status character varying(12) DEFAULT 'unenrolled'::character varying NOT NULL,
+    auth_updated_at timestamp with time zone,
+    secret_hash character varying(64),
+    tipo character varying(16),
+    sector_id character varying(50),
+    CONSTRAINT chk_dispositivos_auth_status CHECK (auth_status IN ('unenrolled', 'active', 'disabled', 'revoked')),
+    CONSTRAINT chk_dispositivos_secret_revoked CHECK (((secret_hash IS NULL) OR ((auth_status)::text <> 'revoked'::text))),
+    CONSTRAINT chk_dispositivos_tipo CHECK (tipo IS NULL OR tipo IN ('ENTRADA_HORNO', 'SALIDA_HORNO')),
+    CONSTRAINT dispositivos_pkey PRIMARY KEY (id),
+    CONSTRAINT fk_dispositivos_sector FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE SET NULL
+);
+
+COMMENT ON TABLE dispositivos IS 'Catálogo de nodos Raspberry Pi que reportan telemetría al backend';
+COMMENT ON COLUMN dispositivos.id IS 'Identificador UUID del dispositivo';
+COMMENT ON COLUMN dispositivos.nombre IS 'Nombre descriptivo del dispositivo (ej: Raspberry Pi Horno 1)';
+COMMENT ON COLUMN dispositivos.rename_url IS 'URL completa (esquema + host + puerto) que el nodo expone para el push de renombre (PUT {rename_url}/api/v1/dispositivos/nombre); NULL = no anunciada (legacy)';
+COMMENT ON COLUMN dispositivos.rename_token IS 'Credencial Bearer entregada al nodo en el pickup; el backend la usa para empujar el renombre. Plaintext, NULL para dispositivos legacy o sin push';
+COMMENT ON COLUMN dispositivos.whep_url IS 'URL del stream WHEP de la cámara asociada al dispositivo (nullable: sin cámara configurada)';
+COMMENT ON COLUMN dispositivos.auth_status IS 'Estado de admisión del dispositivo (unenrolled/active/disabled/revoked), independiente del heartbeat';
+COMMENT ON COLUMN dispositivos.secret_hash IS 'SHA-256 hexadecimal del secret del dispositivo; NULL si no está registrado o fue revocado';
+COMMENT ON COLUMN dispositivos.tipo IS 'Tipo/ubicación funcional del nodo en la línea: ENTRADA_HORNO o SALIDA_HORNO (nullable para filas legadas)';
+COMMENT ON COLUMN dispositivos.sector_id IS 'Sector al que pertenece el dispositivo (nullable: dispositivo sin sector asignado)';
+
+-- Índices
+CREATE UNIQUE INDEX IF NOT EXISTS uq_dispositivos_secret_hash
+    ON dispositivos USING btree (secret_hash) WHERE (secret_hash IS NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_dispositivos_sector_tipo
+    ON dispositivos USING btree (sector_id, tipo) WHERE ((sector_id IS NOT NULL) AND (tipo IS NOT NULL));
+
+-- ============================================================================
+-- TABLA 5: lotes_productivos (Registro transaccional de lotes horneados)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS lotes_productivos (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    producto_id uuid NOT NULL,
+    turno character varying(10),
+    inicio_at timestamp with time zone NOT NULL,
+    fin_at timestamp with time zone,
+    total_unidades integer,
+    correctos integer,
+    quemados integer,
+    crudas integer,
+    correctos_kg numeric(12,3),
+    quemados_kg numeric(12,3),
+    crudos_kg numeric(12,3),
+    temp_horno_1 numeric(6,2),
+    temp_comb_horno_1 numeric(6,2),
+    velocidad_cinta numeric(6,2),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    dispositivo_id uuid,
+    sector_id character varying(50),
+    estado character varying(10) DEFAULT 'CERRADO'::character varying NOT NULL,
+    abierto_por uuid,
+    ultimo_evento_en timestamp with time zone,
+    motivo_cierre character varying(20),
+    abrir_idempotency_key character varying(64),
+    cerrar_idempotency_key character varying(64),
+    modo character varying(12) DEFAULT 'MANUAL'::character varying NOT NULL,
+    ventana_evaluacion_segundos integer DEFAULT 600 NOT NULL,
+    ventana_actualizacion_segundos integer DEFAULT 300 NOT NULL,
+    tolerancia_temp_c numeric(5,2) DEFAULT 2.0 NOT NULL,
+    umbral_aceptacion_crudo numeric(5,2) DEFAULT 5.0 NOT NULL,
+    umbral_aceptacion_quemado numeric(5,2) DEFAULT 5.0 NOT NULL,
+    pesos_objetivo jsonb DEFAULT '{"dc": 0.5, "dt": 0.05, "wc": 1.0, "wo": 1.0, "wq": 1.0}'::jsonb NOT NULL,
+    iniciado_manualmente boolean DEFAULT false NOT NULL,
+    temp1_objetivo numeric(6,2),
+    vel_objetivo numeric(6,3),
+    delta_temp1_max_c numeric(6,3),
+    delta_vel_max numeric(6,4),
+    confianza_promedio numeric(4,3),
+    CONSTRAINT chk_lotes_abierto_sector CHECK ((((estado)::text <> 'ABIERTO'::text) OR ((sector_id IS NOT NULL) AND (fin_at IS NULL)))),
+    CONSTRAINT chk_lotes_confianza_promedio CHECK (((confianza_promedio IS NULL) OR ((confianza_promedio >= (0)::numeric) AND (confianza_promedio <= (1)::numeric)))),
+    CONSTRAINT chk_lotes_correctos_no_negativo CHECK ((correctos >= 0)),
+    CONSTRAINT chk_lotes_crudas_no_negativo CHECK ((crudas >= 0)),
+    CONSTRAINT chk_lotes_delta_temp1_pos CHECK ((delta_temp1_max_c > (0)::numeric)),
+    CONSTRAINT chk_lotes_delta_vel_pos CHECK ((delta_vel_max > (0)::numeric)),
+    CONSTRAINT chk_lotes_estado CHECK (estado IN ('ABIERTO', 'CERRADO')),
+    CONSTRAINT chk_lotes_fin_after_inicio CHECK ((fin_at >= inicio_at)),
+    CONSTRAINT chk_lotes_modo CHECK (modo IN ('MANUAL', 'SUPERVISION', 'AUTOMATICO')),
+    CONSTRAINT chk_lotes_motivo_cierre CHECK (motivo_cierre IS NULL OR motivo_cierre IN ('sin_detecciones', 'manual', 'apagado', 'seguridad')),
+    CONSTRAINT chk_lotes_quemados_no_negativo CHECK ((quemados >= 0)),
+    CONSTRAINT chk_lotes_sum_unidades_consistente CHECK ((((correctos + quemados) + COALESCE(crudas, 0)) <= total_unidades)),
+    CONSTRAINT chk_lotes_tolerancia_temp_pos CHECK ((tolerancia_temp_c >= (0)::numeric)),
+    CONSTRAINT chk_lotes_total_unidades_no_negativo CHECK ((total_unidades >= 0)),
+    CONSTRAINT chk_lotes_turno CHECK (turno IN ('mañana', 'tarde', 'noche')),
+    CONSTRAINT chk_lotes_umbrales_aceptacion CHECK (((umbral_aceptacion_crudo >= (0)::numeric) AND (umbral_aceptacion_quemado >= (0)::numeric) AND (umbral_aceptacion_crudo <= (100)::numeric) AND (umbral_aceptacion_quemado <= (100)::numeric))),
+    CONSTRAINT chk_lotes_ventana_actualizacion_pos CHECK ((ventana_actualizacion_segundos > 0)),
+    CONSTRAINT chk_lotes_ventana_evaluacion_pos CHECK ((ventana_evaluacion_segundos > 0)),
+    CONSTRAINT lotes_productivos_pkey PRIMARY KEY (id),
+    CONSTRAINT fk_lotes_abierto_por FOREIGN KEY (abierto_por) REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_lotes_dispositivo FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_lotes_productos FOREIGN KEY (producto_id) REFERENCES productos(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_lotes_sector FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE RESTRICT
+);
+
+COMMENT ON TABLE lotes_productivos IS 'Registro transaccional de lotes productivos horneados. Cada fila representa una horneada completa de un producto en un turno.';
+COMMENT ON COLUMN lotes_productivos.id IS 'Identificador UUID del lote productivo';
+COMMENT ON COLUMN lotes_productivos.producto_id IS 'FK al catálogo de productos';
+COMMENT ON COLUMN lotes_productivos.turno IS 'Turno de producción: mañana, tarde o noche';
+COMMENT ON COLUMN lotes_productivos.inicio_at IS 'Marca temporal de inicio de la horneada';
+COMMENT ON COLUMN lotes_productivos.fin_at IS 'Marca temporal de fin de la horneada';
+COMMENT ON COLUMN lotes_productivos.total_unidades IS 'Total de unidades horneadas en el lote';
+COMMENT ON COLUMN lotes_productivos.correctos IS 'Unidades en estado correcto (aprobadas)';
+COMMENT ON COLUMN lotes_productivos.quemados IS 'Unidades quemadas (rechazadas)';
+COMMENT ON COLUMN lotes_productivos.crudas IS 'Unidades crudas / sin clasificar (nullable)';
+COMMENT ON COLUMN lotes_productivos.correctos_kg IS 'Peso total ESTIMADO en kg de panes correctos = correctos × productos.peso_referencia_kg (3 decimales)';
+COMMENT ON COLUMN lotes_productivos.quemados_kg IS 'Peso total ESTIMADO en kg de panes quemados = quemados × productos.peso_referencia_kg (3 decimales)';
+COMMENT ON COLUMN lotes_productivos.crudos_kg IS 'Peso total ESTIMADO en kg de panes crudos = crudas × productos.peso_referencia_kg (3 decimales, nullable)';
+COMMENT ON COLUMN lotes_productivos.temp_horno_1 IS 'Temperatura del horno 1 al inicio (°C)';
+COMMENT ON COLUMN lotes_productivos.temp_comb_horno_1 IS 'Temperatura de la cámara de combustión del horno 1 (°C, nullable)';
+COMMENT ON COLUMN lotes_productivos.velocidad_cinta IS 'Velocidad de la cinta transportadora del horno (m/s)';
+COMMENT ON COLUMN lotes_productivos.sector_id IS 'Sector al que pertenece el lote (nullable para lotes legados; obligatorio si estado=ABIERTO)';
+COMMENT ON COLUMN lotes_productivos.estado IS 'Ciclo de vida del lote: ABIERTO (en curso) o CERRADO (finalizado)';
+COMMENT ON COLUMN lotes_productivos.abierto_por IS 'FK al dispositivo que abrió el lote (ENTRADA_HORNO, o SALIDA_HORNO en lote degradado)';
+COMMENT ON COLUMN lotes_productivos.ultimo_evento_en IS 'Marca temporal del último evento aceptado del lote; insumo del cálculo de inactividad';
+COMMENT ON COLUMN lotes_productivos.motivo_cierre IS 'Motivo del cierre: sin_detecciones, manual, apagado o seguridad (nullable)';
+COMMENT ON COLUMN lotes_productivos.abrir_idempotency_key IS 'Clave de idempotencia de apertura enviada por la entrada; única cuando no es NULL';
+COMMENT ON COLUMN lotes_productivos.cerrar_idempotency_key IS 'Clave de idempotencia de cierre enviada por la salida (nullable)';
+COMMENT ON COLUMN lotes_productivos.modo IS 'Modo de operación: MANUAL/SUPERVISION/AUTOMATICO (default MANUAL para no romper lotes existentes)';
+COMMENT ON COLUMN lotes_productivos.ventana_evaluacion_segundos IS 'Cada cuántos segundos se re-evalúa el estado y se decide un nuevo setpoint';
+COMMENT ON COLUMN lotes_productivos.ventana_actualizacion_segundos IS 'Cada cuántos segundos se aplica un nuevo setpoint (>= ventana_evaluacion)';
+COMMENT ON COLUMN lotes_productivos.tolerancia_temp_c IS 'Tolerancia sobre la temperatura objetivo al iniciar (°C, default 2.0)';
+COMMENT ON COLUMN lotes_productivos.umbral_aceptacion_crudo IS 'Porcentaje máximo de crudos aceptado (% del total); alerta si se supera N ventanas';
+COMMENT ON COLUMN lotes_productivos.umbral_aceptacion_quemado IS 'Porcentaje máximo de quemados aceptado (% del total)';
+COMMENT ON COLUMN lotes_productivos.pesos_objetivo IS 'Pesos de la función objetivo del MPC: wc, wq, wo, dt, dc';
+COMMENT ON COLUMN lotes_productivos.iniciado_manualmente IS 'TRUE = el operador arrancó horno+cinta por su cuenta y el sistema se enganchó después';
+COMMENT ON COLUMN lotes_productivos.temp1_objetivo IS 'Último setpoint de T1 aplicado por el control (lectura del estado activo)';
+COMMENT ON COLUMN lotes_productivos.vel_objetivo IS 'Último setpoint de velocidad de cinta aplicado por el control';
+COMMENT ON COLUMN lotes_productivos.delta_temp1_max_c IS 'Override de tuning del ΔT1 máximo por ciclo (°C); NULL = usa el valor del producto';
+COMMENT ON COLUMN lotes_productivos.delta_vel_max IS 'Override de tuning del ΔV máximo por ciclo (m/s); NULL = usa el valor del producto';
+COMMENT ON COLUMN lotes_productivos.confianza_promedio IS 'Confianza media de las detecciones del lote, fijada al cerrarlo desde eventos_lote.confianza; NULL si el lote no tuvo detecciones con confianza';
+
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_lotes_created_at
+    ON lotes_productivos USING btree (created_at);
+CREATE INDEX IF NOT EXISTS idx_lotes_inicio_at
+    ON lotes_productivos USING btree (inicio_at);
+CREATE INDEX IF NOT EXISTS idx_lotes_producto_fecha
+    ON lotes_productivos USING btree (producto_id, inicio_at);
+CREATE INDEX IF NOT EXISTS idx_lotes_producto_id
+    ON lotes_productivos USING btree (producto_id);
+CREATE INDEX IF NOT EXISTS idx_lotes_sector_inicio
+    ON lotes_productivos USING btree (sector_id, inicio_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_lotes_abierto_por_sector
+    ON lotes_productivos USING btree (sector_id) WHERE ((estado)::text = 'ABIERTO'::text);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_lotes_abrir_idem
+    ON lotes_productivos USING btree (abrir_idempotency_key) WHERE (abrir_idempotency_key IS NOT NULL);
+
+-- ============================================================================
 -- TABLA 6: historial_consignas (Auditoría de consignas térmicas/velocidad)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS historial_consignas (
-    id                        UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    horno_id                  VARCHAR(50)     NOT NULL,
-    lote_id                   UUID,
-    producto_id               UUID,
-    temperatura_objetivo      NUMERIC(6,2)    NOT NULL,
-    velocidad_cinta_objetivo  NUMERIC(6,2)    NOT NULL,
-    origen                    VARCHAR(12)     NOT NULL,
-    usuario                   VARCHAR(150),
-    exitosa                   BOOLEAN         NOT NULL,
-    motivo_error              TEXT,
-    temperatura_previa        NUMERIC(6,2),
-    velocidad_cinta_previa    NUMERIC(6,2),
-    -- decision_id no lleva FK: decisiones_control se crea más abajo en este
-    -- mismo script y una FK rompería el orden de creación.
-    decision_id               UUID,
-    estado                    VARCHAR(20)     NOT NULL DEFAULT 'PENDIENTE',
-    creada_en                 TIMESTAMPTZ     NOT NULL DEFAULT now(),
-
-    CONSTRAINT fk_historial_consignas_producto
-        FOREIGN KEY (producto_id)
-        REFERENCES productos (id)
-        ON DELETE SET NULL,
-
-    CONSTRAINT chk_historial_consignas_origen
-        CHECK (origen IN ('AUTOMATICO', 'MANUAL')),
-
-    CONSTRAINT chk_historial_consignas_estado
-        CHECK (estado IN ('PENDIENTE', 'APLICADA', 'RECHAZADA'))
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    horno_id character varying(50) NOT NULL,
+    lote_id uuid,
+    producto_id uuid,
+    temperatura_objetivo numeric(6,2) NOT NULL,
+    velocidad_cinta_objetivo numeric(6,2) NOT NULL,
+    origen character varying(12) NOT NULL,
+    usuario character varying(150),
+    exitosa boolean NOT NULL,
+    motivo_error text,
+    temperatura_previa numeric(6,2),
+    velocidad_cinta_previa numeric(6,2),
+    decision_id uuid,
+    estado character varying(20) DEFAULT 'PENDIENTE'::character varying NOT NULL,
+    creada_en timestamp with time zone DEFAULT now() NOT NULL,
+    dispositivo_id uuid,
+    CONSTRAINT chk_historial_consignas_estado CHECK (estado IN ('PENDIENTE', 'APLICADA', 'RECHAZADA')),
+    CONSTRAINT chk_historial_consignas_origen CHECK (origen IN ('AUTOMATICO', 'MANUAL')),
+    CONSTRAINT historial_consignas_pkey PRIMARY KEY (id),
+    CONSTRAINT fk_historial_consignas_dispositivo FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_historial_consignas_producto FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE SET NULL
 );
 
-COMMENT ON TABLE  historial_consignas IS 'Auditoría de toda consigna térmica/velocidad manual (SCA-320) aceptada y encolada para la Pi ENTRADA; conserva filas históricas de origen automático (SCA-142).';
+COMMENT ON TABLE historial_consignas IS 'Auditoría de toda consigna térmica/velocidad manual (SCA-320) aceptada y encolada para la Pi ENTRADA; conserva filas históricas de origen automático (SCA-142).';
 COMMENT ON COLUMN historial_consignas.horno_id IS 'Identificador del sector/horno al que se encoló la consigna (no es FK: el sector vive en sectores)';
 COMMENT ON COLUMN historial_consignas.lote_id IS 'Correlación con el lote productivo, sin FK: en el despacho automático el lote puede no estar persistido aún en lotes_productivos';
 COMMENT ON COLUMN historial_consignas.producto_id IS 'FK al producto cuyos parámetros originaron la consigna (nullable: puede no aplicar en consignas manuales sin producto asociado)';
@@ -555,859 +353,385 @@ COMMENT ON COLUMN historial_consignas.exitosa IS 'Compatibilidad: true = aceptad
 COMMENT ON COLUMN historial_consignas.motivo_error IS 'Motivo del fallo de encolado cuando exitosa=false';
 COMMENT ON COLUMN historial_consignas.temperatura_previa IS 'Temperatura real del lote (metricas_horno) inmediatamente antes de encolar la consigna; NULL si no había telemetría';
 COMMENT ON COLUMN historial_consignas.velocidad_cinta_previa IS 'Velocidad de cinta real del lote (metricas_horno) inmediatamente antes de encolar la consigna; NULL si no había telemetría';
-
-CREATE INDEX IF NOT EXISTS idx_historial_consignas_lote_id
-    ON historial_consignas (lote_id);
-
-CREATE INDEX IF NOT EXISTS idx_historial_consignas_horno_id
-    ON historial_consignas (horno_id, creada_en DESC);
-
--- ============================================================================
--- TABLA 7: usuarios (Usuarios corporativos autorizados para la plataforma)
--- ============================================================================
-CREATE TABLE IF NOT EXISTS usuarios (
-    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    email         VARCHAR(254) NOT NULL UNIQUE,
-    nombre        VARCHAR(150) NOT NULL,
-    rol           VARCHAR(20)  NOT NULL,
-    password_hash VARCHAR(255),
-    activo        BOOLEAN      NOT NULL DEFAULT true,
-    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-
-    -- Solo roles válidos del sistema
-    CONSTRAINT chk_usuarios_rol
-        CHECK (rol IN ('Administrador', 'Supervisor', 'Operario')),
-
-    -- Validación de formato de email (segunda línea de defensa)
-    CONSTRAINT chk_usuarios_email_formato
-        CHECK (email ~* '^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$')
-);
-
-COMMENT ON TABLE  usuarios               IS 'Usuarios corporativos autorizados para acceder a la plataforma Smart-Check.';
-COMMENT ON COLUMN usuarios.email         IS 'Correo corporativo. Debe existir aquí para poder autenticarse.';
-COMMENT ON COLUMN usuarios.rol           IS 'Nivel de acceso: Administrador, Supervisor u Operario.';
-COMMENT ON COLUMN usuarios.password_hash IS 'Hash bcrypt de la contraseña para autenticación local (nullable si solo usa OAuth).';
-COMMENT ON COLUMN usuarios.activo        IS 'Revocar acceso sin eliminar el registro: UPDATE usuarios SET activo=false WHERE email=...';
-
--- Índice para la búsqueda por email en cada login (operación más frecuente)
-CREATE INDEX IF NOT EXISTS idx_usuarios_email ON usuarios (email);
-
--- ============================================================================
--- SEED: Usuarios de prueba (modificar con emails corporativos reales)
--- Contraseña por defecto para usuarios seed: password123
---
--- El hash se genera en el propio PostgreSQL con pgcrypto (bcrypt, prefijo $2a$)
--- en lugar de incrustar un literal bcrypt. Así el seed siempre es consistente
--- consigo mismo y no depende de copiar/pegar un hash a mano (origen del bug
--- histórico: un literal que en realidad no correspondía a password123).
--- pgcrypto ya se habilita arriba con CREATE EXTENSION IF NOT EXISTS.
--- ============================================================================
-INSERT INTO usuarios (email, nombre, rol, password_hash) VALUES
-    ('admin@fermar.com.ar',      'Administrador Fermar',  'Administrador', crypt('password123', gen_salt('bf', 10))),
-    ('supervisor@fermar.com.ar', 'Supervisor Fermar',     'Supervisor',    crypt('password123', gen_salt('bf', 10))),
-    ('operario@fermar.com.ar',   'Operario Fermar',       'Operario',      crypt('password123', gen_salt('bf', 10)))
-ON CONFLICT (email) DO NOTHING;
-
--- Reparación idempotente de bases ya sembradas con hashes rotos históricos
--- (literales que NO correspondían a password123). Sólo reemplaza filas que
--- todavía llevan exactamente esos hashes, así que nunca pisa una contraseña
--- ya cambiada por un operario. `crypt(...)` se evalúa sólo en las filas que
--- hacen match con el IN, por lo que no agrega costo al arranque normal.
-UPDATE usuarios
-SET password_hash = crypt('password123', gen_salt('bf', 10))
-WHERE email IN ('admin@fermar.com.ar', 'supervisor@fermar.com.ar', 'operario@fermar.com.ar')
-  AND password_hash IN (
-    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
-    '$2a$10$5l3CZ8EQW3PCsAMgyetQeOA5j7yFW7QBWwQAgpGAhROdt48ayUJVy'
-  );
-
--- Provenance for writes made by an authenticated device. Existing rows remain
--- nullable so this upgrade never invents an owner for historical data.
-ALTER TABLE lotes_productivos ADD COLUMN IF NOT EXISTS dispositivo_id UUID;
-ALTER TABLE historial_consignas ADD COLUMN IF NOT EXISTS dispositivo_id UUID;
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lotes_dispositivo') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT fk_lotes_dispositivo
-            FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_historial_consignas_dispositivo') THEN
-        ALTER TABLE historial_consignas ADD CONSTRAINT fk_historial_consignas_dispositivo
-            FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT;
-    END IF;
-END $$;
-
--- Ciclo de vida de la consigna encolada para la Pi. decision_id sólo guarda el
--- id de la decisión de control (sin FK, ver comentario en la tabla): el ack de
--- la Pi cierra la fila como APLICADA.
-ALTER TABLE historial_consignas ADD COLUMN IF NOT EXISTS decision_id UUID;
-ALTER TABLE historial_consignas ADD COLUMN IF NOT EXISTS estado VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE';
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_historial_consignas_estado') THEN
-        ALTER TABLE historial_consignas ADD CONSTRAINT chk_historial_consignas_estado
-            CHECK (estado IN ('PENDIENTE','APLICADA','RECHAZADA'));
-    END IF;
-END $$;
-
--- Backfill de filas históricas: sólo toca las que no tienen decision_id, así
--- que una consigna nueva pendiente no se pisa en reaplicaciones.
-UPDATE historial_consignas
-SET estado = CASE WHEN exitosa THEN 'APLICADA' ELSE 'RECHAZADA' END
-WHERE decision_id IS NULL AND estado = 'PENDIENTE';
-
-CREATE INDEX IF NOT EXISTS idx_historial_consignas_decision_id
-    ON historial_consignas (decision_id) WHERE decision_id IS NOT NULL;
-
 COMMENT ON COLUMN historial_consignas.decision_id IS 'Decisión de control encolada para la Pi; permite cerrar el estado con el ack (sin FK)';
 COMMENT ON COLUMN historial_consignas.estado IS 'PENDIENTE = encolada; APLICADA = confirmada por ack de la Pi; RECHAZADA = no se pudo encolar';
 
--- ============================================================================
--- Registro de dispositivos por solicitud + aprobación (reemplaza Ed25519)
--- ============================================================================
--- La Raspberry solicita el alta con su hostname; el backend genera un
--- request_id de un solo uso. Un Supervisor/Admin aprueba (o rechaza), y sólo
--- entonces se crea la identidad del dispositivo. El secret en texto plano vive
--- aquí únicamente hasta que el nodo hace su única consulta de estado; el
--- dispositivo guarda sólo secret_hash. request_id y secret son credenciales de
--- alta capacidad: expiran y se entregan como máximo una vez.
-CREATE TABLE IF NOT EXISTS registration_requests (
-    request_id   VARCHAR(64)  PRIMARY KEY,
-    hostname     VARCHAR(100) NOT NULL,
-    status       VARCHAR(12)  NOT NULL DEFAULT 'PENDING',
-    device_id    UUID         REFERENCES dispositivos(id) ON DELETE SET NULL,
-    secret       TEXT,
-    rename_url   TEXT,
-    resolved_by  UUID         REFERENCES usuarios(id) ON DELETE RESTRICT,
-    resolved_at  TIMESTAMPTZ,
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    expires_at   TIMESTAMPTZ  NOT NULL,
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_historial_consignas_decision_id
+    ON historial_consignas USING btree (decision_id) WHERE (decision_id IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_historial_consignas_horno_id
+    ON historial_consignas USING btree (horno_id, creada_en DESC);
+CREATE INDEX IF NOT EXISTS idx_historial_consignas_lote_id
+    ON historial_consignas USING btree (lote_id);
 
-    CONSTRAINT chk_registration_requests_status
-        CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED')),
-    CONSTRAINT chk_registration_requests_approved
-        CHECK (status <> 'APPROVED' OR (device_id IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL)),
-    CONSTRAINT chk_registration_requests_rejected
-        CHECK (status <> 'REJECTED' OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL))
+-- ============================================================================
+-- TABLA 7: decisiones_control (Audit del MPC)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS decisiones_control (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    lote_id uuid NOT NULL,
+    ventana_inicio timestamp with time zone NOT NULL,
+    ventana_fin timestamp with time zone NOT NULL,
+    muestras integer NOT NULL,
+    temp_actual numeric(6,2) NOT NULL,
+    vel_actual numeric(6,3) NOT NULL,
+    pct_crudos_obs numeric(5,2) NOT NULL,
+    pct_ok_obs numeric(5,2) NOT NULL,
+    pct_quemados_obs numeric(5,2) NOT NULL,
+    conf_promedio numeric(4,3) NOT NULL,
+    temp_propuesto numeric(6,2) NOT NULL,
+    vel_propuesto numeric(6,3) NOT NULL,
+    temp_aplicado numeric(6,2),
+    vel_aplicado numeric(6,3),
+    prediccion jsonb,
+    z_observado numeric(10,4),
+    z_predicho numeric(10,4),
+    razon_skipped text,
+    aplicado_por character varying(20),
+    decision_origen_id uuid,
+    aprobada_por character varying(255),
+    aprobada_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT decisiones_control_conf_promedio_check CHECK (((conf_promedio >= (0)::numeric) AND (conf_promedio <= (1)::numeric))),
+    CONSTRAINT decisiones_control_muestras_check CHECK ((muestras >= 0)),
+    CONSTRAINT decisiones_control_pct_crudos_obs_check CHECK (((pct_crudos_obs >= (0)::numeric) AND (pct_crudos_obs <= (100)::numeric))),
+    CONSTRAINT decisiones_control_pct_ok_obs_check CHECK (((pct_ok_obs >= (0)::numeric) AND (pct_ok_obs <= (100)::numeric))),
+    CONSTRAINT decisiones_control_pct_quemados_obs_check CHECK (((pct_quemados_obs >= (0)::numeric) AND (pct_quemados_obs <= (100)::numeric))),
+    CONSTRAINT decisiones_control_pkey PRIMARY KEY (id),
+    CONSTRAINT decisiones_control_lote_id_fkey FOREIGN KEY (lote_id) REFERENCES lotes_productivos(id) ON DELETE CASCADE,
+    CONSTRAINT fk_decisiones_control_origen FOREIGN KEY (decision_origen_id) REFERENCES decisiones_control(id) ON DELETE SET NULL
 );
 
--- Un hostname sólo puede tener una solicitud PENDING: evita que un mismo nodo
--- acumule identidades por reintentos.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_registration_requests_pending_hostname
-    ON registration_requests (hostname) WHERE status = 'PENDING';
+COMMENT ON TABLE decisiones_control IS 'Audit del MPC: una fila por decisión propuesta (aplicada o no)';
+COMMENT ON COLUMN decisiones_control.ventana_inicio IS 'Inicio de la ventana de evaluación que originó la decisión';
+COMMENT ON COLUMN decisiones_control.ventana_fin IS 'Fin de la ventana de evaluación';
+COMMENT ON COLUMN decisiones_control.muestras IS 'Cantidad de detecciones en la ventana';
+COMMENT ON COLUMN decisiones_control.temp_actual IS 'T1 activa al momento de la decisión';
+COMMENT ON COLUMN decisiones_control.vel_actual IS 'Velocidad activa al momento de la decisión';
+COMMENT ON COLUMN decisiones_control.pct_crudos_obs IS '% crudo observado en la ventana (crudos/total*100)';
+COMMENT ON COLUMN decisiones_control.pct_ok_obs IS '% OK observado en la ventana';
+COMMENT ON COLUMN decisiones_control.pct_quemados_obs IS '% quemados observado en la ventana';
+COMMENT ON COLUMN decisiones_control.conf_promedio IS 'Confianza promedio del detector en la ventana (0..1)';
+COMMENT ON COLUMN decisiones_control.temp_propuesto IS 'T1 que el MPC propuso';
+COMMENT ON COLUMN decisiones_control.vel_propuesto IS 'Velocidad que el MPC propuso';
+COMMENT ON COLUMN decisiones_control.temp_aplicado IS 'T1 efectivamente aplicada (NULL en modo SUPERVISION si no se aprobó)';
+COMMENT ON COLUMN decisiones_control.vel_aplicado IS 'Velocidad efectivamente aplicada (idem)';
+COMMENT ON COLUMN decisiones_control.prediccion IS 'Salida cruda del XGBoost (JSONB con pctCrudos/pctOk/pctQuemados/modelVersion)';
+COMMENT ON COLUMN decisiones_control.z_observado IS 'Valor de la función objetivo con datos observados';
+COMMENT ON COLUMN decisiones_control.z_predicho IS 'Valor de la función objetivo con la predicción del XGBoost';
+COMMENT ON COLUMN decisiones_control.razon_skipped IS 'Si no se propuso cambio, motivo (confianza_baja, ventana_sin_muestras, sin_convergencia, etc.)';
+COMMENT ON COLUMN decisiones_control.aplicado_por IS 'MPC = aplicado por el control automático; OPERARIO = aprobado manualmente en SUPERVISION; NADIE = no aplicado';
+COMMENT ON COLUMN decisiones_control.decision_origen_id IS 'Cuando esta decisión fue promovida (NADIE→OPERARIO o AUTO→...), apunta a la decisión origen. Self-ref cuando se promueve la misma fila.';
+COMMENT ON COLUMN decisiones_control.aprobada_por IS 'Usuario que aprobó la propuesta en SUPERVISION (NULL si nadie la aprobó)';
+COMMENT ON COLUMN decisiones_control.aprobada_at IS 'Momento en que se aprobó la propuesta en SUPERVISION';
 
-CREATE INDEX IF NOT EXISTS idx_registration_requests_status
-    ON registration_requests (status, created_at DESC);
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_decisiones_control_lote_created
+    ON decisiones_control USING btree (lote_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_decisiones_control_origen
+    ON decisiones_control USING btree (decision_origen_id) WHERE (decision_origen_id IS NOT NULL);
 
-COMMENT ON TABLE  registration_requests IS 'Solicitudes de registro de nodos Raspberry pendientes de aprobación por Supervisor/Admin';
+-- ============================================================================
+-- TABLA 8: registration_requests (Registro de dispositivos por solicitud)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS registration_requests (
+    request_id character varying(64) NOT NULL,
+    hostname character varying(100) NOT NULL,
+    status character varying(12) DEFAULT 'PENDING'::character varying NOT NULL,
+    device_id uuid,
+    secret text,
+    rename_url text,
+    resolved_by uuid,
+    resolved_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    tipo character varying(16),
+    CONSTRAINT chk_registration_requests_approved CHECK ((((status)::text <> 'APPROVED'::text) OR ((device_id IS NOT NULL) AND (resolved_by IS NOT NULL) AND (resolved_at IS NOT NULL)))),
+    CONSTRAINT chk_registration_requests_rejected CHECK ((((status)::text <> 'REJECTED'::text) OR ((resolved_by IS NOT NULL) AND (resolved_at IS NOT NULL)))),
+    CONSTRAINT chk_registration_requests_status CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED')),
+    CONSTRAINT chk_registration_requests_tipo CHECK (tipo IS NULL OR tipo IN ('ENTRADA_HORNO', 'SALIDA_HORNO')),
+    CONSTRAINT registration_requests_pkey PRIMARY KEY (request_id),
+    CONSTRAINT registration_requests_device_id_fkey FOREIGN KEY (device_id) REFERENCES dispositivos(id) ON DELETE SET NULL,
+    CONSTRAINT registration_requests_resolved_by_fkey FOREIGN KEY (resolved_by) REFERENCES usuarios(id) ON DELETE RESTRICT
+);
+
+COMMENT ON TABLE registration_requests IS 'Solicitudes de registro de nodos Raspberry pendientes de aprobación por Supervisor/Admin';
 COMMENT ON COLUMN registration_requests.request_id IS 'Identificador de alta capacidad que el nodo usa para consultar su solicitud';
 COMMENT ON COLUMN registration_requests.secret IS 'Secret en texto plano retenido sólo hasta la primera consulta del nodo; se anula tras la entrega';
-COMMENT ON COLUMN registration_requests.expires_at IS 'Vencimiento de la solicitud; vencida no puede aprobarse ni entregarse';
-
--- ============================================================================
--- ALTER: registration_requests — tipo solicitado y URL de renombre
--- Idempotente para bases existentes. Reemplaza el anuncio previo por par
--- (listen_address/listen_port) por una única rename_url. Nullable para no
--- invalidar solicitudes legadas creadas antes de incorporar estos campos.
--- ============================================================================
-ALTER TABLE registration_requests ADD COLUMN IF NOT EXISTS tipo VARCHAR(16);
-
-ALTER TABLE registration_requests DROP CONSTRAINT IF EXISTS chk_registration_requests_listen_port;
-ALTER TABLE registration_requests
-    DROP COLUMN IF EXISTS listen_address,
-    DROP COLUMN IF EXISTS listen_port;
-
-ALTER TABLE registration_requests ADD COLUMN IF NOT EXISTS rename_url TEXT;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_registration_requests_tipo') THEN
-        ALTER TABLE registration_requests ADD CONSTRAINT chk_registration_requests_tipo
-            CHECK (tipo IS NULL OR tipo IN ('ENTRADA_HORNO', 'SALIDA_HORNO'));
-    END IF;
-END $$;
-
-COMMENT ON COLUMN registration_requests.tipo IS 'Tipo/ubicación funcional que el nodo solicita al registrarse: ENTRADA_HORNO o SALIDA_HORNO (nullable para solicitudes legadas)';
 COMMENT ON COLUMN registration_requests.rename_url IS 'URL completa (esquema + host + puerto) anunciada por el nodo para el push de renombre; NULL si el firmware es legacy';
+COMMENT ON COLUMN registration_requests.expires_at IS 'Vencimiento de la solicitud; vencida no puede aprobarse ni entregarse';
+COMMENT ON COLUMN registration_requests.tipo IS 'Tipo/ubicación funcional que el nodo solicita al registrarse: ENTRADA_HORNO o SALIDA_HORNO (nullable para solicitudes legadas)';
 
--- Auditoría de ciclo de vida de dispositivos. Se conserva la tabla: el alta
--- (approve) y el rechazo (reject) dejan traza con actor y estado anterior/nuevo.
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_registration_requests_status
+    ON registration_requests USING btree (status, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_registration_requests_pending_hostname
+    ON registration_requests USING btree (hostname) WHERE ((status)::text = 'PENDING'::text);
+
+-- ============================================================================
+-- TABLA 9: device_lifecycle_audit (Auditoría del ciclo de vida de dispositivos)
+-- ============================================================================
 CREATE TABLE IF NOT EXISTS device_lifecycle_audit (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    actor_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
-    action VARCHAR(20) NOT NULL,
-    dispositivo_id UUID REFERENCES dispositivos(id) ON DELETE RESTRICT,
-    enrollment_id VARCHAR(64),
-    request_id VARCHAR(64),
-    old_status VARCHAR(12) NOT NULL,
-    new_status VARCHAR(12) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-ALTER TABLE device_lifecycle_audit ADD COLUMN IF NOT EXISTS enrollment_id VARCHAR(64);
-ALTER TABLE device_lifecycle_audit ADD COLUMN IF NOT EXISTS request_id VARCHAR(64);
-ALTER TABLE device_lifecycle_audit ALTER COLUMN dispositivo_id DROP NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_device_lifecycle_audit_device ON device_lifecycle_audit(dispositivo_id, created_at DESC);
-
--- Reemplazo total del enrolamiento Ed25519: se eliminan las tablas de
--- credenciales por clave pública, invitaciones y replay de pruebas.
-DROP TABLE IF EXISTS device_credentials;
-DROP TABLE IF EXISTS device_enrollments;
-DROP TABLE IF EXISTS device_request_replays;
-
--- ============================================================================
--- SECTORES, LOTES ABIERTOS Y EVENTOS (contrato rework-rb)
--- ============================================================================
--- Un sector agrupa a lo sumo un dispositivo ENTRADA_HORNO y uno SALIDA_HORNO
--- de la misma línea. El lote es la unidad de producción de un sector para un
--- producto: máximo un lote ABIERTO por sector. eventos_lote es el detalle
--- append-only de las detecciones que alimentan los conteos en vivo.
--- ============================================================================
-
-CREATE TABLE IF NOT EXISTS sectores (
-    id          VARCHAR(50)  PRIMARY KEY,
-    nombre      VARCHAR(100) NOT NULL,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    actor_id uuid NOT NULL,
+    action character varying(20) NOT NULL,
+    dispositivo_id uuid,
+    enrollment_id character varying(64),
+    request_id character varying(64),
+    old_status character varying(12) NOT NULL,
+    new_status character varying(12) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT device_lifecycle_audit_pkey PRIMARY KEY (id),
+    CONSTRAINT device_lifecycle_audit_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES usuarios(id) ON DELETE RESTRICT,
+    CONSTRAINT device_lifecycle_audit_dispositivo_id_fkey FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT
 );
 
-COMMENT ON TABLE  sectores           IS 'Sectores de producción: agrupan un dispositivo ENTRADA_HORNO y uno SALIDA_HORNO de la misma línea.';
-COMMENT ON COLUMN sectores.id        IS 'Identificador legible del sector (ej: horno-1)';
-COMMENT ON COLUMN sectores.nombre    IS 'Nombre para mostrar del sector (ej: Horno 1)';
-COMMENT ON COLUMN sectores.created_at IS 'Marca temporal de alta del sector';
-
--- Baja lógica del catálogo de productos: activo=false no se ofrece para elegir,
--- pero sigue resolviendo lotes históricos.
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS activo BOOLEAN NOT NULL DEFAULT true;
-
-COMMENT ON COLUMN productos.activo IS 'Vigencia del producto en el catálogo: false = retirado (no se ofrece para elegir, sigue resolviendo lotes históricos)';
-
--- Pertenencia de un dispositivo a un sector (nullable: dispositivos legados sin sector).
-ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS sector_id VARCHAR(50);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dispositivos_sector') THEN
-        ALTER TABLE dispositivos ADD CONSTRAINT fk_dispositivos_sector
-            FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE SET NULL;
-    END IF;
-END $$;
-
-COMMENT ON COLUMN dispositivos.sector_id IS 'Sector al que pertenece el dispositivo (nullable: dispositivo sin sector asignado)';
-
--- Un sector agrupa a lo sumo un dispositivo de cada tipo funcional
--- (ENTRADA_HORNO/SALIDA_HORNO). Los dispositivos legados sin sector (NULL) y sin
--- tipo quedan fuera del índice parcial, así que el upgrade no lo viola.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_dispositivos_sector_tipo
-    ON dispositivos (sector_id, tipo) WHERE sector_id IS NOT NULL AND tipo IS NOT NULL;
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_device_lifecycle_audit_device
+    ON device_lifecycle_audit USING btree (dispositivo_id, created_at DESC);
 
 -- ============================================================================
--- MIGRACIÓN: ubicacion (legacy) -> sectores
--- Idempotente: sólo corre mientras la columna dispositivos.ubicacion exista.
--- (a) crea un sector por cada ubicación distinta no vacía (id = slug del
---     nombre, sin acentos, hasta 50 chars);
--- (b) asigna ese sector a los dispositivos que aún no tienen sector_id.
---     CRÍTICO: si dos dispositivos del mismo tipo comparten ubicación, sólo el
---     primero (por created_at, id) se asigna; el resto queda en NULL para no
---     violar uq_dispositivos_sector_tipo ni romper el arranque. Un dispositivo
---     ya asignado al mismo sector se prioriza para conservar la asignación.
---     Además, antes de asignar se verifica que (sector, tipo) no esté ya
---     ocupado por otro dispositivo pre-asignado (aunque su ubicación sea NULL o
---     sluggee a otro sector): en ese caso el candidato queda en NULL. Sin esta
---     guarda el UPDATE podía violar el índice único y abortar el arranque.
--- (c) elimina la columna y su comentario (el DROP COLUMN borra el comentario).
+-- TABLA 10: metricas_dispositivo (Historial append-only de telemetría)
 -- ============================================================================
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = 'dispositivos'
-          AND column_name = 'ubicacion'
-    ) THEN
-        -- (a) Alta de sectores por ubicación distinta.
-        EXECUTE $mig$
-            INSERT INTO sectores (id, nombre)
-            SELECT DISTINCT
-                COALESCE(NULLIF(trim(both '-' from left(regexp_replace(
-                    translate(lower(btrim(ubicacion)), 'áàäâãéèëêíìïîóòöôõúùüûñçÁÀÄÂÃÉÈËÊÍÌÏÎÓÒÖÔÕÚÙÜÛÑÇ', 'aaaaaeeeeiiiiooooouuuuncAAAAAEEEEIIIIOOOOOUUUUNC'),
-                    '[^a-z0-9]+', '-', 'g'), 50)), ''), 'sector') AS id,
-                btrim(ubicacion) AS nombre
-            FROM dispositivos
-            WHERE ubicacion IS NOT NULL AND btrim(ubicacion) <> ''
-            ON CONFLICT (id) DO NOTHING
-        $mig$;
-
-        -- (b) Asignación a los dispositivos, a lo sumo uno por tipo y sector.
-        EXECUTE $mig$
-            WITH ranking AS (
-                SELECT d.id AS device_id,
-                       COALESCE(NULLIF(trim(both '-' from left(regexp_replace(
-                           translate(lower(btrim(d.ubicacion)), 'áàäâãéèëêíìïîóòöôõúùüûñçÁÀÄÂÃÉÈËÊÍÌÏÎÓÒÖÔÕÚÙÜÛÑÇ', 'aaaaaeeeeiiiiooooouuuuncAAAAAEEEEIIIIOOOOOUUUUNC'),
-                           '[^a-z0-9]+', '-', 'g'), 50)), ''), 'sector') AS sector_id,
-                       d.tipo AS tipo,
-                       CASE WHEN d.sector_id IS NOT NULL THEN 0 ELSE 1 END AS prioridad,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY
-                               COALESCE(NULLIF(trim(both '-' from left(regexp_replace(
-                                   translate(lower(btrim(d.ubicacion)), 'áàäâãéèëêíìïîóòöôõúùüûñçÁÀÄÂÃÉÈËÊÍÌÏÎÓÒÖÔÕÚÙÜÛÑÇ', 'aaaaaeeeeiiiiooooouuuuncAAAAAEEEEIIIIOOOOOUUUUNC'),
-                                   '[^a-z0-9]+', '-', 'g'), 50)), ''), 'sector'),
-                               COALESCE(d.tipo, d.id::text)
-                           ORDER BY CASE WHEN d.sector_id IS NOT NULL THEN 0 ELSE 1 END,
-                                    d.created_at, d.id
-                       ) AS rn
-                FROM dispositivos d
-                WHERE d.ubicacion IS NOT NULL AND btrim(d.ubicacion) <> ''
-                  AND (
-                      d.sector_id IS NULL
-                      OR d.sector_id = COALESCE(NULLIF(trim(both '-' from left(regexp_replace(
-                          translate(lower(btrim(d.ubicacion)), 'áàäâãéèëêíìïîóòöôõúùüûñçÁÀÄÂÃÉÈËÊÍÌÏÎÓÒÖÔÕÚÙÜÛÑÇ', 'aaaaaeeeeiiiiooooouuuuncAAAAAEEEEIIIIOOOOOUUUUNC'),
-                          '[^a-z0-9]+', '-', 'g'), 50)), ''), 'sector')
-                  )
-            )
-            UPDATE dispositivos d
-            SET sector_id = r.sector_id
-            FROM ranking r
-            WHERE d.id = r.device_id
-              AND d.sector_id IS NULL
-              AND r.rn = 1
-              AND r.prioridad = 1
-              AND (
-                  r.tipo IS NULL
-                  OR NOT EXISTS (
-                      SELECT 1 FROM dispositivos o
-                      WHERE o.sector_id = r.sector_id AND o.tipo = r.tipo
-                  )
-              )
-        $mig$;
-    END IF;
-END $$;
-
--- (c) Baja de la columna legacy (idempotente; borra también su comentario).
-ALTER TABLE dispositivos DROP COLUMN IF EXISTS ubicacion;
-
--- Ciclo de vida del lote: columnas nuevas de lotes_productivos.
-ALTER TABLE lotes_productivos
-    ADD COLUMN IF NOT EXISTS sector_id VARCHAR(50),
-    ADD COLUMN IF NOT EXISTS estado VARCHAR(10) NOT NULL DEFAULT 'CERRADO',
-    ADD COLUMN IF NOT EXISTS abierto_por UUID,
-    ADD COLUMN IF NOT EXISTS ultimo_evento_en TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS motivo_cierre VARCHAR(20),
-    ADD COLUMN IF NOT EXISTS abrir_idempotency_key VARCHAR(64),
-    ADD COLUMN IF NOT EXISTS cerrar_idempotency_key VARCHAR(64);
-
--- Un lote ABIERTO nuevo no trae turno/fin/conteos/kg: se relajan los NOT NULL
--- de las columnas del flujo legado (los CHECK de dominio se conservan).
-ALTER TABLE lotes_productivos
-    ALTER COLUMN turno DROP NOT NULL,
-    ALTER COLUMN fin_at DROP NOT NULL,
-    ALTER COLUMN total_unidades DROP NOT NULL,
-    ALTER COLUMN correctos DROP NOT NULL,
-    ALTER COLUMN quemados DROP NOT NULL,
-    ALTER COLUMN correctos_kg DROP NOT NULL,
-    ALTER COLUMN quemados_kg DROP NOT NULL;
-
--- Los kg del lote son estimaciones (conteo × peso de referencia) y se guardan
--- con 3 decimales: NUMERIC(12,3) evita redondear el producto de conteo × peso.
-DO $$
-DECLARE
-    col text;
-BEGIN
-    FOREACH col IN ARRAY ARRAY['correctos_kg', 'quemados_kg', 'crudos_kg'] LOOP
-        IF EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name = 'lotes_productivos'
-              AND column_name = col
-              AND (numeric_precision IS NULL OR numeric_precision < 12)
-        ) THEN
-            EXECUTE format('ALTER TABLE lotes_productivos ALTER COLUMN %I TYPE NUMERIC(12,3)', col);
-        END IF;
-    END LOOP;
-END $$;
-
--- Backfill de kg para lotes CERRADOS heredados. Usa el peso vigente del
--- producto (no hay historial de peso), así que es una estimación retroactiva.
--- Sólo toca buckets con conteo y kg NULL, por lo que es idempotente y no se
--- re-ejecuta sobre las mismas filas en cada arranque.
-UPDATE lotes_productivos lp
-SET correctos_kg = CASE WHEN lp.correctos IS NULL THEN NULL ELSE ROUND(lp.correctos * p.peso_referencia_kg, 3) END,
-    quemados_kg  = CASE WHEN lp.quemados  IS NULL THEN NULL ELSE ROUND(lp.quemados  * p.peso_referencia_kg, 3) END,
-    crudos_kg    = CASE WHEN lp.crudas    IS NULL THEN NULL ELSE ROUND(lp.crudas    * p.peso_referencia_kg, 3) END
-FROM productos p
-WHERE p.id = lp.producto_id
-  AND lp.estado = 'CERRADO'
-  AND ( (lp.correctos IS NOT NULL AND lp.correctos_kg IS NULL)
-     OR (lp.quemados  IS NOT NULL AND lp.quemados_kg  IS NULL)
-     OR (lp.crudas    IS NOT NULL AND lp.crudos_kg    IS NULL) );
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lotes_sector') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT fk_lotes_sector
-            FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE RESTRICT;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lotes_abierto_por') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT fk_lotes_abierto_por
-            FOREIGN KEY (abierto_por) REFERENCES dispositivos(id) ON DELETE RESTRICT;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_estado') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_estado
-            CHECK (estado IN ('ABIERTO', 'CERRADO'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_motivo_cierre') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_motivo_cierre
-            CHECK (motivo_cierre IS NULL OR motivo_cierre IN ('sin_detecciones', 'manual', 'apagado', 'seguridad'));
-    END IF;
-    -- Un lote ABIERTO siempre tiene sector y nunca tiene fin_at.
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_abierto_sector') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_abierto_sector
-            CHECK (estado <> 'ABIERTO' OR (sector_id IS NOT NULL AND fin_at IS NULL));
-    END IF;
-END $$;
-
-COMMENT ON COLUMN lotes_productivos.sector_id IS 'Sector al que pertenece el lote (nullable para lotes legados; obligatorio si estado=ABIERTO)';
-COMMENT ON COLUMN lotes_productivos.estado IS 'Ciclo de vida del lote: ABIERTO (en curso) o CERRADO (finalizado)';
-COMMENT ON COLUMN lotes_productivos.abierto_por IS 'FK al dispositivo que abrió el lote (ENTRADA_HORNO, o SALIDA_HORNO en lote degradado)';
-COMMENT ON COLUMN lotes_productivos.ultimo_evento_en IS 'Marca temporal del último evento aceptado del lote; insumo del cálculo de inactividad';
-COMMENT ON COLUMN lotes_productivos.motivo_cierre IS 'Motivo del cierre: sin_detecciones, manual, apagado o seguridad (nullable)';
-COMMENT ON COLUMN lotes_productivos.abrir_idempotency_key IS 'Clave de idempotencia de apertura enviada por la entrada; única cuando no es NULL';
-COMMENT ON COLUMN lotes_productivos.cerrar_idempotency_key IS 'Clave de idempotencia de cierre enviada por la salida (nullable)';
-
--- Un sector tiene a lo sumo un lote ABIERTO.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_lotes_abierto_por_sector
-    ON lotes_productivos (sector_id) WHERE estado = 'ABIERTO';
-
--- La clave de idempotencia de apertura, cuando existe, es única.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_lotes_abrir_idem
-    ON lotes_productivos (abrir_idempotency_key) WHERE abrir_idempotency_key IS NOT NULL;
-
--- Soporte del historial por sector ordenado por fecha.
-CREATE INDEX IF NOT EXISTS idx_lotes_sector_inicio
-    ON lotes_productivos (sector_id, inicio_at DESC);
-
--- ============================================================================
--- TABLA: eventos_lote (detalle append-only de detecciones por lote)
--- ============================================================================
--- evento_id es la clave de deduplicación global generada por la Pi: un reintento
--- reutiliza el mismo UUID y el INSERT ... ON CONFLICT DO NOTHING lo ignora.
-CREATE TABLE IF NOT EXISTS eventos_lote (
-    id             UUID             PRIMARY KEY DEFAULT gen_random_uuid(),
-    lote_id        UUID             NOT NULL REFERENCES lotes_productivos(id) ON DELETE CASCADE,
-    evento_id      UUID             NOT NULL UNIQUE,
-    producto_id    UUID             NOT NULL REFERENCES productos(id) ON DELETE RESTRICT,
-    estado         VARCHAR(10),
-    confianza      DOUBLE PRECISION,
-    pista          INTEGER,
-    frame          BIGINT,
-    modelo_id      VARCHAR(100),
-    dispositivo_id UUID             REFERENCES dispositivos(id) ON DELETE RESTRICT,
-    momento        TIMESTAMPTZ,
-    created_at     TIMESTAMPTZ      NOT NULL DEFAULT now(),
-
-    -- Un estado que el modelo no produce viaja NULL, nunca 0.
-    CONSTRAINT chk_eventos_lote_estado
-        CHECK (estado IS NULL OR estado IN ('ok', 'crudo', 'quemado')),
-    CONSTRAINT chk_eventos_lote_confianza
-        CHECK (confianza IS NULL OR confianza BETWEEN 0 AND 1)
+CREATE TABLE IF NOT EXISTS metricas_dispositivo (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    dispositivo_id uuid NOT NULL,
+    cpu_pct numeric(5,2) NOT NULL,
+    mem_ram_disponible_mb numeric(10,2) NOT NULL,
+    mem_ram_total_mb numeric(10,2),
+    almacenamiento_disponible_mb numeric(12,2),
+    almacenamiento_total_mb numeric(12,2),
+    temp_chip numeric(6,2) NOT NULL,
+    ai_processor_pct numeric(5,2) NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_metricas_almacenamiento_disponible_no_negativo CHECK (((almacenamiento_disponible_mb IS NULL) OR (almacenamiento_disponible_mb >= (0)::numeric))),
+    CONSTRAINT chk_metricas_almacenamiento_disponible_no_supera_total CHECK (((almacenamiento_total_mb IS NULL) OR (almacenamiento_disponible_mb IS NULL) OR (almacenamiento_disponible_mb <= almacenamiento_total_mb))),
+    CONSTRAINT chk_metricas_almacenamiento_par CHECK (((almacenamiento_disponible_mb IS NULL) = (almacenamiento_total_mb IS NULL))),
+    CONSTRAINT chk_metricas_almacenamiento_total_no_negativo CHECK (((almacenamiento_total_mb IS NULL) OR (almacenamiento_total_mb >= (0)::numeric))),
+    CONSTRAINT chk_metricas_mem_ram_disponible_no_supera_total CHECK (((mem_ram_total_mb IS NULL) OR (mem_ram_disponible_mb <= mem_ram_total_mb))),
+    CONSTRAINT chk_metricas_mem_ram_total_no_negativo CHECK (((mem_ram_total_mb IS NULL) OR (mem_ram_total_mb >= (0)::numeric))),
+    CONSTRAINT metricas_dispositivo_ai_processor_pct_check CHECK (((ai_processor_pct >= (0)::numeric) AND (ai_processor_pct <= (100)::numeric))),
+    CONSTRAINT metricas_dispositivo_cpu_pct_check CHECK (((cpu_pct >= (0)::numeric) AND (cpu_pct <= (100)::numeric))),
+    CONSTRAINT metricas_dispositivo_mem_ram_disponible_mb_check CHECK ((mem_ram_disponible_mb >= (0)::numeric)),
+    CONSTRAINT metricas_dispositivo_pkey PRIMARY KEY (id),
+    CONSTRAINT fk_metricas_dispositivo_dispositivo FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON UPDATE CASCADE ON DELETE CASCADE
 );
 
-COMMENT ON TABLE  eventos_lote              IS 'Detalle append-only de detecciones reportadas por la salida; alimenta los conteos en vivo del lote.';
-COMMENT ON COLUMN eventos_lote.id           IS 'Identificador UUID del registro de evento';
-COMMENT ON COLUMN eventos_lote.lote_id      IS 'FK al lote productivo; se borra en cascada con el lote';
-COMMENT ON COLUMN eventos_lote.evento_id    IS 'UUIDv4 generado por la Pi y reutilizado en cada reintento: clave de deduplicación';
-COMMENT ON COLUMN eventos_lote.producto_id  IS 'FK al producto detectado (debe coincidir con el producto del lote)';
-COMMENT ON COLUMN eventos_lote.estado       IS 'Estado de calidad: ok, crudo o quemado (nullable si el modelo no lo determina)';
-COMMENT ON COLUMN eventos_lote.confianza    IS 'Confianza de la detección entre 0 y 1 (nullable)';
-COMMENT ON COLUMN eventos_lote.pista        IS 'Número de pista/banda de la detección (nullable)';
-COMMENT ON COLUMN eventos_lote.frame        IS 'Número de frame del video de origen (nullable)';
-COMMENT ON COLUMN eventos_lote.modelo_id    IS 'Identificador del modelo de inferencia que produjo la detección (nullable)';
-COMMENT ON COLUMN eventos_lote.dispositivo_id IS 'FK al dispositivo que reportó el evento (nullable)';
-COMMENT ON COLUMN eventos_lote.momento      IS 'Marca temporal informativa del momento de la detección según la Pi (nullable)';
-COMMENT ON COLUMN eventos_lote.created_at   IS 'Marca temporal en que el backend recibió el evento';
+COMMENT ON TABLE metricas_dispositivo IS 'Historial append-only de telemetría reportada por cada dispositivo (CPU, RAM, almacenamiento y temperatura del chip)';
+COMMENT ON COLUMN metricas_dispositivo.id IS 'Identificador UUID del registro de métricas';
+COMMENT ON COLUMN metricas_dispositivo.dispositivo_id IS 'FK al catálogo de dispositivos';
+COMMENT ON COLUMN metricas_dispositivo.cpu_pct IS 'Uso de CPU en porcentaje (0-100)';
+COMMENT ON COLUMN metricas_dispositivo.mem_ram_disponible_mb IS 'Memoria RAM disponible en MB';
+COMMENT ON COLUMN metricas_dispositivo.mem_ram_total_mb IS 'Memoria RAM total en MB (nullable para compatibilidad con pings legacy)';
+COMMENT ON COLUMN metricas_dispositivo.almacenamiento_disponible_mb IS 'Almacenamiento disponible en MB (nullable para compatibilidad con pings legacy)';
+COMMENT ON COLUMN metricas_dispositivo.almacenamiento_total_mb IS 'Almacenamiento total en MB (nullable para compatibilidad con pings legacy)';
+COMMENT ON COLUMN metricas_dispositivo.temp_chip IS 'Temperatura interna del chip en °C';
+COMMENT ON COLUMN metricas_dispositivo.ai_processor_pct IS 'Uso del procesador de IA (NPU) en porcentaje (0-100)';
+COMMENT ON COLUMN metricas_dispositivo.received_at IS 'Marca temporal en que el backend recibió la métrica';
 
--- Índice para reconstruir el detalle de un lote en orden cronológico.
-CREATE INDEX IF NOT EXISTS idx_eventos_lote_lote_created
-    ON eventos_lote (lote_id, created_at);
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_metricas_dispositivo_disp_received
+    ON metricas_dispositivo USING btree (dispositivo_id, received_at DESC);
 
 -- ============================================================================
--- FASE 1 OEE: plan de producción, paradas y lecturas de energía
+-- TABLA 11: metricas_horno (Telemetría cruda del horno)
 -- ============================================================================
--- Planificación diaria por sector/turno, eventos de parada que explican el
--- tiempo no productivo y consumos de energía/gas por período. Las tres tablas
--- son idempotentes y se alimentan por importación CSV autenticada.
--- ============================================================================
-
-CREATE TABLE IF NOT EXISTS plan_produccion (
-    id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
-    sector_id    VARCHAR(50)   NOT NULL REFERENCES sectores(id) ON DELETE RESTRICT,
-    producto_id  UUID          NOT NULL REFERENCES productos(id) ON DELETE RESTRICT,
-    fecha        DATE          NOT NULL,
-    turno        VARCHAR(10)   NOT NULL,
-    inicio_at    TIMESTAMPTZ   NOT NULL,
-    fin_at       TIMESTAMPTZ   NOT NULL,
-    kg_plan      NUMERIC(10,3) NOT NULL,
-    created_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
-
-    CONSTRAINT chk_plan_turno
-        CHECK (turno IN ('mañana', 'tarde', 'noche')),
-    CONSTRAINT chk_plan_kg_positivo
-        CHECK (kg_plan > 0),
-    CONSTRAINT chk_plan_fin_after_inicio
-        CHECK (fin_at > inicio_at),
-    CONSTRAINT uq_plan_produccion_sector_inicio_producto
-        UNIQUE (sector_id, inicio_at, producto_id)
-);
-
-COMMENT ON TABLE  plan_produccion             IS 'Plan de producción por sector y turno; una fila por producto y ventana planificada.';
-COMMENT ON COLUMN plan_produccion.id          IS 'Identificador UUID del plan de producción';
-COMMENT ON COLUMN plan_produccion.sector_id   IS 'FK al sector de producción';
-COMMENT ON COLUMN plan_produccion.producto_id IS 'FK al producto planificado';
-COMMENT ON COLUMN plan_produccion.fecha       IS 'Fecha del plan (calendario de Argentina)';
-COMMENT ON COLUMN plan_produccion.turno       IS 'Turno planificado: mañana, tarde o noche';
-COMMENT ON COLUMN plan_produccion.inicio_at   IS 'Inicio de la ventana planificada';
-COMMENT ON COLUMN plan_produccion.fin_at      IS 'Fin de la ventana planificada, posterior al inicio';
-COMMENT ON COLUMN plan_produccion.kg_plan     IS 'Kilogramos planificados para la ventana; debe ser mayor a 0';
-COMMENT ON COLUMN plan_produccion.created_at  IS 'Marca temporal de alta del registro';
-COMMENT ON COLUMN plan_produccion.updated_at  IS 'Marca temporal de la última modificación del registro';
-
-CREATE INDEX IF NOT EXISTS idx_plan_produccion_sector_inicio
-    ON plan_produccion (sector_id, inicio_at);
-
-CREATE TABLE IF NOT EXISTS eventos_parada (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    sector_id     VARCHAR(50) NOT NULL REFERENCES sectores(id) ON DELETE RESTRICT,
-    lote_id       UUID        REFERENCES lotes_productivos(id) ON DELETE SET NULL,
-    inicio_at     TIMESTAMPTZ NOT NULL,
-    fin_at        TIMESTAMPTZ NOT NULL,
-    causa_codigo  TEXT        NOT NULL,
-    tipo          VARCHAR(20) NOT NULL,
-    notas         TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    CONSTRAINT chk_eventos_parada_tipo
-        CHECK (tipo IN ('PLANIFICADA', 'NO_PLANIFICADA')),
-    CONSTRAINT chk_eventos_parada_fin_after_inicio
-        CHECK (fin_at > inicio_at),
-    CONSTRAINT uq_eventos_parada_sector_inicio_causa
-        UNIQUE (sector_id, inicio_at, causa_codigo)
-);
-
-COMMENT ON TABLE  eventos_parada              IS 'Eventos de parada de producción que explican el tiempo no productivo (OEE).';
-COMMENT ON COLUMN eventos_parada.id           IS 'Identificador UUID del evento de parada';
-COMMENT ON COLUMN eventos_parada.sector_id    IS 'FK al sector afectado';
-COMMENT ON COLUMN eventos_parada.lote_id      IS 'FK opcional al lote productivo afectado; SET NULL si se elimina el lote';
-COMMENT ON COLUMN eventos_parada.inicio_at    IS 'Inicio de la parada';
-COMMENT ON COLUMN eventos_parada.fin_at       IS 'Fin de la parada, posterior al inicio';
-COMMENT ON COLUMN eventos_parada.causa_codigo IS 'Código de causa de la parada (texto libre normalizado por el importador)';
-COMMENT ON COLUMN eventos_parada.tipo         IS 'Tipo de parada: PLANIFICADA o NO_PLANIFICADA';
-COMMENT ON COLUMN eventos_parada.notas        IS 'Observaciones libres de la parada (nullable)';
-COMMENT ON COLUMN eventos_parada.created_at   IS 'Marca temporal de alta del registro';
-
-CREATE INDEX IF NOT EXISTS idx_eventos_parada_sector_inicio
-    ON eventos_parada (sector_id, inicio_at);
-
-CREATE TABLE IF NOT EXISTS lecturas_energia (
-    id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
-    sector_id      VARCHAR(50)   NOT NULL REFERENCES sectores(id) ON DELETE RESTRICT,
-    lote_id        UUID          REFERENCES lotes_productivos(id) ON DELETE SET NULL,
-    periodo_inicio TIMESTAMPTZ   NOT NULL,
-    periodo_fin    TIMESTAMPTZ   NOT NULL,
-    kwh            NUMERIC(12,3) NOT NULL,
-    gas_m3         NUMERIC(12,3),
-    created_at     TIMESTAMPTZ   NOT NULL DEFAULT now(),
-
-    CONSTRAINT chk_lecturas_energia_kwh_no_negativo
-        CHECK (kwh >= 0),
-    CONSTRAINT chk_lecturas_energia_gas_no_negativo
-        CHECK (gas_m3 IS NULL OR gas_m3 >= 0),
-    CONSTRAINT chk_lecturas_energia_fin_after_inicio
-        CHECK (periodo_fin > periodo_inicio),
-    CONSTRAINT uq_lecturas_energia_sector_periodo
-        UNIQUE (sector_id, periodo_inicio, periodo_fin)
-);
-
-COMMENT ON TABLE  lecturas_energia                IS 'Lecturas de consumo eléctrico y gas por sector y período, insumo del indicador de energía del OEE.';
-COMMENT ON COLUMN lecturas_energia.id             IS 'Identificador UUID de la lectura';
-COMMENT ON COLUMN lecturas_energia.sector_id      IS 'FK al sector medido';
-COMMENT ON COLUMN lecturas_energia.lote_id        IS 'FK opcional al lote productivo asociado; SET NULL si se elimina el lote';
-COMMENT ON COLUMN lecturas_energia.periodo_inicio IS 'Inicio del período de medición';
-COMMENT ON COLUMN lecturas_energia.periodo_fin    IS 'Fin del período de medición, posterior al inicio';
-COMMENT ON COLUMN lecturas_energia.kwh            IS 'Consumo eléctrico del período en kWh; no negativo';
-COMMENT ON COLUMN lecturas_energia.gas_m3         IS 'Consumo de gas del período en m³ (nullable); no negativo';
-COMMENT ON COLUMN lecturas_energia.created_at     IS 'Marca temporal de alta del registro';
-
-CREATE INDEX IF NOT EXISTS idx_lecturas_energia_sector_periodo
-    ON lecturas_energia (sector_id, periodo_inicio);
-
--- ============================================================================
--- SCA-400: MODO DE OPERACIÓN, VENTANAS Y CICLO DE CONTROL
--- ============================================================================
--- Esta sección extiende el modelo de datos para soportar tres modos de
--- operación del lote (MANUAL, SUPERVISION, AUTOMATICO), ventanas de decisión,
--- tolerancias, umbrales de aceptación, telemetría del horno y registro de
--- decisiones del optimizador.
---
--- Todas las extensiones son idempotentes: si una columna ya existe no se
--- vuelve a crear, y si el CHECK ya está definido no se duplica. Defaults
--- seguros preservan la semántica actual: el modo default es MANUAL y los
--- defaults de ventana/tolerancia son razonables para una primera versión.
--- ============================================================================
-
--- ----------------------------------------------------------------------------
--- 1) productos: Δmáx por ciclo del optimizador.
--- ----------------------------------------------------------------------------
-ALTER TABLE productos
-    ADD COLUMN IF NOT EXISTS delta_temp1_max_c    NUMERIC(5,2) NOT NULL DEFAULT 10.0,
-    ADD COLUMN IF NOT EXISTS delta_vel_max        NUMERIC(5,3) NOT NULL DEFAULT 0.05;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_delta_temp1_pos') THEN
-        ALTER TABLE productos ADD CONSTRAINT chk_productos_delta_temp1_pos CHECK (delta_temp1_max_c > 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_productos_delta_vel_pos') THEN
-        ALTER TABLE productos ADD CONSTRAINT chk_productos_delta_vel_pos CHECK (delta_vel_max > 0);
-    END IF;
-END $$;
-
-COMMENT ON COLUMN productos.delta_temp1_max_c  IS 'Máxima variación permitida de T1 por ciclo del optimizador (°C/cycle)';
-COMMENT ON COLUMN productos.delta_vel_max      IS 'Máxima variación permitida de velocidad de cinta por ciclo (m/s/cycle)';
-
--- ----------------------------------------------------------------------------
--- 2) lotes_productivos: modo, ventanas, tolerancias, umbrales, pesos, último
---    setpoint aplicado y flag de inicio manual.
--- ----------------------------------------------------------------------------
-ALTER TABLE lotes_productivos
-    ADD COLUMN IF NOT EXISTS modo                       VARCHAR(12) NOT NULL DEFAULT 'MANUAL',
-    ADD COLUMN IF NOT EXISTS ventana_evaluacion_segundos INT         NOT NULL DEFAULT 600,
-    ADD COLUMN IF NOT EXISTS ventana_actualizacion_segundos INT       NOT NULL DEFAULT 300,
-    ADD COLUMN IF NOT EXISTS tolerancia_temp_c          NUMERIC(5,2) NOT NULL DEFAULT 2.0,
-    ADD COLUMN IF NOT EXISTS umbral_aceptacion_crudo    NUMERIC(5,2) NOT NULL DEFAULT 5.0,
-    ADD COLUMN IF NOT EXISTS umbral_aceptacion_quemado  NUMERIC(5,2) NOT NULL DEFAULT 5.0,
-    ADD COLUMN IF NOT EXISTS pesos_objetivo             JSONB        NOT NULL DEFAULT '{"wc":1.0,"wq":1.0,"wo":1.0,"dt":0.05,"dc":0.5}'::jsonb,
-    ADD COLUMN IF NOT EXISTS iniciado_manualmente       BOOLEAN      NOT NULL DEFAULT FALSE,
-    ADD COLUMN IF NOT EXISTS temp1_objetivo             NUMERIC(6,2),
-    ADD COLUMN IF NOT EXISTS vel_objetivo               NUMERIC(6,3),
-    ADD COLUMN IF NOT EXISTS delta_temp1_max_c          NUMERIC(6,3),
-    ADD COLUMN IF NOT EXISTS delta_vel_max              NUMERIC(6,4),
-    ADD COLUMN IF NOT EXISTS confianza_promedio         NUMERIC(4,3);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_modo') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_modo
-            CHECK (modo IN ('MANUAL', 'SUPERVISION', 'AUTOMATICO'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_ventana_evaluacion_pos') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_ventana_evaluacion_pos
-            CHECK (ventana_evaluacion_segundos > 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_ventana_actualizacion_pos') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_ventana_actualizacion_pos
-            CHECK (ventana_actualizacion_segundos > 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_tolerancia_temp_pos') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_tolerancia_temp_pos
-            CHECK (tolerancia_temp_c >= 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_umbrales_aceptacion') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_umbrales_aceptacion
-            CHECK (umbral_aceptacion_crudo >= 0 AND umbral_aceptacion_quemado >= 0
-                AND umbral_aceptacion_crudo <= 100 AND umbral_aceptacion_quemado <= 100);
-    END IF;
-    -- Columnas de tuning opcionales: NULL = usar el valor del producto, así el
-    -- CHECK admite NULL (delta_temp1_max_c > 0 sólo aplica cuando está seteado).
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_delta_temp1_pos') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_delta_temp1_pos
-            CHECK (delta_temp1_max_c > 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_delta_vel_pos') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_delta_vel_pos
-            CHECK (delta_vel_max > 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_lotes_confianza_promedio') THEN
-        ALTER TABLE lotes_productivos ADD CONSTRAINT chk_lotes_confianza_promedio
-            CHECK (confianza_promedio IS NULL OR (confianza_promedio >= 0 AND confianza_promedio <= 1));
-    END IF;
-END $$;
-
-COMMENT ON COLUMN lotes_productivos.modo                       IS 'Modo de operación: MANUAL/SUPERVISION/AUTOMATICO (default MANUAL para no romper lotes existentes)';
-COMMENT ON COLUMN lotes_productivos.ventana_evaluacion_segundos IS 'Cada cuántos segundos se re-evalúa el estado y se decide un nuevo setpoint';
-COMMENT ON COLUMN lotes_productivos.ventana_actualizacion_segundos IS 'Cada cuántos segundos se aplica un nuevo setpoint (>= ventana_evaluacion)';
-COMMENT ON COLUMN lotes_productivos.tolerancia_temp_c          IS 'Tolerancia sobre la temperatura objetivo al iniciar (°C, default 2.0)';
-COMMENT ON COLUMN lotes_productivos.umbral_aceptacion_crudo    IS 'Porcentaje máximo de crudos aceptado (% del total); alerta si se supera N ventanas';
-COMMENT ON COLUMN lotes_productivos.umbral_aceptacion_quemado  IS 'Porcentaje máximo de quemados aceptado (% del total)';
-COMMENT ON COLUMN lotes_productivos.pesos_objetivo             IS 'Pesos de la función objetivo del MPC: wc, wq, wo, dt, dc';
-COMMENT ON COLUMN lotes_productivos.iniciado_manualmente       IS 'TRUE = el operador arrancó horno+cinta por su cuenta y el sistema se enganchó después';
-COMMENT ON COLUMN lotes_productivos.temp1_objetivo             IS 'Último setpoint de T1 aplicado por el control (lectura del estado activo)';
-COMMENT ON COLUMN lotes_productivos.vel_objetivo               IS 'Último setpoint de velocidad de cinta aplicado por el control';
-COMMENT ON COLUMN lotes_productivos.delta_temp1_max_c          IS 'Override de tuning del ΔT1 máximo por ciclo (°C); NULL = usa el valor del producto';
-COMMENT ON COLUMN lotes_productivos.delta_vel_max              IS 'Override de tuning del ΔV máximo por ciclo (m/s); NULL = usa el valor del producto';
-COMMENT ON COLUMN lotes_productivos.confianza_promedio         IS 'Confianza media de las detecciones del lote, fijada al cerrarlo desde eventos_lote.confianza; NULL si el lote no tuvo detecciones con confianza';
-
--- ----------------------------------------------------------------------------
--- 3) metricas_horno: telemetría cruda del horno reportada por la Pi ENTRADA.
---    Una fila por heartbeat (default 5s). Sirve como fuente para la ventana de
---    evaluación del optimizador.
--- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS metricas_horno (
-    id                   UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    lote_id              UUID         NOT NULL REFERENCES lotes_productivos(id) ON DELETE CASCADE,
-    dispositivo_id       UUID         NOT NULL REFERENCES dispositivos(id) ON DELETE RESTRICT,
-    sector_id            VARCHAR(50)  NOT NULL,
-    temp_horno_1         NUMERIC(6,2),
-    temp_comb_1          NUMERIC(6,2),
-    humedad_horno        NUMERIC(5,2),
-    temp_ambiente        NUMERIC(5,2),
-    humedad_ambiente     NUMERIC(5,2),
-    velocidad_cinta      NUMERIC(6,3),
-    temp_objetivo        NUMERIC(6,2),
-    vel_objetivo         NUMERIC(6,3),
-    confianza_deteccion  NUMERIC(4,3) CHECK (confianza_deteccion IS NULL OR (confianza_deteccion BETWEEN 0 AND 1)),
-    received_at          TIMESTAMPTZ  NOT NULL DEFAULT now()
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    lote_id uuid NOT NULL,
+    dispositivo_id uuid NOT NULL,
+    sector_id character varying(50) NOT NULL,
+    temp_horno_1 numeric(6,2),
+    temp_comb_1 numeric(6,2),
+    humedad_horno numeric(5,2),
+    temp_ambiente numeric(5,2),
+    humedad_ambiente numeric(5,2),
+    velocidad_cinta numeric(6,3),
+    temp_objetivo numeric(6,2),
+    vel_objetivo numeric(6,3),
+    confianza_deteccion numeric(4,3),
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT metricas_horno_confianza_deteccion_check CHECK (((confianza_deteccion IS NULL) OR ((confianza_deteccion >= (0)::numeric) AND (confianza_deteccion <= (1)::numeric)))),
+    CONSTRAINT metricas_horno_pkey PRIMARY KEY (id),
+    CONSTRAINT metricas_horno_dispositivo_id_fkey FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    CONSTRAINT metricas_horno_lote_id_fkey FOREIGN KEY (lote_id) REFERENCES lotes_productivos(id) ON DELETE CASCADE
 );
 
-COMMENT ON TABLE  metricas_horno                   IS 'Telemetría cruda del horno (T1/combustión/humedad/ambiente/velocidad) reportada por la Pi ENTRADA';
-COMMENT ON COLUMN metricas_horno.temp_horno_1      IS 'Temperatura leída del horno 1 (°C, NULL permitido si el sensor cae)';
-COMMENT ON COLUMN metricas_horno.temp_comb_1       IS 'Temperatura de la cámara de combustión del horno 1 (°C, opcional)';
-COMMENT ON COLUMN metricas_horno.humedad_horno     IS 'Humedad relativa dentro del horno (%, opcional)';
-COMMENT ON COLUMN metricas_horno.temp_ambiente     IS 'Temperatura ambiente (°C, opcional)';
-COMMENT ON COLUMN metricas_horno.humedad_ambiente  IS 'Humedad ambiente (%, opcional)';
-COMMENT ON COLUMN metricas_horno.velocidad_cinta   IS 'Velocidad activa de la cinta (m/s)';
-COMMENT ON COLUMN metricas_horno.temp_objetivo     IS 'Setpoint activo de T1 al momento de la lectura';
-COMMENT ON COLUMN metricas_horno.vel_objetivo      IS 'Setpoint activo de velocidad al momento de la lectura';
+COMMENT ON TABLE metricas_horno IS 'Telemetría cruda del horno (T1/combustión/humedad/ambiente/velocidad) reportada por la Pi ENTRADA';
+COMMENT ON COLUMN metricas_horno.temp_horno_1 IS 'Temperatura leída del horno 1 (°C, NULL permitido si el sensor cae)';
+COMMENT ON COLUMN metricas_horno.temp_comb_1 IS 'Temperatura de la cámara de combustión del horno 1 (°C, opcional)';
+COMMENT ON COLUMN metricas_horno.humedad_horno IS 'Humedad relativa dentro del horno (%, opcional)';
+COMMENT ON COLUMN metricas_horno.temp_ambiente IS 'Temperatura ambiente (°C, opcional)';
+COMMENT ON COLUMN metricas_horno.humedad_ambiente IS 'Humedad ambiente (%, opcional)';
+COMMENT ON COLUMN metricas_horno.velocidad_cinta IS 'Velocidad activa de la cinta (m/s)';
+COMMENT ON COLUMN metricas_horno.temp_objetivo IS 'Setpoint activo de T1 al momento de la lectura';
+COMMENT ON COLUMN metricas_horno.vel_objetivo IS 'Setpoint activo de velocidad al momento de la lectura';
 COMMENT ON COLUMN metricas_horno.confianza_deteccion IS 'Promedio de confianza del modelo de visión en la última ventana (0..1)';
-COMMENT ON COLUMN metricas_horno.received_at       IS 'Marca temporal en que el backend recibió la métrica';
+COMMENT ON COLUMN metricas_horno.received_at IS 'Marca temporal en que el backend recibió la métrica';
 
+-- Índices
 CREATE INDEX IF NOT EXISTS idx_metricas_horno_lote_received
-    ON metricas_horno (lote_id, received_at DESC);
+    ON metricas_horno USING btree (lote_id, received_at DESC);
 
--- ----------------------------------------------------------------------------
--- 4) decisiones_control: audit del MPC. Una fila por decisión tomada (no por
---    tick si la decisión fue "no cambiar"). Permite auditar qué predijo el
---    modelo, qué propuso el optimizador y qué terminó aplicándose.
--- ----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS decisiones_control (
-    id                  UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    lote_id             UUID         NOT NULL REFERENCES lotes_productivos(id) ON DELETE CASCADE,
-    ventana_inicio      TIMESTAMPTZ  NOT NULL,
-    ventana_fin         TIMESTAMPTZ  NOT NULL,
-    muestras            INT          NOT NULL CHECK (muestras >= 0),
-    temp_actual         NUMERIC(6,2) NOT NULL,
-    vel_actual          NUMERIC(6,3) NOT NULL,
-    pct_crudos_obs      NUMERIC(5,2) NOT NULL CHECK (pct_crudos_obs BETWEEN 0 AND 100),
-    pct_ok_obs          NUMERIC(5,2) NOT NULL CHECK (pct_ok_obs BETWEEN 0 AND 100),
-    pct_quemados_obs    NUMERIC(5,2) NOT NULL CHECK (pct_quemados_obs BETWEEN 0 AND 100),
-    conf_promedio       NUMERIC(4,3) NOT NULL CHECK (conf_promedio BETWEEN 0 AND 1),
-    temp_propuesto      NUMERIC(6,2) NOT NULL,
-    vel_propuesto       NUMERIC(6,3) NOT NULL,
-    temp_aplicado       NUMERIC(6,2),
-    vel_aplicado        NUMERIC(6,3),
-    prediccion          JSONB,
-    z_observado         NUMERIC(10,4),
-    z_predicho          NUMERIC(10,4),
-    razon_skipped       TEXT,
-    aplicado_por        VARCHAR(20), -- 'MPC' (automático), 'OPERARIO' (supervisión aprobado), 'NADIE' (no aplicado)
-    decision_origen_id  UUID,
-    aprobada_por        VARCHAR(255),
-    aprobada_at         TIMESTAMPTZ,
-    created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT fk_decisiones_control_origen
-        FOREIGN KEY (decision_origen_id) REFERENCES decisiones_control(id)
-        ON DELETE SET NULL
+-- ============================================================================
+-- TABLA 12: eventos_lote (Detalle append-only de detecciones por lote)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS eventos_lote (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    lote_id uuid NOT NULL,
+    evento_id uuid NOT NULL,
+    producto_id uuid NOT NULL,
+    estado character varying(10),
+    confianza double precision,
+    pista integer,
+    frame bigint,
+    modelo_id character varying(100),
+    dispositivo_id uuid,
+    momento timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_eventos_lote_confianza CHECK (((confianza IS NULL) OR ((confianza >= (0)::double precision) AND (confianza <= (1)::double precision)))),
+    CONSTRAINT chk_eventos_lote_estado CHECK (estado IS NULL OR estado IN ('ok', 'crudo', 'quemado')),
+    CONSTRAINT eventos_lote_evento_id_key UNIQUE (evento_id),
+    CONSTRAINT eventos_lote_pkey PRIMARY KEY (id),
+    CONSTRAINT eventos_lote_dispositivo_id_fkey FOREIGN KEY (dispositivo_id) REFERENCES dispositivos(id) ON DELETE RESTRICT,
+    CONSTRAINT eventos_lote_lote_id_fkey FOREIGN KEY (lote_id) REFERENCES lotes_productivos(id) ON DELETE CASCADE,
+    CONSTRAINT eventos_lote_producto_id_fkey FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE RESTRICT
 );
 
-COMMENT ON TABLE  decisiones_control                IS 'Audit del MPC: una fila por decisión propuesta (aplicada o no)';
-COMMENT ON COLUMN decisiones_control.ventana_inicio IS 'Inicio de la ventana de evaluación que originó la decisión';
-COMMENT ON COLUMN decisiones_control.ventana_fin    IS 'Fin de la ventana de evaluación';
-COMMENT ON COLUMN decisiones_control.muestras       IS 'Cantidad de detecciones en la ventana';
-COMMENT ON COLUMN decisiones_control.temp_actual    IS 'T1 activa al momento de la decisión';
-COMMENT ON COLUMN decisiones_control.vel_actual     IS 'Velocidad activa al momento de la decisión';
-COMMENT ON COLUMN decisiones_control.pct_crudos_obs IS '% crudo observado en la ventana (crudos/total*100)';
-COMMENT ON COLUMN decisiones_control.pct_ok_obs     IS '% OK observado en la ventana';
-COMMENT ON COLUMN decisiones_control.pct_quemados_obs IS '% quemados observado en la ventana';
-COMMENT ON COLUMN decisiones_control.conf_promedio  IS 'Confianza promedio del detector en la ventana (0..1)';
-COMMENT ON COLUMN decisiones_control.temp_propuesto IS 'T1 que el MPC propuso';
-COMMENT ON COLUMN decisiones_control.vel_propuesto  IS 'Velocidad que el MPC propuso';
-COMMENT ON COLUMN decisiones_control.temp_aplicado  IS 'T1 efectivamente aplicada (NULL en modo SUPERVISION si no se aprobó)';
-COMMENT ON COLUMN decisiones_control.vel_aplicado   IS 'Velocidad efectivamente aplicada (idem)';
-COMMENT ON COLUMN decisiones_control.prediccion     IS 'Salida cruda del XGBoost (JSONB con pctCrudos/pctOk/pctQuemados/modelVersion)';
-COMMENT ON COLUMN decisiones_control.z_observado     IS 'Valor de la función objetivo con datos observados';
-COMMENT ON COLUMN decisiones_control.z_predicho     IS 'Valor de la función objetivo con la predicción del XGBoost';
-COMMENT ON COLUMN decisiones_control.razon_skipped  IS 'Si no se propuso cambio, motivo (confianza_baja, ventana_sin_muestras, sin_convergencia, etc.)';
-COMMENT ON COLUMN decisiones_control.aplicado_por   IS 'MPC = aplicado por el control automático; OPERARIO = aprobado manualmente en SUPERVISION; NADIE = no aplicado';
+COMMENT ON TABLE eventos_lote IS 'Detalle append-only de detecciones reportadas por la salida; alimenta los conteos en vivo del lote.';
+COMMENT ON COLUMN eventos_lote.id IS 'Identificador UUID del registro de evento';
+COMMENT ON COLUMN eventos_lote.lote_id IS 'FK al lote productivo; se borra en cascada con el lote';
+COMMENT ON COLUMN eventos_lote.evento_id IS 'UUIDv4 generado por la Pi y reutilizado en cada reintento: clave de deduplicación';
+COMMENT ON COLUMN eventos_lote.producto_id IS 'FK al producto detectado (debe coincidir con el producto del lote)';
+COMMENT ON COLUMN eventos_lote.estado IS 'Estado de calidad: ok, crudo o quemado (nullable si el modelo no lo determina)';
+COMMENT ON COLUMN eventos_lote.confianza IS 'Confianza de la detección entre 0 y 1 (nullable)';
+COMMENT ON COLUMN eventos_lote.pista IS 'Número de pista/banda de la detección (nullable)';
+COMMENT ON COLUMN eventos_lote.frame IS 'Número de frame del video de origen (nullable)';
+COMMENT ON COLUMN eventos_lote.modelo_id IS 'Identificador del modelo de inferencia que produjo la detección (nullable)';
+COMMENT ON COLUMN eventos_lote.dispositivo_id IS 'FK al dispositivo que reportó el evento (nullable)';
+COMMENT ON COLUMN eventos_lote.momento IS 'Marca temporal informativa del momento de la detección según la Pi (nullable)';
+COMMENT ON COLUMN eventos_lote.created_at IS 'Marca temporal en que el backend recibió el evento';
 
--- F-B12: migración idempotente para bases creadas antes de decision_origen_id.
-ALTER TABLE decisiones_control ADD COLUMN IF NOT EXISTS decision_origen_id UUID;
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_decisiones_control_origen') THEN
-        ALTER TABLE decisiones_control
-            ADD CONSTRAINT fk_decisiones_control_origen
-            FOREIGN KEY (decision_origen_id) REFERENCES decisiones_control(id)
-            ON DELETE SET NULL;
-    END IF;
-END $$;
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_eventos_lote_lote_created
+    ON eventos_lote USING btree (lote_id, created_at);
 
-COMMENT ON COLUMN decisiones_control.decision_origen_id IS 'Cuando esta decisión fue promovida (NADIE→OPERARIO o AUTO→...), apunta a la decisión origen. Self-ref cuando se promueve la misma fila.';
+-- ============================================================================
+-- TABLA 13: plan_produccion (Plan de producción por sector y turno)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS plan_produccion (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sector_id character varying(50) NOT NULL,
+    producto_id uuid NOT NULL,
+    fecha date NOT NULL,
+    turno character varying(10) NOT NULL,
+    inicio_at timestamp with time zone NOT NULL,
+    fin_at timestamp with time zone NOT NULL,
+    kg_plan numeric(10,3) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_plan_fin_after_inicio CHECK ((fin_at > inicio_at)),
+    CONSTRAINT chk_plan_kg_positivo CHECK ((kg_plan > (0)::numeric)),
+    CONSTRAINT chk_plan_turno CHECK (turno IN ('mañana', 'tarde', 'noche')),
+    CONSTRAINT plan_produccion_pkey PRIMARY KEY (id),
+    CONSTRAINT uq_plan_produccion_sector_inicio_producto UNIQUE (sector_id, inicio_at, producto_id),
+    CONSTRAINT plan_produccion_producto_id_fkey FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE RESTRICT,
+    CONSTRAINT plan_produccion_sector_id_fkey FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE RESTRICT
+);
 
--- Aprobación de propuestas en SUPERVISION (persistida al confirmar el operario).
-ALTER TABLE decisiones_control ADD COLUMN IF NOT EXISTS aprobada_por VARCHAR(255);
-ALTER TABLE decisiones_control ADD COLUMN IF NOT EXISTS aprobada_at TIMESTAMPTZ;
+COMMENT ON TABLE plan_produccion IS 'Plan de producción por sector y turno; una fila por producto y ventana planificada.';
+COMMENT ON COLUMN plan_produccion.id IS 'Identificador UUID del plan de producción';
+COMMENT ON COLUMN plan_produccion.sector_id IS 'FK al sector de producción';
+COMMENT ON COLUMN plan_produccion.producto_id IS 'FK al producto planificado';
+COMMENT ON COLUMN plan_produccion.fecha IS 'Fecha del plan (calendario de Argentina)';
+COMMENT ON COLUMN plan_produccion.turno IS 'Turno planificado: mañana, tarde o noche';
+COMMENT ON COLUMN plan_produccion.inicio_at IS 'Inicio de la ventana planificada';
+COMMENT ON COLUMN plan_produccion.fin_at IS 'Fin de la ventana planificada, posterior al inicio';
+COMMENT ON COLUMN plan_produccion.kg_plan IS 'Kilogramos planificados para la ventana; debe ser mayor a 0';
+COMMENT ON COLUMN plan_produccion.created_at IS 'Marca temporal de alta del registro';
+COMMENT ON COLUMN plan_produccion.updated_at IS 'Marca temporal de la última modificación del registro';
 
-COMMENT ON COLUMN decisiones_control.aprobada_por IS 'Usuario que aprobó la propuesta en SUPERVISION (NULL si nadie la aprobó)';
-COMMENT ON COLUMN decisiones_control.aprobada_at  IS 'Momento en que se aprobó la propuesta en SUPERVISION';
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_plan_produccion_sector_inicio
+    ON plan_produccion USING btree (sector_id, inicio_at);
 
-CREATE INDEX IF NOT EXISTS idx_decisiones_control_lote_created
-    ON decisiones_control (lote_id, created_at DESC);
+-- ============================================================================
+-- TABLA 14: eventos_parada (Eventos de parada de producción / OEE)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS eventos_parada (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sector_id character varying(50) NOT NULL,
+    lote_id uuid,
+    inicio_at timestamp with time zone NOT NULL,
+    fin_at timestamp with time zone NOT NULL,
+    causa_codigo text NOT NULL,
+    tipo character varying(20) NOT NULL,
+    notas text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_eventos_parada_fin_after_inicio CHECK ((fin_at > inicio_at)),
+    CONSTRAINT chk_eventos_parada_tipo CHECK (tipo IN ('PLANIFICADA', 'NO_PLANIFICADA')),
+    CONSTRAINT eventos_parada_pkey PRIMARY KEY (id),
+    CONSTRAINT uq_eventos_parada_sector_inicio_causa UNIQUE (sector_id, inicio_at, causa_codigo),
+    CONSTRAINT eventos_parada_lote_id_fkey FOREIGN KEY (lote_id) REFERENCES lotes_productivos(id) ON DELETE SET NULL,
+    CONSTRAINT eventos_parada_sector_id_fkey FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE RESTRICT
+);
 
--- Soporte del lookup del origen de una decisión promovida, sin indexar las
--- filas raíz (NULL). Acota el fan-out del ON DELETE SET NULL.
-CREATE INDEX IF NOT EXISTS idx_decisiones_control_origen
-    ON decisiones_control (decision_origen_id) WHERE decision_origen_id IS NOT NULL;
+COMMENT ON TABLE eventos_parada IS 'Eventos de parada de producción que explican el tiempo no productivo (OEE).';
+COMMENT ON COLUMN eventos_parada.id IS 'Identificador UUID del evento de parada';
+COMMENT ON COLUMN eventos_parada.sector_id IS 'FK al sector afectado';
+COMMENT ON COLUMN eventos_parada.lote_id IS 'FK opcional al lote productivo afectado; SET NULL si se elimina el lote';
+COMMENT ON COLUMN eventos_parada.inicio_at IS 'Inicio de la parada';
+COMMENT ON COLUMN eventos_parada.fin_at IS 'Fin de la parada, posterior al inicio';
+COMMENT ON COLUMN eventos_parada.causa_codigo IS 'Código de causa de la parada (texto libre normalizado por el importador)';
+COMMENT ON COLUMN eventos_parada.tipo IS 'Tipo de parada: PLANIFICADA o NO_PLANIFICADA';
+COMMENT ON COLUMN eventos_parada.notas IS 'Observaciones libres de la parada (nullable)';
+COMMENT ON COLUMN eventos_parada.created_at IS 'Marca temporal de alta del registro';
 
--- ----------------------------------------------------------------------------
--- 5) alertas: eventos operativos que el panel muestra y el operario reconoce.
---    sector_id/lote_id/acked_by usan SET NULL para no perder la alerta si se
---    borra la entidad referenciada. La deduplicación se hace con índices
---    parciales sobre las alertas ACTIVA: una sola por lote+tipo y por horno+tipo.
--- ----------------------------------------------------------------------------
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_eventos_parada_sector_inicio
+    ON eventos_parada USING btree (sector_id, inicio_at);
+
+-- ============================================================================
+-- TABLA 15: alertas (Alertas operativas del panel)
+-- ============================================================================
 CREATE TABLE IF NOT EXISTS alertas (
-    id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    sector_id   VARCHAR(50)  REFERENCES sectores(id) ON DELETE SET NULL,
-    lote_id     UUID         REFERENCES lotes_productivos(id) ON DELETE SET NULL,
-    horno_id    TEXT,
-    tipo        TEXT         NOT NULL,
-    severidad   TEXT         NOT NULL CHECK (severidad IN ('INFO', 'WARNING', 'CRITICAL')),
-    estado      TEXT         NOT NULL DEFAULT 'ACTIVA' CHECK (estado IN ('ACTIVA', 'ACK', 'RESUELTA')),
-    mensaje     TEXT         NOT NULL,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    acked_by    UUID         REFERENCES usuarios(id) ON DELETE SET NULL,
-    acked_at    TIMESTAMPTZ
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sector_id character varying(50),
+    lote_id uuid,
+    horno_id text,
+    tipo text NOT NULL,
+    severidad text NOT NULL,
+    estado text DEFAULT 'ACTIVA'::text NOT NULL,
+    mensaje text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    acked_by uuid,
+    acked_at timestamp with time zone,
+    CONSTRAINT alertas_estado_check CHECK ((estado = ANY (ARRAY['ACTIVA'::text, 'ACK'::text, 'RESUELTA'::text]))),
+    CONSTRAINT alertas_severidad_check CHECK ((severidad = ANY (ARRAY['INFO'::text, 'WARNING'::text, 'CRITICAL'::text]))),
+    CONSTRAINT alertas_pkey PRIMARY KEY (id),
+    CONSTRAINT alertas_acked_by_fkey FOREIGN KEY (acked_by) REFERENCES usuarios(id) ON DELETE SET NULL,
+    CONSTRAINT alertas_lote_id_fkey FOREIGN KEY (lote_id) REFERENCES lotes_productivos(id) ON DELETE SET NULL,
+    CONSTRAINT alertas_sector_id_fkey FOREIGN KEY (sector_id) REFERENCES sectores(id) ON DELETE SET NULL
 );
 
-COMMENT ON TABLE  alertas            IS 'Alertas operativas (temperatura, fallo de enlace, timeout de precalentamiento) visibles en el panel; el operario las reconoce (ACK).';
-COMMENT ON COLUMN alertas.sector_id  IS 'Sector afectado (nullable; SET NULL si se elimina el sector)';
-COMMENT ON COLUMN alertas.lote_id    IS 'Lote productivo afectado (nullable; SET NULL si se elimina el lote)';
-COMMENT ON COLUMN alertas.horno_id   IS 'Identificador del horno físico (no es FK: el dominio horno vive en memoria)';
-COMMENT ON COLUMN alertas.tipo       IS 'Origen de la alerta: TEMPERATURA_HORNO, CONSIGNA_ENLACE o PRECALENTAMIENTO_TIMEOUT';
-COMMENT ON COLUMN alertas.severidad  IS 'Gravedad: INFO, WARNING o CRITICAL';
-COMMENT ON COLUMN alertas.estado     IS 'Ciclo de vida: ACTIVA (sin reconocer), ACK (reconocida por un operario) o RESUELTA';
-COMMENT ON COLUMN alertas.mensaje    IS 'Texto legible de la alerta para el panel';
+COMMENT ON TABLE alertas IS 'Alertas operativas (temperatura, fallo de enlace, timeout de precalentamiento) visibles en el panel; el operario las reconoce (ACK).';
+COMMENT ON COLUMN alertas.sector_id IS 'Sector afectado (nullable; SET NULL si se elimina el sector)';
+COMMENT ON COLUMN alertas.lote_id IS 'Lote productivo afectado (nullable; SET NULL si se elimina el lote)';
+COMMENT ON COLUMN alertas.horno_id IS 'Identificador del horno físico (no es FK: el dominio horno vive en memoria)';
+COMMENT ON COLUMN alertas.tipo IS 'Origen de la alerta: TEMPERATURA_HORNO, CONSIGNA_ENLACE o PRECALENTAMIENTO_TIMEOUT';
+COMMENT ON COLUMN alertas.severidad IS 'Gravedad: INFO, WARNING o CRITICAL';
+COMMENT ON COLUMN alertas.estado IS 'Ciclo de vida: ACTIVA (sin reconocer), ACK (reconocida por un operario) o RESUELTA';
+COMMENT ON COLUMN alertas.mensaje IS 'Texto legible de la alerta para el panel';
 COMMENT ON COLUMN alertas.created_at IS 'Marca temporal de generación de la alerta';
-COMMENT ON COLUMN alertas.acked_by   IS 'FK al usuario que reconoció la alerta (nullable mientras está ACTIVA)';
-COMMENT ON COLUMN alertas.acked_at   IS 'Marca temporal del reconocimiento (nullable mientras está ACTIVA)';
+COMMENT ON COLUMN alertas.acked_by IS 'FK al usuario que reconoció la alerta (nullable mientras está ACTIVA)';
+COMMENT ON COLUMN alertas.acked_at IS 'Marca temporal del reconocimiento (nullable mientras está ACTIVA)';
 
--- Deduplicación: una sola alerta ACTIVA por lote+tipo y por horno+tipo.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_alertas_activa_lote_tipo
-    ON alertas (lote_id, tipo) WHERE estado = 'ACTIVA' AND lote_id IS NOT NULL;
-
-CREATE UNIQUE INDEX IF NOT EXISTS uq_alertas_activa_horno_tipo
-    ON alertas (horno_id, tipo) WHERE estado = 'ACTIVA' AND horno_id IS NOT NULL;
-
--- Listado del panel por estado, más recientes primero.
+-- Índices
 CREATE INDEX IF NOT EXISTS idx_alertas_estado_created
-    ON alertas (estado, created_at DESC);
+    ON alertas USING btree (estado, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alertas_activa_horno_tipo
+    ON alertas USING btree (horno_id, tipo) WHERE ((estado = 'ACTIVA'::text) AND (horno_id IS NOT NULL));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alertas_activa_lote_tipo
+    ON alertas USING btree (lote_id, tipo) WHERE ((estado = 'ACTIVA'::text) AND (lote_id IS NOT NULL));
 
 COMMIT;
