@@ -78,6 +78,9 @@ Todos los `Validate()` de dominio acumulan **todos** los campos inválidos y los
 | 35 | `POST /api/v1/planificacion/{plan,paradas}/import` | Importación CSV de plan de producción y paradas |
 | 36 | `GET /api/v1/reportes/oee` | OEE estándar (A/P/Q), global y por sector |
 | 37 | `GET/DELETE /api/v1/planificacion/{plan,paradas}[/{id}]` | Listar lo importado por período y borrar una fila |
+| 38 | `GET /api/v1/admin/notificaciones` | Canales configurados y preferencias por usuario |
+| 39 | `PATCH /api/v1/admin/notificaciones/{usuarioID}` | Actualizar preferencias/canal Telegram de un usuario |
+| 40 | `POST /api/v1/admin/notificaciones/test` | Enviar una notificación de prueba puntual |
 
 ---
 
@@ -87,8 +90,7 @@ Devuelve una **proyección de solo lectura** del horno del sector a partir de la
 telemetría real de la Pi (`metricas_horno`) del lote abierto, más sus alertas
 recientes. Si no hay telemetría, los campos numéricos viajan `null`: el backend
 no inventa temperatura. No hay horno en memoria: el backend no simula estado ni
-aplica consignas. `CONTROL_MANUAL` se mantiene sólo por alertas históricas
-`CONSIGNA_ENLACE` activas.
+aplica consignas.
 
 **Auth:** cookie JWT `session_token` (cualquier rol). **Query param:** `sector_id` (requerido; `id` se acepta como alias legacy).
 
@@ -139,7 +141,6 @@ curl -b "session_token=$JWT" "http://localhost:8080/api/v1/horno?sector_id=horno
 | `SIN_DATOS` | Hay muestra pero T1 y velocidad de cinta son `null` |
 | `ACTIVO` | Muestra con T o V y antigüedad ≤ 30 s |
 | `DESACTUALIZADO` | La última muestra tiene más de 30 s |
-| `CONTROL_MANUAL` | Alerta `CONSIGNA_ENLACE` ACTIVA para el sector/horno |
 
 `fuente` vale `sin_lote`, `sin_telemetria` o `telemetria` según el origen de los datos.
 
@@ -1700,6 +1701,10 @@ sin límite; `truncada` es `true` cuando `total` supera las filas devueltas.
 `acked_por` es el email del usuario que reconoció la alerta. Lista y total se
 leen en una transacción read-only `REPEATABLE READ`.
 
+Tipos de alerta actuales: `TEMPERATURA_HORNO`, `PRECALENTAMIENTO_TIMEOUT`,
+`PORCENTAJE_QUEMADOS_ALTO`, `PORCENTAJE_CRUDOS_ALTO`, `DISPOSITIVO_OFFLINE` y
+`TELEMETRIA_DESACTUALIZADA`. Quedan `ACTIVA` hasta el ACK (no hay auto-resolve).
+
 ```bash
 curl -b "session_token=$JWT" \
   "http://localhost:8080/api/v1/reportes/alertas?desde=2026-10-01&hasta=2026-10-31&estado=ACK&limite=1000"
@@ -2064,6 +2069,85 @@ existe). Éxito:
 
 ---
 
+## 38–40. Notificaciones de alertas (sólo Administrador)
+
+Las alertas **WARNING/CRITICAL** se encolan por usuario activo en un outbox
+persistente. Cada fila se reintenta con backoff hasta `NOTIFICACIONES_MAX_INTENTOS`
+y el unique `(alerta_id, usuario_id, canal)` evita duplicados. Un canal sin
+configuración (Resend, Gmail API o Telegram) queda deshabilitado sin impedir el
+arranque.
+
+### 38. `GET /api/v1/admin/notificaciones`
+
+Devuelve el estado de los canales y todos los usuarios con sus preferencias
+resueltas (sin fila de preferencias, ambos canales quedan en `true`).
+
+```json
+{
+  "success": true,
+  "message": "Configuración de notificaciones obtenida",
+  "data": {
+    "canales": {
+      "email": { "configurado": true, "remitente": "alertas@fermar.com.ar" },
+      "telegram": { "configurado": false }
+    },
+    "destinatarios": [
+      {
+        "usuario_id": "11111111-1111-1111-1111-111111111111",
+        "email": "supervisor@fermar.com.ar",
+        "nombre": "Supervisor Demo",
+        "rol": "Supervisor",
+        "activo": true,
+        "telegram_chat_id": "123456789",
+        "notificar_email": true,
+        "notificar_telegram": true
+      }
+    ]
+  }
+}
+```
+
+### 39. `PATCH /api/v1/admin/notificaciones/{usuarioID}`
+
+Body parcial; los campos omitidos no cambian. `telegram_chat_id: ""` limpia el
+chat ID. El chat ID no vacío debe cumplir `^-?[0-9]{5,20}$`.
+
+```json
+{ "telegram_chat_id": "123456789", "notificar_email": false }
+```
+
+Devuelve el destinatario actualizado en `data`.
+
+| Código | Motivo |
+|---|---|
+| 200 | Preferencias actualizadas |
+| 400 | JSON inválido o chat ID inválido |
+| 404 | `usuarioID` desconocido |
+| 415 | Content-Type distinto de `application/json` |
+| 500 | Error inesperado de base de datos |
+
+### 40. `POST /api/v1/admin/notificaciones/test`
+
+Envía una prueba directa (no pasa por el outbox). Body:
+
+```json
+{ "canal": "EMAIL", "usuario_id": "11111111-1111-1111-1111-111111111111" }
+```
+
+`canal` acepta `EMAIL` o `TELEGRAM` (case-insensitive). El email usa el email
+del usuario; Telegram exige un chat ID cargado.
+
+| Código | Motivo |
+|---|---|
+| 200 | Prueba enviada |
+| 400 | Canal inválido, falta `usuario_id`, sin destino (`errors.code = "sin_destino"`) o chat ID inválido |
+| 404 | Usuario desconocido |
+| 409 | Canal no configurado (`errors.code = "canal_no_configurado"`) |
+| 415 | Content-Type distinto de `application/json` |
+| 502 | El proveedor rechazó el envío (sin exponer secretos) |
+
+---
+
 ## Tabla resumen: auth y validaciones por endpoint
 
 | Endpoint | Auth | Content-Type obligatorio | Límite body 1MB |
@@ -2109,4 +2193,7 @@ existe). Éxito:
 | `GET /api/v1/planificacion/{plan,paradas}` | JWT cookie, Supervisor/Admin | — | — |
 | `DELETE /api/v1/planificacion/{plan,paradas}/{id}` | JWT cookie, Supervisor/Admin | — | — |
 | `GET /api/v1/reportes/oee` | JWT cookie (`session_token`), cualquier rol | — | — |
+| `GET /api/v1/admin/notificaciones` | JWT cookie, Administrador | — | — |
+| `PATCH /api/v1/admin/notificaciones/{usuarioID}` | JWT cookie, Administrador | ✅ | ✅ |
+| `POST /api/v1/admin/notificaciones/test` | JWT cookie, Administrador | ✅ | ✅ |
 | Otros `GET` | Según la sección del endpoint | — | — |

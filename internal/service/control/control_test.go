@@ -1072,3 +1072,159 @@ func TestLimitesVigentesAplicaTuningDelLote(t *testing.T) {
 		t.Fatalf("sin lote debe conservar el arranque: %+v", got)
 	}
 }
+
+// newCalidadLoop arma un Loop mínimo para ejercitar evaluarCalidad.
+func newCalidadLoop(alertas alerta.Repository) *Loop {
+	return &Loop{
+		loteID:         "lote-1",
+		sectorID:       "horno-1",
+		ventanaEvalSeg: 600,
+		alertas:        alertas,
+	}
+}
+
+// TestEvaluarCalidadVentanaVaciaNoRearma verifica que una ventana sin eventos
+// no resetee el latch: no hay datos para afirmar que la condición se normalizó.
+func TestEvaluarCalidadVentanaVaciaNoRearma(t *testing.T) {
+	repo := &fakeAlertaRepoControl{}
+	loop := newCalidadLoop(repo)
+	lote := &lote_sector.Lote{UmbralAceptacionQuemado: 5}
+
+	loop.evaluarCalidad(lote, 0, 12.5, true)
+	loop.evaluarCalidad(lote, 0, 0, false) // ventana vacía
+	loop.evaluarCalidad(lote, 0, 12.5, true)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("la ventana vacía no debe rearmar; got %d alertas", len(repo.guardadas))
+	}
+}
+
+// TestEvaluarCalidadQuemadosUnaPorPeriodo verifica que se dispara sobre el
+// umbral, no duplica en la evaluación siguiente y vuelve a disparar tras
+// normalizarse.
+func TestEvaluarCalidadQuemadosUnaPorPeriodo(t *testing.T) {
+	repo := &fakeAlertaRepoControl{}
+	loop := newCalidadLoop(repo)
+	lote := &lote_sector.Lote{UmbralAceptacionQuemado: 5}
+
+	loop.evaluarCalidad(lote, 0, 12.5, true)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("se esperaba 1 alerta de quemados, got %d", len(repo.guardadas))
+	}
+	a := repo.guardadas[0]
+	if a.Tipo != alerta.TipoPorcentajeQuemadosAlto || a.Severidad != alerta.SeveridadWarning ||
+		a.Estado != alerta.EstadoActiva {
+		t.Fatalf("alerta de quemados mal formada: %+v", a)
+	}
+	if a.LoteID == nil || *a.LoteID != "lote-1" || a.HornoID != "" {
+		t.Fatalf("la alerta debe atarse al lote sin horno: %+v", a)
+	}
+
+	// Sigue sobre el umbral: no duplica.
+	loop.evaluarCalidad(lote, 0, 20, true)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("no debe duplicar mientras la condición persiste; got %d", len(repo.guardadas))
+	}
+
+	// Se normaliza y luego vuelve a subir: nueva alerta.
+	loop.evaluarCalidad(lote, 0, 3, true)
+	loop.evaluarCalidad(lote, 0, 9, true)
+	if len(repo.guardadas) != 2 {
+		t.Fatalf("debe rearmarse tras normalizar; got %d alertas", len(repo.guardadas))
+	}
+}
+
+// TestEvaluarCalidadCrudosUnaPorPeriodo cubre el mismo ciclo para crudos.
+func TestEvaluarCalidadCrudosUnaPorPeriodo(t *testing.T) {
+	repo := &fakeAlertaRepoControl{}
+	loop := newCalidadLoop(repo)
+	lote := &lote_sector.Lote{UmbralAceptacionCrudo: 5}
+
+	loop.evaluarCalidad(lote, 11, 0, true)
+	loop.evaluarCalidad(lote, 11, 0, true)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("se esperaba 1 alerta de crudos sin duplicar, got %d", len(repo.guardadas))
+	}
+	if repo.guardadas[0].Tipo != alerta.TipoPorcentajeCrudosAlto {
+		t.Fatalf("tipo = %q, want %q", repo.guardadas[0].Tipo, alerta.TipoPorcentajeCrudosAlto)
+	}
+
+	loop.evaluarCalidad(lote, 2, 0, true)
+	loop.evaluarCalidad(lote, 8, 0, true)
+	if len(repo.guardadas) != 2 {
+		t.Fatalf("debe rearmarse tras normalizar; got %d alertas", len(repo.guardadas))
+	}
+}
+
+// TestEvaluarCalidadUsaUmbralesDelLoteYDefault verifica que el umbral del lote
+// manda y que 0 cae al default 5.0.
+func TestEvaluarCalidadUsaUmbralesDelLoteYDefault(t *testing.T) {
+	repo := &fakeAlertaRepoControl{}
+	loop := newCalidadLoop(repo)
+
+	lote := &lote_sector.Lote{UmbralAceptacionQuemado: 8}
+	loop.evaluarCalidad(lote, 0, 7, true)
+	if len(repo.guardadas) != 0 {
+		t.Fatalf("7%% no supera el umbral del lote 8%%; got %d alertas", len(repo.guardadas))
+	}
+	loop.evaluarCalidad(lote, 0, 9, true)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("9%% debe superar el umbral del lote; got %d alertas", len(repo.guardadas))
+	}
+
+	// Umbral 0 => default 5.0.
+	repo.guardadas = nil
+	loop.alertaQuemadosActiva = false
+	defaultLote := &lote_sector.Lote{}
+	loop.evaluarCalidad(defaultLote, 0, 4.9, true)
+	if len(repo.guardadas) != 0 {
+		t.Fatalf("4.9%% no supera el default 5%%; got %d alertas", len(repo.guardadas))
+	}
+	loop.evaluarCalidad(defaultLote, 0, 5.1, true)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("5.1%% debe superar el default 5%%; got %d alertas", len(repo.guardadas))
+	}
+}
+
+// TestEvaluarTemperaturaFueraDeTolerancia verifica la alerta WARNING de T1
+// fuera de objetivo, el latch por período continuo y el rearme al volver a
+// tolerancia.
+func TestEvaluarTemperaturaFueraDeTolerancia(t *testing.T) {
+	repo := &fakeAlertaRepoControl{}
+	loop := &Loop{loteID: "lote-1", sectorID: "horno-1", alertas: repo, ventanaEvalSeg: 600}
+	lote := &lote_sector.Lote{Temp1Objetivo: floatPtr(200), ToleranciaTempC: 2}
+
+	muestras := func(vals ...float64) []metricashorno.MetricaHorno {
+		out := make([]metricashorno.MetricaHorno, len(vals))
+		for i, v := range vals {
+			out[i] = metricashorno.MetricaHorno{TempHorno1: floatPtr(v)}
+		}
+		return out
+	}
+
+	// Promedio 210 vs objetivo 200: fuera de la tolerancia de 2 °C.
+	loop.evaluarTemperatura(context.Background(), lote, muestras(210, 211, 209))
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("se esperaba 1 alerta de temperatura, got %d", len(repo.guardadas))
+	}
+	a := repo.guardadas[0]
+	if a.Tipo != alerta.TipoTemperaturaHorno || a.Severidad != alerta.SeveridadWarning ||
+		a.Estado != alerta.EstadoActiva {
+		t.Fatalf("alerta de temperatura mal formada: %+v", a)
+	}
+	if a.LoteID == nil || *a.LoteID != "lote-1" || a.HornoID != "" {
+		t.Fatalf("la alerta debe atarse al lote sin horno: %+v", a)
+	}
+
+	// Sigue fuera: no duplica.
+	loop.evaluarTemperatura(context.Background(), lote, muestras(215, 215, 215))
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("no debe duplicar mientras la condición persiste; got %d", len(repo.guardadas))
+	}
+
+	// Vuelve a tolerancia y luego se sale de nuevo: nueva alerta.
+	loop.evaluarTemperatura(context.Background(), lote, muestras(200, 201, 199))
+	loop.evaluarTemperatura(context.Background(), lote, muestras(210, 211, 209))
+	if len(repo.guardadas) != 2 {
+		t.Fatalf("debe rearmarse tras normalizar; got %d alertas", len(repo.guardadas))
+	}
+}

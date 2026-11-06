@@ -43,6 +43,10 @@ func TestMigrate_RegistraVersiones(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.Contains(t, versions, "0001_baseline.sql")
 	require.Contains(t, versions, "0002_legacy_ubicacion.sql")
+	require.Contains(t, versions, "0003_notificaciones.sql")
+	require.Contains(t, versions, "0004_alertas_calidad.sql")
+	require.Contains(t, versions, "0005_alertas_dispositivo.sql")
+	require.Contains(t, versions, "0006_notificaciones_html.sql")
 }
 
 func TestMigrate_NoReaplica(t *testing.T) {
@@ -123,4 +127,48 @@ func TestMigrate_LegacyUbicacionUnDispositivoPorTipo(t *testing.T) {
 		`SELECT count(*) FROM dispositivos WHERE sector_id='linea-a'`,
 	).Scan(&asignados))
 	require.Equal(t, 1, asignados, "sólo un dispositivo por sector/tipo puede quedar asignado")
+}
+
+// TestMigrate_AlertasDispositivo verifica la columna y el índice parcial de la
+// migración 0005.
+func TestMigrate_AlertasDispositivo(t *testing.T) {
+	p := isolatedPool(t)
+	ctx := context.Background()
+	require.NoError(t, Apply(ctx, p))
+
+	var existe bool
+	require.NoError(t, p.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'alertas'
+			  AND column_name = 'dispositivo_id'
+		)`).Scan(&existe))
+	require.True(t, existe, "alertas.dispositivo_id debe existir")
+
+	var indice string
+	require.NoError(t, p.QueryRow(ctx, `
+		SELECT indexname FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'alertas'
+		  AND indexname = 'uq_alertas_activa_dispositivo_tipo'`).Scan(&indice))
+	require.Equal(t, "uq_alertas_activa_dispositivo_tipo", indice)
+}
+
+// TestMigrate_NotificacionesHTML verifica la columna cuerpo_html de la
+// migración 0006.
+func TestMigrate_NotificacionesHTML(t *testing.T) {
+	p := isolatedPool(t)
+	ctx := context.Background()
+	require.NoError(t, Apply(ctx, p))
+
+	var existe bool
+	require.NoError(t, p.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'notificaciones_outbox'
+			  AND column_name = 'cuerpo_html'
+		)`).Scan(&existe))
+	require.True(t, existe, "notificaciones_outbox.cuerpo_html debe existir")
 }

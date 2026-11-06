@@ -25,6 +25,26 @@ services:
         sync: false
       - key: PREDICTOR_AUTH_TOKEN
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: NOTIFICACIONES_EMAIL_FROM
+        sync: false
+      - key: NOTIFICACIONES_EMAIL_PROVIDER
+        sync: false
+      - key: GMAIL_CLIENT_ID
+        sync: false
+      - key: GMAIL_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: NOTIFICACIONES_PANEL_URL
+        sync: false
+      - key: TELEMETRIA_MONITOR_INTERVALO
+        value: 15s
+      - key: TELEMETRIA_DESACTUALIZADA_SEGUNDOS
+        value: 30s
       - key: PORT
         value: "8080"
 
@@ -51,5 +71,25 @@ services:
         sync: false
       - key: PREDICTOR_AUTH_TOKEN
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: NOTIFICACIONES_EMAIL_FROM
+        sync: false
+      - key: NOTIFICACIONES_EMAIL_PROVIDER
+        sync: false
+      - key: GMAIL_CLIENT_ID
+        sync: false
+      - key: GMAIL_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: NOTIFICACIONES_PANEL_URL
+        sync: false
+      - key: TELEMETRIA_MONITOR_INTERVALO
+        value: 15s
+      - key: TELEMETRIA_DESACTUALIZADA_SEGUNDOS
+        value: 30s
       - key: PORT
         value: "8080"

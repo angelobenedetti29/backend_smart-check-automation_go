@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
@@ -44,6 +45,7 @@ type DispositivoService struct {
 	store         dispositivo.StateStore
 	broker        *sse.Broker
 	renameTimeout time.Duration
+	alertas       alerta.Repository
 }
 
 // NewDispositivoService instancia el servicio inyectando repositorio, state
@@ -54,6 +56,12 @@ func NewDispositivoService(repo dispositivo.Repository, store dispositivo.StateS
 		renameTimeout = defaultRenamePushTimeout
 	}
 	return &DispositivoService{repo: repo, store: store, broker: broker, renameTimeout: renameTimeout}
+}
+
+// SetAlertas inyecta el repositorio de alertas. Nil-safe: sin repo, el reaper
+// no genera alertas de dispositivo offline.
+func (s *DispositivoService) SetAlertas(a alerta.Repository) {
+	s.alertas = a
 }
 
 // normalizeSectorID trata un sectorId vacío o en blanco como "sin sector" (nil).
@@ -366,6 +374,7 @@ func (s *DispositivoService) StartReaper(ctx context.Context, interval, umbral t
 				if estado, ok := s.store.Get(id); ok {
 					s.broadcastState(*estado)
 					log.Printf("[DISPOSITIVO] Dispositivo %s pasó a offline", id)
+					s.alertarOffline(*estado, umbral)
 				}
 			}
 
@@ -373,6 +382,29 @@ func (s *DispositivoService) StartReaper(ctx context.Context, interval, umbral t
 			log.Println("[DISPOSITIVO] Reaper detenido")
 			return
 		}
+	}
+}
+
+// alertarOffline registra una alerta WARNING cuando el reaper detecta la
+// transición online→offline. La alerta queda ACTIVA hasta que un operario la
+// reconoce (no hay auto-resolve). El índice único (dispositivo_id, tipo)
+// deduplica. Best-effort: un fallo sólo se loguea.
+func (s *DispositivoService) alertarOffline(estado dispositivo.EstadoDispositivo, umbral time.Duration) {
+	if s.alertas == nil {
+		return
+	}
+	dispositivoID := estado.DispositivoID
+	a := &alerta.Alerta{
+		DispositivoID: &dispositivoID,
+		SectorID:      estado.SectorID,
+		Tipo:          alerta.TipoDispositivoOffline,
+		Severidad:     alerta.SeveridadWarning,
+		Estado:        alerta.EstadoActiva,
+		Mensaje: fmt.Sprintf("Dispositivo %s (%s) sin reportar desde hace más de %s",
+			estado.Nombre, estado.DispositivoID, umbral),
+	}
+	if err := s.alertas.Save(a); err != nil {
+		log.Printf("[DISPOSITIVO] No se pudo guardar alerta offline de %s: %v", estado.DispositivoID, err)
 	}
 }
 

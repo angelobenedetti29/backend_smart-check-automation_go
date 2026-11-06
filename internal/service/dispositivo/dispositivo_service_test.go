@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
@@ -1219,4 +1220,126 @@ func TestRenameFromPanel_URLInalcanzable(t *testing.T) {
 	if persisted.Nombre != "Pi Vieja" {
 		t.Fatalf("DB MUST be untouched on unreachable host, got %q", persisted.Nombre)
 	}
+}
+
+// fakeAlertaRepoDispositivo captura las alertas que genera el reaper.
+type fakeAlertaRepoDispositivo struct {
+	mu        sync.Mutex
+	guardadas []alerta.Alerta
+}
+
+func (f *fakeAlertaRepoDispositivo) Save(a *alerta.Alerta) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.guardadas = append(f.guardadas, *a)
+	return nil
+}
+
+func (f *fakeAlertaRepoDispositivo) GetByHornoID(string) ([]alerta.Alerta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepoDispositivo) Listar(context.Context, string) ([]alerta.Alerta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepoDispositivo) Ack(context.Context, string, alerta.Usuario) (*alerta.Alerta, error) {
+	return nil, alerta.ErrNotFound
+}
+
+func (f *fakeAlertaRepoDispositivo) snapshot() []alerta.Alerta {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]alerta.Alerta(nil), f.guardadas...)
+}
+
+// TestStartReaper_CreaAlertaOffline verifica que la transición online→offline
+// deje una alerta DISPOSITIVO_OFFLINE con dispositivo y sector.
+func TestStartReaper_CreaAlertaOffline(t *testing.T) {
+	sectorID := "horno-1"
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{
+		"d1": {ID: "d1", Nombre: "Pi 1", SectorID: &sectorID},
+	}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Hydrate([]dispositivo.DispositivoConUltimaMetrica{
+		{Dispositivo: dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID}},
+	}, 25*time.Second, time.Now().UTC())
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+
+	store.Update(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1", SectorID: &sectorID}, dispositivo.MetricaDispositivo{
+		DispositivoID: "d1", ReceivedAt: time.Now().UTC().Add(-1 * time.Minute),
+	})
+
+	alertas := &fakeAlertaRepoDispositivo{}
+	svc := NewDispositivoService(repo, store, broker, 0)
+	svc.SetAlertas(alertas)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.StartReaper(ctx, 20*time.Millisecond, 25*time.Second)
+	}()
+
+	drainEvents(client, 2*time.Second)
+	cancel()
+	<-done
+
+	guardadas := alertas.snapshot()
+	if len(guardadas) != 1 {
+		t.Fatalf("se esperaba 1 alerta offline, got %d", len(guardadas))
+	}
+	a := guardadas[0]
+	if a.Tipo != alerta.TipoDispositivoOffline || a.Severidad != alerta.SeveridadWarning ||
+		a.Estado != alerta.EstadoActiva {
+		t.Fatalf("alerta offline mal formada: %+v", a)
+	}
+	if a.DispositivoID == nil || *a.DispositivoID != "d1" {
+		t.Fatalf("dispositivo_id = %v, want d1", a.DispositivoID)
+	}
+	if a.SectorID == nil || *a.SectorID != sectorID {
+		t.Fatalf("sector_id = %v, want %s", a.SectorID, sectorID)
+	}
+	if a.HornoID != "" {
+		t.Fatalf("horno_id debe quedar vacío; got %q", a.HornoID)
+	}
+
+	broker.Unsubscribe(client)
+}
+
+// TestStartReaper_SinAlertasConfiguradasNoFalla verifica que SetAlertas es
+// opcional: sin repo el reaper sigue marcando offline y no entra en panic.
+func TestStartReaper_SinAlertasConfiguradasNoFalla(t *testing.T) {
+	repo := &fakeDispositivoRepo{dispositivos: map[string]dispositivo.Dispositivo{"d1": {ID: "d1", Nombre: "Pi 1"}}}
+	store := database.NewMemoryDispositivoStateStore()
+	store.Hydrate([]dispositivo.DispositivoConUltimaMetrica{
+		{Dispositivo: dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1"}},
+	}, 25*time.Second, time.Now().UTC())
+	broker := sse.NewBroker()
+	client := broker.Subscribe()
+	store.Update(dispositivo.Dispositivo{ID: "d1", Nombre: "Pi 1"}, dispositivo.MetricaDispositivo{
+		DispositivoID: "d1", ReceivedAt: time.Now().UTC().Add(-1 * time.Minute),
+	})
+
+	svc := NewDispositivoService(repo, store, broker, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.StartReaper(ctx, 20*time.Millisecond, 25*time.Second)
+	}()
+
+	drainEvents(client, 2*time.Second)
+	cancel()
+	<-done
+
+	if estado, _ := store.Get("d1"); estado.Estado != dispositivo.EstadoOffline {
+		t.Fatalf("expected d1 offline, got %q", estado.Estado)
+	}
+	broker.Unsubscribe(client)
 }

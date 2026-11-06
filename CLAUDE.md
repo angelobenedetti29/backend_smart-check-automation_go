@@ -74,6 +74,7 @@ backend_smart-check-automation_go/
 │   │   ├── horno/                                   # GET /api/v1/horno (proyección de telemetría)
 │   │   ├── lote_sector/                             # GET /api/v1/dispositivos/sector, POST /api/v1/lotes/inicio|{id}/eventos|{id}/cierre, GET /api/v1/lotes|/lotes/abierto
 │   │   ├── metricashorno/                           # POST|GET /api/v1/lotes/{id}/metricas-horno
+│   │   ├── notificacion/                            # GET|PATCH /api/v1/admin/notificaciones, POST .../test
 │   │   ├── producto/                                # GET/POST /api/v1/productos, PUT|DELETE /api/v1/productos/{id}
 │   │   ├── registro/                                # POST|GET /api/v1/registration-requests (+ approve/reject)
 │   │   ├── sector/                                  # POST /api/v1/sectores, PUT|DELETE /api/v1/sectores/{id}
@@ -86,6 +87,7 @@ backend_smart-check-automation_go/
 │   │   ├── dispositivo/                             # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo + DeviceRead
 │   │   ├── lote_sector/                             # Modelo Lote + Evento + modo/ventanas + interfaces Repository/Service
 │   │   ├── metricashorno/                           # Telemetría cruda del horno (metricas_horno)
+│   │   ├── notificacion/                            # Preferencias, destinatarios y outbox de notificaciones
 │   │   ├── producto/                                # Modelo Producto (catálogo maestro + parámetros de control)
 │   │   ├── registro/                                # Modelo de solicitudes de enrolamiento
 │   │   ├── sector/                                  # Modelo Sector + contrato Repository
@@ -103,6 +105,7 @@ backend_smart-check-automation_go/
 │   │   ├── consigna_repo.go                         # PostgreSQL — Historial de consignas
 │   │   ├── decisiones_control_repo.go               # PostgreSQL — audit del MPC
 │   │   ├── metricas_horno_repo.go                   # PostgreSQL — telemetría cruda del horno
+│   │   ├── notificacion_repo.go                     # PostgreSQL — preferencias y outbox de notificaciones
 │   │   └── user_postgres_repository.go              # PostgreSQL — CRUD usuarios
 │   └── service/
 │       ├── auth/                                    # LoginWithGoogle, LoginWithCredentials, generateJWT
@@ -111,6 +114,7 @@ backend_smart-check-automation_go/
 │       ├── dispositivo/                             # Lógica de ping, reaper y SSE
 │       ├── horno/                                   # Lógica de umbrales térmicos y alertas
 │       ├── lote_sector/                             # Ciclo de lote por sector (apertura, eventos, cierre, historial)
+│       ├── notificacion/                            # Encolado de alertas, worker de outbox, Resend/Gmail y Telegram
 │       ├── optimizador/                             # MPC horizonte 1: grilla, Z, límites y pesos
 │       ├── predictor/                               # Cliente HTTP al sidecar XGBoost
 │       ├── producto/                                # Catálogo de productos y sus parámetros de control
@@ -140,6 +144,7 @@ backend_smart-check-automation_go/
 - **eventos_lote**: Detecciones individuales reportadas por los nodos, deduplicadas por `evento_id`, que alimentan los conteos del lote.
 - **device_lifecycle_audit**: Traza de auditoría del ciclo de vida de dispositivos (approve/reject del alta, baja lógica) con actor y estados anterior/nuevo.
 - **usuarios**: Autenticación corporativa (Email, Rol, Password Hash).
+- **usuarios_notificaciones** & **notificaciones_outbox**: preferencias por usuario y outbox de notificaciones. Las alertas WARNING/CRITICAL se encolan una vez por usuario activo y canal habilitado (email Resend o Gmail API según `NOTIFICACIONES_EMAIL_PROVIDER`, Telegram Bot API); un worker reintenta con backoff hasta `NOTIFICACIONES_MAX_INTENTOS`. Sin fila de preferencias, ambos canales quedan habilitados. El encolado no es atómico con el INSERT de la alerta (best-effort; ver comentario en `alerta_repo.go`).
 
 Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario@fermar.com.ar`. Contraseña seed: `password123`.
 
@@ -155,6 +160,9 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | GET | /api/v1/admin/usuarios | JWT cookie | Administrador |
 | POST | /api/v1/admin/usuarios | JWT cookie | Administrador |
 | PATCH | /api/v1/admin/usuarios/{id} | JWT cookie | Administrador |
+| GET | /api/v1/admin/notificaciones | JWT cookie | Administrador |
+| PATCH | /api/v1/admin/notificaciones/{usuarioID} | JWT cookie | Administrador |
+| POST | /api/v1/admin/notificaciones/test | JWT cookie | Administrador |
 | GET | /api/v1/horno | JWT cookie | cualquier rol |
 | GET | /api/v1/productos | Bearer dispositivo o JWT cookie | — |
 | POST | /api/v1/productos | JWT cookie | Supervisor, Admin |
@@ -209,12 +217,14 @@ arranca el loop del MPC (SCA-400), que es quien propone/aplica consignas.
 - **RBAC en middleware**: `RequireRoleFromDB(...)` se encadena después de `JWTMiddleware` y re-lee rol/activo desde la DB en cada request. Roles: `Administrador > Supervisor > Operario`.
 - **Bcrypt para contraseñas locales**: `DefaultCost`. Usuarios Google-only tienen `password_hash = NULL`.
 - **Estado de dispositivos en caché en memoria + historial en PostgreSQL**: `MemoryDispositivoStateStore` para lecturas rápidas; historial append-only en `metricas_dispositivo`.
-- **Detección de offline con reaper en background**: `StartReaper` corre cada `DISPOSITIVO_REAPER_INTERVAL`.
+- **Detección de offline con reaper en background**: `StartReaper` corre cada `DISPOSITIVO_REAPER_INTERVAL`; al detectar la transición online→offline emite `dispositivo.state` y crea una alerta `DISPOSITIVO_OFFLINE` (WARNING) con `dispositivo_id`/`sector_id`.
 - **Consigna manual y MPC**: `ConsignaService.DispatchManual` (SCA-320) es el único camino manual: valida lote ABIERTO/MANUAL y el rango del producto, y encola el override para la Pi. El loop del MPC (SCA-400) sólo publica propuestas (`decisiones_control` + SSE); el backend nunca aplica. El trigger automático de SCA-142 desde `/lotes/inicio` fue retirado y `origen=AUTOMATICO` en `historial_consignas` sólo queda como histórico.
 - **Modos de operación por lote**: `MANUAL` no corre loop; `SUPERVISION` publica propuestas que requieren aprobación; `AUTOMATICO` publica propuestas ya autorizadas. El modo se persiste en `lotes_productivos.modo` y se cambia con `PATCH` (panel) o `PUT` (Pi) `/api/v1/lotes/{id}/modo`.
 - **Actuador único**: la Pi ENTRADA es la única actuadora. Hace pull de `/consigna-propuesta` y confirma con `/consigna/ack`. No existe `CONTROL_ACTUADOR` ni despacho desde el backend.
 - **PLC del horno**: el backend no abre conexiones Modbus ni escribe ningún PLC. La Pi ENTRADA es la única escritora del PLC real, con su propio `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`).
-- **Estado del horno**: `GET /api/v1/horno` es una proyección de solo lectura de `metricas_horno` (último sample del lote abierto) + lote + alertas. Estados: `SIN_LOTE`, `SIN_TELEMETRIA`, `SIN_DATOS`, `ACTIVO`, `DESACTUALIZADO` (>30 s) y `CONTROL_MANUAL` (alerta histórica `CONSIGNA_ENLACE` activa). Sin telemetría los campos van `null`. No hay horno en memoria ni endpoint de actualización de temperatura.
+- **Estado del horno**: `GET /api/v1/horno` es una proyección de solo lectura de `metricas_horno` (último sample del lote abierto) + lote + alertas. Estados: `SIN_LOTE`, `SIN_TELEMETRIA`, `SIN_DATOS`, `ACTIVO` y `DESACTUALIZADO` (>30 s). Sin telemetría los campos van `null`. No hay horno en memoria ni endpoint de actualización de temperatura.
+- **Alertas de calidad del lote**: el loop MPC compara los % de crudos/quemados de la ventana (`ventana_evaluacion_segundos`) contra `umbral_aceptacion_crudo`/`umbral_aceptacion_quemado` (default 5.0). Al superarlos emite `PORCENTAJE_CRUDOS_ALTO`/`PORCENTAJE_QUEMADOS_ALTO` con severidad `WARNING`, una sola vez por condición continua y lote; se rearma cuando el porcentaje se normaliza. Son alertas de lote (`horno_id` vacío), no de horno.
+- **Alertas de temperatura y telemetría**: en ADAPTANDO el loop MPC promedia las últimas 3 muestras de T1 y emite `TEMPERATURA_HORNO` (WARNING) si se aleja del objetivo de receta más allá de `tolerancia_temp_c` (default 2 °C). Un worker en `ControlHandler` (`StartTelemetriaMonitor`, `TELEMETRIA_MONITOR_INTERVALO` default 15 s) alerta `TELEMETRIA_DESACTUALIZADA` cuando el lote abierto lleva más de `TELEMETRIA_DESACTUALIZADA_SEGUNDOS` (default 30 s) sin muestra y evalúa la misma regla de temperatura para lotes `MANUAL`. Todas usan latch por lote/tipo, quedan `ACTIVA` hasta el ACK y no tienen auto-resolve.
 - **Override manual encolado**: `POST /api/v1/horno/consigna` exige `loteId` de un lote abierto en modo `MANUAL`; `sectorId` es opcional y debe coincidir. Deja una decisión ya aprobada con `muestras=0`; la Pi la obtiene por `consigna-propuesta` con `manual_override=true` y la aplica sin el clamp de Δ por ciclo. La consigna queda `estado=PENDIENTE`/`exitosa=true` (encolada); el ack de la Pi la cierra como `APLICADA`, y un fallo de encolado deja `estado=RECHAZADA`/`exitosa=false` con `motivoError`.
 - **SSE de control**: el loop emite `control.propuesta` con `autorizada` (true en AUTOMATICO, false en SUPERVISION hasta la aprobación). La `Propuesta` serializa `temp1`, `velocidad`, `z` y `prediccion`.
 - **Predictor sidecar**: cliente HTTP con timeout de 2s; si el sidecar falla, el optimizador no propone y la decisión se audita como `skipped`. Los artefactos entrenados son JSON (`save_raw(raw_format="json")`) por producto en `models_xgb/`.
@@ -234,10 +244,22 @@ arranca el loop del MPC (SCA-400), que es quien propone/aplica consignas.
 | `PORT` | Puerto HTTP (default 8080) |
 | `DISPOSITIVO_REAPER_INTERVAL` | Intervalo del reaper (default 5s) |
 | `DISPOSITIVO_OFFLINE_THRESHOLD` | Umbral de inactividad (default 90s) |
+| `TELEMETRIA_MONITOR_INTERVALO` | Cadencia del monitor de telemetría (default 15s) |
+| `TELEMETRIA_DESACTUALIZADA_SEGUNDOS` | Antigüedad máxima de la última muestra (default 30s) |
 | `PREDICTOR_URL` | URL base del sidecar predictor (default `http://localhost:8090`) |
 | `PREDICTOR_AUTH_TOKEN` | Opcional — Bearer para autenticar contra el sidecar |
 | `MPC_CONFIANZA_MIN` | Confianza mínima promedio para proponer (default `0.5`) |
 | `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` | Timeout de precalentamiento (default `1800`) |
 | `MPC_PREHEAT_POLL_SEGUNDOS` | Cadencia durante precalentamiento (default `15`) |
 | `MPC_PERMITIR_PLACEHOLDER` | Permite AUTOMATICO con placeholder (default `false`) |
+| `NOTIFICACIONES_EMAIL_PROVIDER` | Proveedor de email: `resend` (default) o `gmail`/`gmail_api` |
+| `RESEND_API_KEY` | Opcional — API key de Resend; vacío deshabilita el email |
+| `GMAIL_CLIENT_ID` | Opcional — OAuth Client ID para Gmail API |
+| `GMAIL_CLIENT_SECRET` | Opcional — OAuth Client Secret para Gmail API |
+| `GMAIL_REFRESH_TOKEN` | Opcional — refresh token con scope `gmail.send` |
+| `NOTIFICACIONES_EMAIL_FROM` | Remitente; con Gmail debe ser la cuenta autenticada |
+| `TELEGRAM_BOT_TOKEN` | Opcional — token del bot de Telegram; vacío deshabilita el canal |
+| `NOTIFICACIONES_PANEL_URL` | Opcional — base del panel para enlazar `/alertas` en el mensaje |
+| `NOTIFICACIONES_INTERVALO` | Cadencia del worker de outbox (default `15s`) |
+| `NOTIFICACIONES_MAX_INTENTOS` | Máximo de intentos por notificación (default `5`) |
 | `TEST_DATABASE_URL` | Opcional — activa tests de integración con DB real |

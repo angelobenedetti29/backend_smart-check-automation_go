@@ -35,7 +35,6 @@ const (
 	EstadoSinDatos        = "SIN_DATOS"
 	EstadoActivo          = "ACTIVO"
 	EstadoDesactualizado  = "DESACTUALIZADO"
-	EstadoControlManual   = "CONTROL_MANUAL"
 	FuenteSinLote         = "sin_lote"
 	FuenteSinTelemetria   = "sin_telemetria"
 	FuenteTelemetria      = "telemetria"
@@ -118,9 +117,6 @@ func (h *HornoHandler) GetHornoStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	alerts, _ := h.alertaRepo.GetByHornoID(sectorID)
-	if tieneConsignaEnlaceActiva(alerts) {
-		hornoDTO.Estado = EstadoControlManual
-	}
 
 	data := map[string]interface{}{
 		"horno":             hornoDTO,
@@ -195,15 +191,4 @@ func (h *HornoHandler) proyectarHorno(r *http.Request, s *sector.Sector) (*Horno
 	}
 
 	return dto, nil
-}
-
-// tieneConsignaEnlaceActiva informa si hay una alerta de fallo de enlace sin
-// resolver: el horno queda en CONTROL_MANUAL.
-func tieneConsignaEnlaceActiva(alerts []alerta.Alerta) bool {
-	for _, a := range alerts {
-		if a.Tipo == alerta.TipoConsignaEnlace && a.Estado == alerta.EstadoActiva {
-			return true
-		}
-	}
-	return false
 }

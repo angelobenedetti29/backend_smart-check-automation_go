@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,9 +14,16 @@ import (
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 )
 
+// EncoladorNotificaciones encola las notificaciones de una alerta recién
+// persistida. Lo implementa el service de notificaciones.
+type EncoladorNotificaciones interface {
+	EncolarParaAlerta(ctx context.Context, a *alerta.Alerta) error
+}
+
 // AlertaPostgresRepository implementa alerta.Repository contra PostgreSQL.
 type AlertaPostgresRepository struct {
-	db *pgxpool.Pool
+	db        *pgxpool.Pool
+	encolador EncoladorNotificaciones
 }
 
 // NewAlertaPostgresRepository crea un repositorio real conectado a PostgreSQL.
@@ -23,9 +31,14 @@ func NewAlertaPostgresRepository(db *pgxpool.Pool) *AlertaPostgresRepository {
 	return &AlertaPostgresRepository{db: db}
 }
 
+// SetEncolador configura el encolador de notificaciones. Nil lo deshabilita.
+func (r *AlertaPostgresRepository) SetEncolador(e EncoladorNotificaciones) {
+	r.encolador = e
+}
+
 const insertAlertaSQL = `
-INSERT INTO alertas (sector_id, lote_id, horno_id, tipo, severidad, estado, mensaje)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO alertas (sector_id, lote_id, dispositivo_id, horno_id, tipo, severidad, estado, mensaje)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT DO NOTHING
 RETURNING id, created_at`
 
@@ -49,7 +62,7 @@ func (r *AlertaPostgresRepository) Save(a *alerta.Alerta) error {
 	}
 
 	err := r.db.QueryRow(ctx, insertAlertaSQL,
-		a.SectorID, a.LoteID, hornoID, a.Tipo, a.Severidad, estado, a.Mensaje,
+		a.SectorID, a.LoteID, a.DispositivoID, hornoID, a.Tipo, a.Severidad, estado, a.Mensaje,
 	).Scan(&a.ID, &a.CreadaEn)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // deduplicada por un índice parcial: no es un error
@@ -57,13 +70,25 @@ func (r *AlertaPostgresRepository) Save(a *alerta.Alerta) error {
 	if err != nil {
 		return fmt.Errorf("insert alerta: %w", err)
 	}
+
+	// shortcut: el encolado no es atómico con el INSERT de la alerta. Si se
+	// necesita at-least-once estricto, moverlo a un CTE/transacción única.
+	if r.encolador != nil && a.ID != "" {
+		encCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := r.encolador.EncolarParaAlerta(encCtx, a); err != nil {
+			log.Printf("[ALERTA] no se pudo encolar notificaciones para alerta %s: %v", a.ID, err)
+		}
+	}
+
 	return nil
 }
 
 const selectAlertaColumns = `
 a.id, COALESCE(a.sector_id::text, ''), COALESCE(a.lote_id::text, ''),
-COALESCE(a.horno_id, ''), a.tipo, a.severidad, a.estado, a.mensaje,
-a.created_at, a.acked_at, COALESCE(u.email, ''), COALESCE(u.nombre, '')
+COALESCE(a.dispositivo_id::text, ''), COALESCE(a.horno_id, ''), a.tipo,
+a.severidad, a.estado, a.mensaje, a.created_at, a.acked_at,
+COALESCE(u.email, ''), COALESCE(u.nombre, '')
 FROM alertas a
 LEFT JOIN usuarios u ON u.id = a.acked_by`
 
@@ -172,9 +197,9 @@ func scanAlertas(rows pgx.Rows) ([]alerta.Alerta, error) {
 }
 
 func scanAlerta(s rowScanner, a *alerta.Alerta) error {
-	var sectorID, loteID, ackEmail, ackNombre string
+	var sectorID, loteID, dispositivoID, ackEmail, ackNombre string
 	if err := s.Scan(
-		&a.ID, &sectorID, &loteID, &a.HornoID, &a.Tipo, &a.Severidad, &a.Estado,
+		&a.ID, &sectorID, &loteID, &dispositivoID, &a.HornoID, &a.Tipo, &a.Severidad, &a.Estado,
 		&a.Mensaje, &a.CreadaEn, &a.AckedAt, &ackEmail, &ackNombre,
 	); err != nil {
 		return err
@@ -184,6 +209,9 @@ func scanAlerta(s rowScanner, a *alerta.Alerta) error {
 	}
 	if loteID != "" {
 		a.LoteID = &loteID
+	}
+	if dispositivoID != "" {
+		a.DispositivoID = &dispositivoID
 	}
 	if ackEmail != "" {
 		a.AckedPor = &alerta.Usuario{Email: ackEmail, Nombre: ackNombre}

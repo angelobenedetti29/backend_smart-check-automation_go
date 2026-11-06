@@ -74,7 +74,7 @@ func decodeJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]interfac
 func TestHandleListar_ArrayShape(t *testing.T) {
 	repo := &fakeAlertaRepo{lista: []alerta.Alerta{
 		{ID: "a1", Tipo: alerta.TipoTemperaturaHorno, Estado: alerta.EstadoActiva},
-		{ID: "a2", Tipo: alerta.TipoConsignaEnlace, Estado: alerta.EstadoActiva},
+		{ID: "a2", Tipo: alerta.TipoPorcentajeQuemadosAlto, Estado: alerta.EstadoActiva},
 	}}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/alertas?estado=ACTIVA", nil)

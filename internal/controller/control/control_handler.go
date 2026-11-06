@@ -177,6 +177,165 @@ func NewControlHandler(deps ControlDeps) *ControlHandler {
 	return &ControlHandler{deps: deps}
 }
 
+// StartTelemetriaMonitor corre el worker que vigila la frescura de la
+// telemetría de cada lote abierto y, en MANUAL, la temperatura de T1. Las
+// alertas quedan ACTIVAS hasta que un operario las reconoce.
+func (h *ControlHandler) StartTelemetriaMonitor(ctx context.Context, intervalo, umbral time.Duration) {
+	if intervalo <= 0 {
+		intervalo = 15 * time.Second
+	}
+	if umbral <= 0 {
+		umbral = 30 * time.Second
+	}
+	log.Printf("[control] Monitor de telemetría iniciado: cada %s, umbral %s", intervalo, umbral)
+	ticker := time.NewTicker(intervalo)
+	defer ticker.Stop()
+	// Latch por lote|tipo: una alerta por condición continua. Sólo lo toca
+	// esta goroutine.
+	activas := map[string]bool{}
+	for {
+		select {
+		case <-ticker.C:
+			h.evaluarTelemetria(ctx, time.Now().UTC(), umbral, activas)
+		case <-ctx.Done():
+			log.Println("[control] Monitor de telemetría detenido")
+			return
+		}
+	}
+}
+
+func (h *ControlHandler) evaluarTelemetria(ctx context.Context, now time.Time, umbral time.Duration, activas map[string]bool) {
+	lotes, err := h.deps.LoteRepo.ListAbiertos(ctx)
+	if err != nil {
+		log.Printf("[control] Monitor telemetría: ListAbiertos: %v", err)
+		return
+	}
+	vivos := make(map[string]bool, len(lotes))
+	for i := range lotes {
+		lote := &lotes[i]
+		vivos[lote.ID] = true
+		h.evaluarTelemetriaLote(ctx, lote, now, umbral, activas)
+	}
+	// Liberar latches de lotes que ya se cerraron.
+	for clave := range activas {
+		loteID, _, _ := strings.Cut(clave, "|")
+		if !vivos[loteID] {
+			delete(activas, clave)
+		}
+	}
+}
+
+func (h *ControlHandler) evaluarTelemetriaLote(ctx context.Context, lote *lotesector.Lote, now time.Time, umbral time.Duration, activas map[string]bool) {
+	claveTele := lote.ID + "|" + alerta.TipoTelemetriaDesactualizada
+	claveTemp := lote.ID + "|" + alerta.TipoTemperaturaHorno
+
+	metricas, err := h.deps.MetricasRepo.GetUltimasParaLote(ctx, lote.ID, 3)
+	if err != nil {
+		log.Printf("[control] Monitor telemetría: GetUltimasParaLote(%s): %v", lote.ID, err)
+		return
+	}
+	if len(metricas) == 0 {
+		if now.Sub(lote.AbiertoEn) >= umbral {
+			h.alertarLote(lote, alerta.TipoTelemetriaDesactualizada, fmt.Sprintf(
+				"Sin telemetría para el lote abierto desde hace %s (umbral %s)",
+				now.Sub(lote.AbiertoEn).Round(time.Second), umbral), activas)
+		} else {
+			delete(activas, claveTele)
+		}
+		return
+	}
+
+	antiguedad := now.Sub(metricas[0].ReceivedAt)
+	if antiguedad > umbral {
+		h.alertarLote(lote, alerta.TipoTelemetriaDesactualizada, fmt.Sprintf(
+			"Última telemetría hace %s (umbral %s)", antiguedad.Round(time.Second), umbral), activas)
+		return
+	}
+	delete(activas, claveTele)
+
+	// El loop MPC ya evalúa T1 en los modos no manuales.
+	if lote.Modo != lotesector.ModoManual {
+		delete(activas, claveTemp)
+		return
+	}
+	h.evaluarTemperaturaManual(ctx, lote, metricas, activas)
+}
+
+func (h *ControlHandler) evaluarTemperaturaManual(ctx context.Context, lote *lotesector.Lote, metricas []metricashorno.MetricaHorno, activas map[string]bool) {
+	promedio, n := control.PromedioUltimasTemperaturas(metricas, 3)
+	if n == 0 {
+		return
+	}
+	objetivo, ok := h.objetivoTemperatura(ctx, lote, metricas)
+	if !ok {
+		return
+	}
+	tolerancia := 2.0
+	if lote.ToleranciaTempC > 0 {
+		tolerancia = lote.ToleranciaTempC
+	}
+	clave := lote.ID + "|" + alerta.TipoTemperaturaHorno
+	diferencia := promedio - objetivo
+	if diferencia < 0 {
+		diferencia = -diferencia
+	}
+	if diferencia <= tolerancia {
+		delete(activas, clave)
+		return
+	}
+	sufijo := "muestras"
+	if n == 1 {
+		sufijo = "muestra"
+	}
+	h.alertarLote(lote, alerta.TipoTemperaturaHorno, fmt.Sprintf(
+		"Temperatura T1 %.1f°C fuera del objetivo %.1f°C ±%.1f°C (promedio de %d %s)",
+		promedio, objetivo, tolerancia, n, sufijo), activas)
+}
+
+// objetivoTemperatura resuelve el setpoint del lote MANUAL: última telemetría,
+// luego el objetivo persistido del lote, luego la receta del producto.
+func (h *ControlHandler) objetivoTemperatura(ctx context.Context, lote *lotesector.Lote, metricas []metricashorno.MetricaHorno) (float64, bool) {
+	if len(metricas) > 0 && metricas[0].TempObjetivo != nil {
+		return *metricas[0].TempObjetivo, true
+	}
+	if lote.Temp1Objetivo != nil {
+		return *lote.Temp1Objetivo, true
+	}
+	if lote.ProductoID == "" || h.deps.ProductoRepo == nil {
+		return 0, false
+	}
+	prod, err := h.deps.ProductoRepo.GetByID(ctx, lote.ProductoID)
+	if err != nil || prod == nil || prod.TempSetpoint == nil {
+		return 0, false
+	}
+	return *prod.TempSetpoint, true
+}
+
+func (h *ControlHandler) alertarLote(lote *lotesector.Lote, tipo, mensaje string, activas map[string]bool) {
+	if h.deps.Alertas == nil {
+		return
+	}
+	clave := lote.ID + "|" + tipo
+	if activas[clave] {
+		return
+	}
+	sectorID := lote.SectorID
+	loteID := lote.ID
+	a := &alerta.Alerta{
+		SectorID:  &sectorID,
+		LoteID:    &loteID,
+		Tipo:      tipo,
+		Severidad: alerta.SeveridadWarning,
+		Estado:    alerta.EstadoActiva,
+		Mensaje:   mensaje,
+	}
+	if err := h.deps.Alertas.Save(a); err != nil {
+		log.Printf("[control] Monitor telemetría: Save alerta (%s) lote %s: %v", tipo, lote.ID, err)
+		return
+	}
+	activas[clave] = true
+}
+
 // HandleControlStart maneja POST /api/v1/lotes/{id}/control/start.
 // Crea un Loop en memoria si el modo != MANUAL y el horno lo requiere.
 func (h *ControlHandler) HandleControlStart() http.HandlerFunc {

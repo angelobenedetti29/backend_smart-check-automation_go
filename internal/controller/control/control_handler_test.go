@@ -18,6 +18,7 @@ import (
 
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
 	lotesector "github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
@@ -2187,4 +2188,152 @@ func signedTestToken(t *testing.T, secret []byte, role string) string {
 		t.Fatalf("firmar token: %v", err)
 	}
 	return signed
+}
+
+// fakeAlertaRepoMonitor captura las alertas generadas por el monitor.
+type fakeAlertaRepoMonitor struct {
+	guardadas []alerta.Alerta
+	err       error
+}
+
+func (f *fakeAlertaRepoMonitor) Save(a *alerta.Alerta) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.guardadas = append(f.guardadas, *a)
+	return nil
+}
+
+func (f *fakeAlertaRepoMonitor) GetByHornoID(string) ([]alerta.Alerta, error) {
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepoMonitor) Listar(context.Context, string) ([]alerta.Alerta, error) {
+	return f.guardadas, nil
+}
+
+func (f *fakeAlertaRepoMonitor) Ack(context.Context, string, alerta.Usuario) (*alerta.Alerta, error) {
+	return nil, alerta.ErrNotFound
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+
+func newMonitorHandler(repo *fakeAlertaRepoMonitor, lote lotesector.Lote, metricas []metricashorno.MetricaHorno) *ControlHandler {
+	return &ControlHandler{deps: ControlDeps{
+		Alertas:      repo,
+		LoteRepo:     &fakeLoteRepoHandler{abiertos: []lotesector.Lote{lote}},
+		MetricasRepo: &fakeMetricasRepo{metricas: metricas},
+		ProductoRepo: &fakeProductoRepo{},
+	}}
+}
+
+// TestTelemetriaMonitor_SinTelemetriaSobreUmbral verifica la alerta cuando el
+// lote abierto no tiene muestras y ya superó el umbral, sin duplicar.
+func TestTelemetriaMonitor_SinTelemetriaSobreUmbral(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeAlertaRepoMonitor{}
+	h := newMonitorHandler(repo, lotesector.Lote{
+		ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto,
+		Modo: lotesector.ModoAutomatico, AbiertoEn: now.Add(-time.Minute),
+	}, nil)
+	activas := map[string]bool{}
+
+	h.evaluarTelemetria(context.Background(), now, 30*time.Second, activas)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("se esperaba 1 alerta de telemetría, got %d", len(repo.guardadas))
+	}
+	a := repo.guardadas[0]
+	if a.Tipo != alerta.TipoTelemetriaDesactualizada || a.Severidad != alerta.SeveridadWarning ||
+		a.Estado != alerta.EstadoActiva {
+		t.Fatalf("alerta de telemetría mal formada: %+v", a)
+	}
+	if a.LoteID == nil || *a.LoteID != "lote-1" || a.HornoID != "" {
+		t.Fatalf("la alerta debe atarse al lote sin horno: %+v", a)
+	}
+
+	h.evaluarTelemetria(context.Background(), now, 30*time.Second, activas)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("no debe duplicar mientras la condición persiste; got %d", len(repo.guardadas))
+	}
+}
+
+// TestTelemetriaMonitor_LoteRecienAbiertoSinMuestrasNoAlerta evita el falso
+// positivo de un lote que acaba de abrir y todavía no recibió telemetría.
+func TestTelemetriaMonitor_LoteRecienAbiertoSinMuestrasNoAlerta(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeAlertaRepoMonitor{}
+	h := newMonitorHandler(repo, lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto,
+		Modo: lotesector.ModoAutomatico, AbiertoEn: now.Add(-10 * time.Second),
+	}, nil)
+
+	h.evaluarTelemetria(context.Background(), now, 30*time.Second, map[string]bool{})
+	if len(repo.guardadas) != 0 {
+		t.Fatalf("un lote recién abierto no debe alertar; got %d", len(repo.guardadas))
+	}
+}
+
+// TestTelemetriaMonitor_TelemetriaFrescaYVieja cubre ambos lados del umbral.
+func TestTelemetriaMonitor_TelemetriaFrescaYVieja(t *testing.T) {
+	now := time.Now().UTC()
+	lote := lotesector.Lote{
+		ID: "lote-1", Estado: lotesector.EstadoAbierto,
+		Modo: lotesector.ModoAutomatico, AbiertoEn: now.Add(-time.Hour),
+	}
+
+	repoFresca := &fakeAlertaRepoMonitor{}
+	fresca := []metricashorno.MetricaHorno{{ReceivedAt: now.Add(-5 * time.Second)}}
+	newMonitorHandler(repoFresca, lote, fresca).evaluarTelemetria(context.Background(), now, 30*time.Second, map[string]bool{})
+	if len(repoFresca.guardadas) != 0 {
+		t.Fatalf("telemetría fresca no debe alertar; got %d", len(repoFresca.guardadas))
+	}
+
+	repoVieja := &fakeAlertaRepoMonitor{}
+	vieja := []metricashorno.MetricaHorno{{ReceivedAt: now.Add(-time.Minute)}}
+	newMonitorHandler(repoVieja, lote, vieja).evaluarTelemetria(context.Background(), now, 30*time.Second, map[string]bool{})
+	if len(repoVieja.guardadas) != 1 || repoVieja.guardadas[0].Tipo != alerta.TipoTelemetriaDesactualizada {
+		t.Fatalf("telemetría vieja debe alertar; got %+v", repoVieja.guardadas)
+	}
+}
+
+// TestTelemetriaMonitor_TemperaturaManual fuera de tolerancia alerta una sola
+// vez y se rearma al normalizarse.
+func TestTelemetriaMonitor_TemperaturaManual(t *testing.T) {
+	now := time.Now().UTC()
+	lote := &lotesector.Lote{
+		ID: "lote-1", SectorID: "s-1", Estado: lotesector.EstadoAbierto,
+		Modo: lotesector.ModoManual, AbiertoEn: now.Add(-time.Hour), ToleranciaTempC: 2,
+	}
+	repo := &fakeAlertaRepoMonitor{}
+	h := newMonitorHandler(repo, *lote, nil)
+	activas := map[string]bool{}
+
+	fuera := func() []metricashorno.MetricaHorno {
+		return []metricashorno.MetricaHorno{
+			{ReceivedAt: now.Add(-time.Second), TempHorno1: ptrFloat(210), TempObjetivo: ptrFloat(200)},
+			{ReceivedAt: now.Add(-2 * time.Second), TempHorno1: ptrFloat(211), TempObjetivo: ptrFloat(200)},
+			{ReceivedAt: now.Add(-3 * time.Second), TempHorno1: ptrFloat(209), TempObjetivo: ptrFloat(200)},
+		}
+	}
+	dentro := func() []metricashorno.MetricaHorno {
+		return []metricashorno.MetricaHorno{
+			{ReceivedAt: now.Add(-time.Second), TempHorno1: ptrFloat(200), TempObjetivo: ptrFloat(200)},
+			{ReceivedAt: now.Add(-2 * time.Second), TempHorno1: ptrFloat(201), TempObjetivo: ptrFloat(200)},
+			{ReceivedAt: now.Add(-3 * time.Second), TempHorno1: ptrFloat(199), TempObjetivo: ptrFloat(200)},
+		}
+	}
+
+	h.evaluarTemperaturaManual(context.Background(), lote, fuera(), activas)
+	if len(repo.guardadas) != 1 || repo.guardadas[0].Tipo != alerta.TipoTemperaturaHorno {
+		t.Fatalf("se esperaba 1 alerta TEMPERATURA_HORNO; got %+v", repo.guardadas)
+	}
+	h.evaluarTemperaturaManual(context.Background(), lote, fuera(), activas)
+	if len(repo.guardadas) != 1 {
+		t.Fatalf("no debe duplicar mientras persiste; got %d", len(repo.guardadas))
+	}
+	h.evaluarTemperaturaManual(context.Background(), lote, dentro(), activas)
+	h.evaluarTemperaturaManual(context.Background(), lote, fuera(), activas)
+	if len(repo.guardadas) != 2 {
+		t.Fatalf("debe rearmarse tras normalizar; got %d", len(repo.guardadas))
+	}
 }

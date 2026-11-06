@@ -87,6 +87,57 @@ El loop emite `control.propuesta` por SSE; el evento incluye `autorizada`. La
 propuesta serializa `temp1`, `velocidad`, `z` y `prediccion`. Variables y puesta
 en marcha en [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md).
 
+## Alertas operativas
+
+Las alertas se persisten en `alertas` y quedan en estado **ACTIVA** hasta que un
+operario las reconoce (ACK); no hay auto-resolve. Tipos actuales:
+
+- `TEMPERATURA_HORNO` — T1 promedio de las últimas 3 muestras fuera del
+  objetivo ± `tolerancia_temp_c` (default 2 °C). La evalúa el loop MPC en
+  ADAPTANDO y, para lotes `MANUAL`, el monitor de telemetría.
+- `TELEMETRIA_DESACTUALIZADA` — el lote abierto no tiene muestras y lleva
+  abierto más de `TELEMETRIA_DESACTUALIZADA_SEGUNDOS`, o su última muestra es
+  más vieja que ese umbral (default 30 s). El monitor corre cada
+  `TELEMETRIA_MONITOR_INTERVALO` (default 15 s).
+- `DISPOSITIVO_OFFLINE` — el reaper detecta la transición online→offline de una
+  Raspberry (`DISPOSITIVO_REAPER_INTERVAL` / `DISPOSITIVO_OFFLINE_THRESHOLD`).
+- `PRECALENTAMIENTO_TIMEOUT` — el horno no alcanza la receta antes de
+  `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS`.
+- `PORCENTAJE_QUEMADOS_ALTO` / `PORCENTAJE_CRUDOS_ALTO` — el porcentaje
+  observado en la ventana del lote supera su umbral de aceptación (default
+  `5 %`).
+
+Las alertas de lote llevan `lote_id` y las de dispositivo `dispositivo_id`;
+`horno_id` queda vacío.
+
+## Notificaciones de alertas
+
+Las alertas **WARNING** y **CRITICAL** generan una notificación por cada usuario
+activo y canal habilitado (email vía Resend o Gmail API, Telegram vía Bot API).
+Los emails llevan HTML estilizado (tabla, header por severidad, detalles y CTA)
+con fallback de texto plano. Se persisten en un outbox
+(`notificaciones_outbox`) y un worker las reintenta con backoff hasta
+`NOTIFICACIONES_MAX_INTENTOS`; el unique `(alerta_id, usuario_id, canal)`
+garantiza una sola notificación por alerta y usuario. Para reenviar una alerta
+existente a destinatarios concretos sin esperar el flujo automático:
+
+```bash
+go run ./cmd/notificar_alerta -emails "a@x.com,b@y.com"
+go run ./cmd/notificar_alerta -alerta-id <uuid> -emails "a@x.com" \
+  -panel-url "https://panel.example"
+```
+
+El comando sólo encola filas `EMAIL`; el worker del backend las envía.
+
+El proveedor de email se elige con `NOTIFICACIONES_EMAIL_PROVIDER`
+(`resend` por defecto, o `gmail`/`gmail_api`; Gmail usa HTTPS, sin dominio
+propio y con la cuenta autenticada como remitente). Cada canal se habilita sólo
+si su configuración está completa; con variables vacías el backend arranca igual
+y ese canal queda deshabilitado. El alta y las pruebas se administran desde
+`/api/v1/admin/notificaciones` (sólo Administrador). Guía de Resend, Gmail API y
+Telegram en
+[`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md#35-notificaciones-de-alertas-opcional).
+
 ## Endpoints (resumen)
 
 La referencia completa y actualizada —con auth, rol mínimo, request/response y
@@ -110,6 +161,9 @@ mayor impacto:
   `GET /api/v1/lotes/{id}/consigna-propuesta`,
   `POST /api/v1/lotes/{id}/aplicar-consigna`,
   `POST /api/v1/lotes/{id}/consigna/ack` y `GET /api/v1/lotes/{id}/decisiones`.
+- **Notificaciones:** `GET|PATCH /api/v1/admin/notificaciones[...]` y
+  `POST /api/v1/admin/notificaciones/test` (Administrador). Ver
+  [`docs/api-endpoints.md`](docs/api-endpoints.md).
 - **`/api/v1/productos`:** `GET` acepta JWT o Bearer de dispositivo; las
   escrituras (`POST`/`PUT`/`DELETE`) exigen rol Supervisor o Admin.
 - **Salud:** `GET /health` y `GET /healthz` verifican conectividad con

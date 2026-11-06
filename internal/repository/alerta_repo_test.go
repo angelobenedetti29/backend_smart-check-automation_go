@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -84,7 +85,7 @@ func TestAlertaRepo_ListarFiltraPorEstadoYOrdenaDesc(t *testing.T) {
 	require.NoError(t, repo.Save(a1))
 
 	time.Sleep(2 * time.Millisecond)
-	a2 := alertaDePrueba(loteID, alerta.TipoConsignaEnlace, "segunda")
+	a2 := alertaDePrueba(loteID, alerta.TipoPorcentajeQuemadosAlto, "segunda")
 	require.NoError(t, repo.Save(a2))
 
 	time.Sleep(2 * time.Millisecond)
@@ -109,8 +110,6 @@ func TestAlertaRepo_ListarFiltraPorEstadoYOrdenaDesc(t *testing.T) {
 	require.Equal(t, ack.ID, todas[0].ID)
 }
 
-// TestAlertaRepo_Ack verifica estado/acked_por/acked_at, el error de
-// idempotencia al segundo intento y ErrNotFound para un id desconocido.
 func TestAlertaRepo_Ack(t *testing.T) {
 	ctx := context.Background()
 	repo, _, loteID := setupAlertaRepo(t)
@@ -131,4 +130,77 @@ func TestAlertaRepo_Ack(t *testing.T) {
 
 	_, err = repo.Ack(ctx, "00000000-0000-0000-0000-000000000000", alerta.Usuario{Email: alertaTestEmail})
 	require.ErrorIs(t, err, alerta.ErrNotFound)
+}
+
+type fakeEncolador struct {
+	calls    int
+	alertaID string
+	err      error
+}
+
+func (f *fakeEncolador) EncolarParaAlerta(ctx context.Context, a *alerta.Alerta) error {
+	f.calls++
+	f.alertaID = a.ID
+	return f.err
+}
+
+// TestAlertaRepo_EncoladorSoloEnInsertReal verifica que el encolador se invoque
+// únicamente cuando el INSERT creó una fila (no en una alerta deduplicada) y
+// que un fallo del encolador no haga fallar Save.
+func TestAlertaRepo_EncoladorSoloEnInsertReal(t *testing.T) {
+	repo, _, loteID := setupAlertaRepo(t)
+	enc := &fakeEncolador{}
+	repo.SetEncolador(enc)
+
+	a := alertaDePrueba(loteID, alerta.TipoTemperaturaHorno, "primera")
+	require.NoError(t, repo.Save(a))
+	require.Equal(t, 1, enc.calls)
+	require.Equal(t, a.ID, enc.alertaID)
+
+	dedupe := alertaDePrueba(loteID, alerta.TipoTemperaturaHorno, "duplicada")
+	require.NoError(t, repo.Save(dedupe))
+	require.Equal(t, 1, enc.calls, "una alerta deduplicada no debe encolar")
+
+	enc.err = errors.New("proveedor caído")
+	a2 := alertaDePrueba(loteID, alerta.TipoPorcentajeQuemadosAlto, "segunda")
+	require.NoError(t, repo.Save(a2), "un fallo del encolador no debe romper Save")
+	require.Equal(t, 2, enc.calls)
+}
+
+// TestAlertaRepo_DispositivoID verifica que dispositivo_id se persiste, se
+// lee en Listar y deduplica por (dispositivo_id, tipo) mientras está ACTIVA.
+func TestAlertaRepo_DispositivoID(t *testing.T) {
+	ctx := context.Background()
+	repo, pool, _ := setupAlertaRepo(t)
+
+	var deviceID string
+	require.NoError(t, pool.QueryRow(ctx,
+		`INSERT INTO dispositivos (nombre, tipo) VALUES ('Pi salida', 'SALIDA_HORNO') RETURNING id::text`,
+	).Scan(&deviceID))
+
+	a := &alerta.Alerta{
+		DispositivoID: &deviceID,
+		Tipo:          alerta.TipoDispositivoOffline,
+		Severidad:     alerta.SeveridadWarning,
+		Estado:        alerta.EstadoActiva,
+		Mensaje:       "dispositivo sin reportar",
+	}
+	require.NoError(t, repo.Save(a))
+	require.NotEmpty(t, a.ID)
+
+	dup := &alerta.Alerta{
+		DispositivoID: &deviceID,
+		Tipo:          alerta.TipoDispositivoOffline,
+		Severidad:     alerta.SeveridadWarning,
+		Estado:        alerta.EstadoActiva,
+		Mensaje:       "duplicada",
+	}
+	require.NoError(t, repo.Save(dup), "un conflicto de dedupe no es error")
+	require.Empty(t, dup.ID, "la fila duplicada no debe insertarse")
+
+	lista, err := repo.Listar(ctx, alerta.EstadoActiva)
+	require.NoError(t, err)
+	require.Len(t, lista, 1)
+	require.NotNil(t, lista[0].DispositivoID)
+	require.Equal(t, deviceID, *lista[0].DispositivoID)
 }

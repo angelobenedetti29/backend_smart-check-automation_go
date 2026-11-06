@@ -81,6 +81,14 @@ type Loop struct {
 	muestrasEnTolerancia int
 	preheatInicio        time.Time
 	preheatTimeoutSeg    int
+	// alertaQuemadosActiva y alertaCrudosActiva recuerdan si ya se emitió una
+	// alerta de calidad en el período continuo actual. Sólo las toca la
+	// goroutine del loop.
+	alertaQuemadosActiva bool
+	alertaCrudosActiva   bool
+	// alertaTemperaturaActiva recuerda si ya se emitió la alerta de T1 fuera de
+	// objetivo. Sólo la toca la goroutine del loop.
+	alertaTemperaturaActiva bool
 	// sinMetricas evita esperar una ventana completa cuando el lote recién
 	// arranca y la Pi todavía no publicó telemetría.
 	sinMetricas    bool
@@ -493,7 +501,12 @@ func (loop *Loop) tick(ctx context.Context) {
 	//    que alimenta z_observado y los % del audit. Si la ventana está
 	//    vacía de eventos, z_observado se persiste como NULL.
 	var pctCrudos, pctOk, pctQuemados float64
-	zObs, _ := loop.calcularZObservado(ctx, ventanaInicio, now, &pctCrudos, &pctOk, &pctQuemados)
+	zObs, huboEventos := loop.calcularZObservado(ctx, ventanaInicio, now, &pctCrudos, &pctOk, &pctQuemados)
+
+	// Antes del gate de confianza y del optimizador: las alertas de calidad no
+	// dependen del predictor.
+	loop.evaluarCalidad(loteActual, pctCrudos, pctQuemados, huboEventos)
+	loop.evaluarTemperatura(ctx, loteActual, filtradas)
 
 	estado := loop.estadoDesdeMetricas(filtradas)
 	// La confianza de detección llega con los eventos de la Pi SALIDA; la
@@ -596,6 +609,119 @@ func (loop *Loop) tick(ctx context.Context) {
 		return
 	}
 	loop.publicarPropuesta(predXGB, decision, loop.modo == lote_sector.ModoAutomatico)
+}
+
+// evaluarCalidad genera una alerta WARNING cuando el porcentaje observado en la
+// ventana supera el umbral de aceptación del lote. El loop sólo corre para
+// lotes no MANUAL. La alerta se ata al lote (HornoID vacío) para que el índice
+// único (lote_id, tipo) deduplique sin bloquear el lote siguiente.
+func (loop *Loop) evaluarCalidad(lote *lote_sector.Lote, pctCrudos, pctQuemados float64, huboEventos bool) {
+	if loop.alertas == nil || !huboEventos {
+		// Sin eventos no se puede afirmar que la condición se normalizó: no
+		// rearmar las alertas por una ventana vacía.
+		return
+	}
+	lim := loop.limitesVigentes(lote)
+	loop.evaluarCalidadUmbral(alerta.TipoPorcentajeQuemadosAlto, "quemados", pctQuemados, lim.UmbralQuem, &loop.alertaQuemadosActiva)
+	loop.evaluarCalidadUmbral(alerta.TipoPorcentajeCrudosAlto, "crudos", pctCrudos, lim.UmbralCrudo, &loop.alertaCrudosActiva)
+}
+
+// evaluarCalidadUmbral mantiene una sola alerta por período continuo sobre el
+// umbral: al normalizarse el porcentaje se rearma y un nuevo pico vuelve a
+// alertar (el repo descarta duplicados si la ACTIVA sigue existiendo).
+func (loop *Loop) evaluarCalidadUmbral(tipo, etiqueta string, pct, umbral float64, activa *bool) {
+	if umbral <= 0 {
+		umbral = 5.0
+	}
+	if pct <= umbral {
+		*activa = false
+		return
+	}
+	if *activa {
+		return
+	}
+	a := &alerta.Alerta{
+		SectorID:  &loop.sectorID,
+		LoteID:    &loop.loteID,
+		Tipo:      tipo,
+		Severidad: alerta.SeveridadWarning,
+		Estado:    alerta.EstadoActiva,
+		Mensaje: fmt.Sprintf("Porcentaje de %s %.1f%% supera el umbral de aceptación %.1f%% en la ventana de %ds",
+			etiqueta, pct, umbral, loop.ventanaEvalSeg),
+	}
+	if err := loop.alertas.Save(a); err != nil {
+		log.Printf("[control] Save alerta (%s) lote %s: %v", tipo, loop.loteID, err)
+		return
+	}
+	*activa = true
+}
+
+// evaluarTemperatura genera una alerta WARNING cuando el promedio de las
+// últimas 3 muestras de T1 se aleja del objetivo de receta más allá de la
+// tolerancia del lote. Corre sólo en ADAPTANDO (el precalentamiento ya tiene su
+// propio timeout). La alerta queda atada al lote, no al horno.
+func (loop *Loop) evaluarTemperatura(ctx context.Context, lote *lote_sector.Lote, metricas []metricashorno.MetricaHorno) {
+	if loop.alertas == nil {
+		return
+	}
+	promedio, n := PromedioUltimasTemperaturas(metricas, 3)
+	if n == 0 {
+		return
+	}
+	objetivo, _, ok := loop.objetivoReceta(ctx, lote)
+	if !ok {
+		return
+	}
+	tolerancia := 2.0
+	if lote != nil && lote.ToleranciaTempC > 0 {
+		tolerancia = lote.ToleranciaTempC
+	}
+	if absFloat(promedio-objetivo) <= tolerancia {
+		loop.alertaTemperaturaActiva = false
+		return
+	}
+	if loop.alertaTemperaturaActiva {
+		return
+	}
+	sufijo := "muestras"
+	if n == 1 {
+		sufijo = "muestra"
+	}
+	a := &alerta.Alerta{
+		SectorID:  &loop.sectorID,
+		LoteID:    &loop.loteID,
+		Tipo:      alerta.TipoTemperaturaHorno,
+		Severidad: alerta.SeveridadWarning,
+		Estado:    alerta.EstadoActiva,
+		Mensaje: fmt.Sprintf("Temperatura T1 %.1f°C fuera del objetivo %.1f°C ±%.1f°C (promedio de %d %s)",
+			promedio, objetivo, tolerancia, n, sufijo),
+	}
+	if err := loop.alertas.Save(a); err != nil {
+		log.Printf("[control] Save alerta (temperatura) lote %s: %v", loop.loteID, err)
+		return
+	}
+	loop.alertaTemperaturaActiva = true
+}
+
+// PromedioUltimasTemperaturas promedia las últimas n muestras con TempHorno1
+// presente. Las muestras llegan ordenadas de la más reciente a la más antigua.
+func PromedioUltimasTemperaturas(metricas []metricashorno.MetricaHorno, n int) (float64, int) {
+	suma := 0.0
+	cant := 0
+	for i := range metricas {
+		if cant == n {
+			break
+		}
+		if metricas[i].TempHorno1 == nil {
+			continue
+		}
+		suma += *metricas[i].TempHorno1
+		cant++
+	}
+	if cant == 0 {
+		return 0, 0
+	}
+	return suma / float64(cant), cant
 }
 
 // tickPreheat mantiene T1 en el setpoint de receta sin correr el MPC. Cuando

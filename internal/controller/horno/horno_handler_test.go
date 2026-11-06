@@ -229,30 +229,6 @@ func TestHornoHandler_GetHornoStatus_Desactualizado(t *testing.T) {
 	}
 }
 
-func TestHornoHandler_GetHornoStatus_ControlManual(t *testing.T) {
-	s := &sector.Sector{ID: "horno-01", Nombre: "Horno 1"}
-	lote := &lote_sector.Lote{ID: "lote-1"}
-	temp, vel := 170.5, 0.21
-	muestras := []metricashorno.MetricaHorno{{
-		TempHorno1:     &temp,
-		VelocidadCinta: &vel,
-		ReceivedAt:     time.Now().UTC(),
-	}}
-	aRepo := &fakeAlertaRepo{guardadas: []alerta.Alerta{{
-		ID:      "alerta-1",
-		HornoID: "horno-01",
-		Tipo:    alerta.TipoConsignaEnlace,
-		Estado:  alerta.EstadoActiva,
-	}}}
-	handler := newGetHandler(s, lote, muestras, aRepo)
-
-	_, body := getHornoData(t, handler, "/api/v1/horno?sector_id=horno-01")
-	h := hornoDTO(t, body)
-	if h["estado"] != EstadoControlManual {
-		t.Errorf("expected estado CONTROL_MANUAL por alerta activa, got %v", h["estado"])
-	}
-}
-
 func TestHornoHandler_GetHornoStatus_SinParametros(t *testing.T) {
 	handler := newGetHandler(nil, nil, nil, nil)
 

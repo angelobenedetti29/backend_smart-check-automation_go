@@ -177,8 +177,7 @@ ACK:
   encolado manual.
 - `GET /api/v1/horno?sector_id=horno-1` devuelve una **proyección de solo
   lectura** del horno (`data.horno.id` es el id del sector): lote abierto +
-  último sample de `metricas_horno`. No hay horno en memoria; `CONTROL_MANUAL`
-  sólo se mantiene por alertas históricas `CONSIGNA_ENLACE` activas. Sin
+  último sample de `metricas_horno`. No hay horno en memoria. Sin
   telemetría, T/V y el resto de las lecturas viajan `null`.
 - La telemetría real (T1, combustión, humedad, ambiente, velocidad y setpoints
   observados) llega por `POST /api/v1/lotes/{id}/metricas-horno`; es el estado
@@ -195,8 +194,8 @@ Si no se puede persistir o aprobar la decisión del override manual:
 3. La Pi no ve ninguna propuesta nueva; el horno sigue con el último setpoint
    aplicado.
 
-No se generan alertas `CONSIGNA_ENLACE` ni se cambia el estado del horno: el
-backend no tiene un actuador propio cuyo enlace pueda fallar.
+No se generan alertas ni se cambia el estado del horno: el backend no tiene un
+actuador propio cuyo enlace pueda fallar.
 
 ## 9. Cómo probarlo
 

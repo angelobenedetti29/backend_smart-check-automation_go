@@ -99,7 +99,7 @@ func TestReportesRepo_ResumenIntegracion(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
 		INSERT INTO alertas (sector_id, lote_id, tipo, severidad, estado, mensaje, created_at)
-		VALUES ($1,$2,'CONSIGNA_ENLACE','WARNING','ACTIVA','sin enlace',$3)`,
+		VALUES ($1,$2,'PORCENTAJE_QUEMADOS_ALTO','WARNING','ACTIVA','pct quemados alto',$3)`,
 		testSectorID, lote1, time.Date(2026, 10, 1, 11, 0, 0, 0, art))
 	require.NoError(t, err)
 
@@ -420,7 +420,7 @@ func TestReportesRepo_AlertasIntegracion(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
 		INSERT INTO alertas (sector_id, lote_id, tipo, severidad, estado, mensaje, created_at)
-		VALUES ($1,$2,'CONSIGNA_ENLACE','WARNING','ACTIVA','sin enlace',$3)`,
+		VALUES ($1,$2,'PORCENTAJE_QUEMADOS_ALTO','WARNING','ACTIVA','pct quemados alto',$3)`,
 		sector2, lote2, time.Date(2026, 10, 1, 12, 0, 0, 0, art))
 	require.NoError(t, err)
 

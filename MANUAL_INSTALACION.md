@@ -61,8 +61,20 @@ Completar los valores reales en `.env`.
 | `MPC_PERMITIR_PLACEHOLDER` | No | `false` | Permite operar en automático con el predictor placeholder; solo demo/tesis |
 | `DISPOSITIVO_REAPER_INTERVAL` | No | `5s` | Intervalo del reaper que detecta dispositivos offline |
 | `DISPOSITIVO_OFFLINE_THRESHOLD` | No | `90s` | Inactividad para considerar offline un dispositivo |
+| `TELEMETRIA_MONITOR_INTERVALO` | No | `15s` | Cadencia del monitor de telemetría de lotes abiertos |
+| `TELEMETRIA_DESACTUALIZADA_SEGUNDOS` | No | `30s` | Antigüedad máxima de la última muestra antes de alertar telemetría desactualizada |
 | `DISPOSITIVO_RENAME_PUSH_TIMEOUT` | No | `10s` | Timeout del push de renombre a la Raspberry |
 | `LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS` | No | `0` (no enforce) | Inactividad mínima para aceptar un cierre de lote |
+| `NOTIFICACIONES_EMAIL_PROVIDER` | No | `resend` | Proveedor de email: `resend` o `gmail`/`gmail_api` |
+| `RESEND_API_KEY` | No | vacío (email deshabilitado) | API key de Resend para enviar alertas por email |
+| `GMAIL_CLIENT_ID` | No | vacío | OAuth Client ID (Web application con redirect URI de OAuth Playground) con Gmail API habilitada |
+| `GMAIL_CLIENT_SECRET` | No | vacío | OAuth Client Secret del mismo cliente |
+| `GMAIL_REFRESH_TOKEN` | No | vacío | Refresh token OAuth con scope `gmail.send` |
+| `NOTIFICACIONES_EMAIL_FROM` | No | vacío (email deshabilitado) | Remitente; con Gmail debe ser la cuenta autenticada |
+| `TELEGRAM_BOT_TOKEN` | No | vacío (Telegram deshabilitado) | Token del bot de Telegram (BotFather) |
+| `NOTIFICACIONES_PANEL_URL` | No | vacío | URL base del panel; agrega el enlace `/alertas` al mensaje |
+| `NOTIFICACIONES_INTERVALO` | No | `15s` | Cadencia del worker del outbox |
+| `NOTIFICACIONES_MAX_INTENTOS` | No | `5` | Intentos máximos por notificación antes de marcarla `FALLIDO` |
 | `TEST_DATABASE_URL` | No | vacío | Activa los tests de integración contra una PostgreSQL aislada |
 
 `JWT_SECRET`, `GOOGLE_CLIENT_ID` y `DATABASE_URL` son validados al inicio. Si
@@ -100,6 +112,107 @@ base. Si vas a alternar entre Compose y `go run` en el host, ajustá
 
 Para Supabase usar el **session pooler** en el puerto `5432`; `render.yaml`
 explícitamente indica no usar un pooler de transacciones.
+
+### 3.5 Notificaciones de alertas (opcional)
+
+Cuando se persiste una alerta **WARNING** o **CRITICAL**, el backend encola una
+notificación por cada usuario activo y canal habilitado. Los emails se envían
+con **HTML estilizado** (header por severidad, mensaje, detalles y botón al
+panel) y **fallback de texto plano** para clientes que no renderizan HTML. El
+envío lo hace un worker con un outbox persistente (`notificaciones_outbox`):
+reintenta con backoff exponencial (2, 4, 8… minutos, techo 60) hasta
+`NOTIFICACIONES_MAX_INTENTOS`. El unique `(alerta_id, usuario_id, canal)`
+garantiza una sola notificación por alerta, usuario y canal.
+
+Cada canal queda deshabilitado si falta su configuración; el backend arranca
+igual y sólo loguea el canal inactivo. Para habilitarlos:
+
+- **Email — elegir proveedor con `NOTIFICACIONES_EMAIL_PROVIDER`:**
+  - **Resend (`resend`, default):** crear una cuenta en <https://resend.com>,
+    verificar el dominio del remitente (DNS) y generar una API key. Configurar
+    `RESEND_API_KEY` y `NOTIFICACIONES_EMAIL_FROM` (por ejemplo
+    `alertas@fermar.com.ar`). Limitación de test mode: sin dominio verificado,
+    Resend sólo permite enviar a la dirección de la cuenta; para producción hay
+    que verificar el dominio.
+  - **Gmail API (`gmail` o `gmail_api`):** no requiere dominio propio; envía por
+    HTTPS con la cuenta de Gmail autenticada. Pasos:
+    1. En [Google Cloud Console](https://console.cloud.google.com/) crear (o
+       reutilizar) un proyecto y habilitar **Gmail API** en *APIs & Services →
+       Library*.
+    2. Configurar la *OAuth consent screen*: **External** (con la app en
+       *Testing* y el usuario agregado como *test user*) o **Internal** si es
+       una cuenta Google Workspace. Agregar el scope
+       `https://www.googleapis.com/auth/gmail.send`.
+    3. En *Credentials* crear un **OAuth Client ID** de tipo **Web application**,
+       agregar `https://developers.google.com/oauthplayground` como
+       **Authorized redirect URI** y anotar `Client ID` y `Client Secret`.
+       El Playground con credenciales propias no acepta un cliente Desktop.
+    4. Obtener el `refresh_token` con el
+       [OAuth 2.0 Playground](https://developers.google.com/oauthplayground/)
+       usando las credenciales propias: engranaje → *Use your own OAuth
+       credentials*, autorizar el scope `gmail.send` con `access_type=offline`
+       y `prompt=consent`, y canjear el código por tokens.
+    5. Configurar `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`,
+       `GMAIL_REFRESH_TOKEN`, `NOTIFICACIONES_EMAIL_FROM` (la misma cuenta de
+       Gmail autenticada) y `NOTIFICACIONES_EMAIL_PROVIDER=gmail`.
+    - **Advertencia:** con la app External en *Testing*, el refresh token vence
+      a los 7 días; para que persista hay que publicar la app o usar una cuenta
+      Workspace con app Internal.
+    - **Límites de Gmail (aprox.):** 500 emails/día en cuentas gratuitas y
+      2.000/día en Workspace. Alcanzan para alertas operativas normales.
+    - **Render free:** funciona porque la Gmail API es HTTPS; el SMTP de Gmail
+      (puerto 587) no está permitido en el plan free.
+- **Telegram:** crear un bot con `@BotFather` (`/newbot`) y copiar el token en
+  `TELEGRAM_BOT_TOKEN`. Cada usuario debe iniciar el bot (`/start`) y cargar su
+  chat ID desde el panel admin. Para obtenerlo, consultar
+  `https://api.telegram.org/bot<TOKEN>/getUpdates` después de que el usuario
+  escriba al bot y tomar `message.chat.id` (los grupos usan IDs negativos). El
+  chat ID se valida con `^-?[0-9]{5,20}$`.
+- **Enlace al panel:** `NOTIFICACIONES_PANEL_URL` agrega `<URL>/alertas` al
+  cuerpo del mensaje. Opcional.
+
+Los endpoints de administración (`GET/PATCH /api/v1/admin/notificaciones` y
+`POST /api/v1/admin/notificaciones/test`) exigen rol Administrador y permiten
+editar preferencias por usuario y enviar una prueba directa, sin pasar por el
+outbox.
+
+#### Reenvío manual de una alerta
+
+Para encolar una alerta existente a destinatarios concretos (por ejemplo, una
+`PORCENTAJE_QUEMADOS_ALTO` que no se notificó porque el canal estaba
+deshabilitado):
+
+```bash
+# Última alerta ACTIVA PORCENTAJE_QUEMADOS_ALTO
+go run ./cmd/notificar_alerta -emails "a@x.com,b@y.com"
+
+# Alerta puntual por UUID
+go run ./cmd/notificar_alerta -alerta-id <uuid> -emails "a@x.com" \
+  -panel-url "https://panel.example"
+```
+
+El comando no envía directo: inserta filas `EMAIL` en `notificaciones_outbox`
+y el worker del backend las entrega con el proveedor configurado. Es
+idempotente por `(alerta_id, usuario_id, canal)`, así que repetirlo no duplica
+envíos.
+
+### 3.6 Alertas operativas
+
+El backend genera alertas `WARNING` (o `CRITICAL` en el timeout de
+precalentamiento) y las deja en estado `ACTIVA` hasta que un operario las
+reconoce (ACK); no hay auto-resolve.
+
+| Tipo | Disparador |
+|---|---|
+| `TEMPERATURA_HORNO` | T1 promedio (últimas 3 muestras) fuera del objetivo ± `tolerancia_temp_c` (default 2 °C). Lo evalúa el loop MPC en ADAPTANDO y, para lotes `MANUAL`, el monitor de telemetría. |
+| `TELEMETRIA_DESACTUALIZADA` | La última muestra del lote abierto supera `TELEMETRIA_DESACTUALIZADA_SEGUNDOS` (default 30 s), o el lote abierto no tiene muestras y lleva abierto más que ese umbral. |
+| `DISPOSITIVO_OFFLINE` | El reaper detecta la transición online→offline de una Raspberry. |
+| `PRECALENTAMIENTO_TIMEOUT` | El horno no alcanza la temperatura de receta antes de `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS`. |
+| `PORCENTAJE_QUEMADOS_ALTO` / `PORCENTAJE_CRUDOS_ALTO` | El % observado en la ventana del lote supera `umbral_aceptacion_quemado`/`crudo` (default 5 %). |
+
+Las alertas de lote viajan con `lote_id` y las de dispositivo con
+`dispositivo_id`; `horno_id` queda vacío. El monitor de telemetría corre cada
+`TELEMETRIA_MONITOR_INTERVALO` (default 15 s).
 
 ---
 

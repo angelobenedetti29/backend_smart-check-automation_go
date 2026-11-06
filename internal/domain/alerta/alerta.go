@@ -22,9 +22,12 @@ const (
 
 // Tipos de alerta generados por el sistema.
 const (
-	TipoTemperaturaHorno        = "TEMPERATURA_HORNO"
-	TipoConsignaEnlace          = "CONSIGNA_ENLACE"
-	TipoPrecalentamientoTimeout = "PRECALENTAMIENTO_TIMEOUT"
+	TipoTemperaturaHorno         = "TEMPERATURA_HORNO"
+	TipoPrecalentamientoTimeout  = "PRECALENTAMIENTO_TIMEOUT"
+	TipoPorcentajeQuemadosAlto   = "PORCENTAJE_QUEMADOS_ALTO"
+	TipoPorcentajeCrudosAlto     = "PORCENTAJE_CRUDOS_ALTO"
+	TipoDispositivoOffline       = "DISPOSITIVO_OFFLINE"
+	TipoTelemetriaDesactualizada = "TELEMETRIA_DESACTUALIZADA"
 )
 
 // Errores de dominio del repositorio de alertas.
@@ -42,17 +45,20 @@ type Usuario struct {
 // Alerta representa una alerta industrial generada durante la operación ante
 // anomalías detectadas.
 type Alerta struct {
-	ID        string     `json:"id"`
-	SectorID  *string    `json:"sector_id,omitempty"`
-	LoteID    *string    `json:"lote_id,omitempty"`
-	HornoID   string     `json:"horno_id,omitempty"`
-	Tipo      string     `json:"tipo"`
-	Severidad string     `json:"severidad"`
-	Estado    string     `json:"estado"`
-	Mensaje   string     `json:"mensaje"`
-	CreadaEn  time.Time  `json:"created_at"`
-	AckedPor  *Usuario   `json:"acked_por,omitempty"`
-	AckedAt   *time.Time `json:"acked_at,omitempty"`
+	ID       string  `json:"id"`
+	SectorID *string `json:"sector_id,omitempty"`
+	LoteID   *string `json:"lote_id,omitempty"`
+	// DispositivoID ata la alerta de dispositivo al índice único parcial; queda
+	// nil para las alertas de horno/lote.
+	DispositivoID *string    `json:"dispositivo_id,omitempty"`
+	HornoID       string     `json:"horno_id,omitempty"`
+	Tipo          string     `json:"tipo"`
+	Severidad     string     `json:"severidad"`
+	Estado        string     `json:"estado"`
+	Mensaje       string     `json:"mensaje"`
+	CreadaEn      time.Time  `json:"created_at"`
+	AckedPor      *Usuario   `json:"acked_por,omitempty"`
+	AckedAt       *time.Time `json:"acked_at,omitempty"`
 }
 
 // Repository define el contrato de persistencia de los eventos de alerta.

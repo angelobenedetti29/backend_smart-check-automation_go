@@ -27,6 +27,7 @@ import (
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
 	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
 	metricashornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/metricashorno"
+	notificacionController "github.com/angelobenedetti29/smart-check-automation/internal/controller/notificacion"
 	oeeController "github.com/angelobenedetti29/smart-check-automation/internal/controller/oee"
 	planificacionController "github.com/angelobenedetti29/smart-check-automation/internal/controller/planificacion"
 	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
@@ -36,6 +37,7 @@ import (
 	sseController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sse"
 	userController "github.com/angelobenedetti29/smart-check-automation/internal/controller/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
+	domainnotificacion "github.com/angelobenedetti29/smart-check-automation/internal/domain/notificacion"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/guard"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
@@ -45,6 +47,7 @@ import (
 	consignaService "github.com/angelobenedetti29/smart-check-automation/internal/service/consigna"
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
 	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
+	notificacionService "github.com/angelobenedetti29/smart-check-automation/internal/service/notificacion"
 	oeeService "github.com/angelobenedetti29/smart-check-automation/internal/service/oee"
 	optimizador "github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
 	planificacionService "github.com/angelobenedetti29/smart-check-automation/internal/service/planificacion"
@@ -112,6 +115,44 @@ func main() {
 	reportesRepo := repository.NewReportesPostgresRepository(pgPool)
 	planificacionRepo := repository.NewPlanificacionPostgresRepository(pgPool)
 	oeeRepo := repository.NewOEERepository(pgPool)
+	notifRepo := repository.NewNotificacionPostgresRepository(pgPool)
+
+	// Notificaciones: cada canal se habilita sólo si su configuración está
+	// completa. Sin proveedor, el canal queda deshabilitado (nunca fatal).
+	notifEmailFrom := os.Getenv("NOTIFICACIONES_EMAIL_FROM")
+	var enviadorEmail domainnotificacion.EnviadorEmail
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NOTIFICACIONES_EMAIL_PROVIDER"))) {
+	case "gmail", "gmail_api":
+		gmailCliente := notificacionService.NewGmail(
+			os.Getenv("GMAIL_CLIENT_ID"),
+			os.Getenv("GMAIL_CLIENT_SECRET"),
+			os.Getenv("GMAIL_REFRESH_TOKEN"),
+			notifEmailFrom,
+		)
+		if gmailCliente != nil {
+			enviadorEmail = gmailCliente
+		} else {
+			log.Println("[NOTIFICACIONES] Canal EMAIL deshabilitado: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN o NOTIFICACIONES_EMAIL_FROM vacíos")
+		}
+	default:
+		resendCliente := notificacionService.NewResend(os.Getenv("RESEND_API_KEY"), notifEmailFrom)
+		if resendCliente != nil {
+			enviadorEmail = resendCliente
+		} else {
+			log.Println("[NOTIFICACIONES] Canal EMAIL deshabilitado: RESEND_API_KEY o NOTIFICACIONES_EMAIL_FROM vacíos")
+		}
+	}
+	telegramCliente := notificacionService.NewTelegram(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	var enviadorTelegram domainnotificacion.EnviadorTelegram
+	if telegramCliente != nil {
+		enviadorTelegram = telegramCliente
+	} else {
+		log.Println("[NOTIFICACIONES] Canal TELEGRAM deshabilitado: TELEGRAM_BOT_TOKEN vacío")
+	}
+	notifSvc := notificacionService.NewService(notifRepo, enviadorEmail, enviadorTelegram,
+		os.Getenv("NOTIFICACIONES_PANEL_URL"), notifEmailFrom)
+	// Encolar sólo después de un INSERT real de alerta (la deduplicación no encola).
+	alertaRepo.SetEncolador(notifSvc)
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
@@ -135,6 +176,7 @@ func main() {
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
 	renamePushTimeout := getEnvDuration("DISPOSITIVO_RENAME_PUSH_TIMEOUT", 10*time.Second)
 	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker, renamePushTimeout)
+	dispositivoSvc.SetAlertas(alertaRepo)
 	// Autenticación de nodos: Bearer <secret> resuelto por hash contra dispositivos activos.
 	deviceVerifier := &deviceauth.Verifier{Store: deviceAuthRepo}
 	registroSvc := registroService.NewService(registrationRepo)
@@ -157,6 +199,8 @@ func main() {
 
 	reaperInterval := getEnvDuration("DISPOSITIVO_REAPER_INTERVAL", 5*time.Second)
 	offlineThreshold := getEnvDuration("DISPOSITIVO_OFFLINE_THRESHOLD", 90*time.Second)
+	telemetriaIntervalo := getEnvDuration("TELEMETRIA_MONITOR_INTERVALO", 15*time.Second)
+	telemetriaUmbral := getEnvDuration("TELEMETRIA_DESACTUALIZADA_SEGUNDOS", 30*time.Second)
 
 	// Preload device catalog + latest metric into the in-memory state store
 	if dispositivos, err := dispositivoRepo.GetDispositivosConUltimaMetrica(context.Background()); err != nil {
@@ -178,6 +222,7 @@ func main() {
 	loteSectorHandler := loteSectorController.NewLoteSectorHandler(loteSectorSvc)
 	metricasHornoHandler := metricashornoController.NewMetricasHornoHandler(metricasHornoRepo, loteSectorSvc)
 	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
+	notificacionHandler := notificacionController.NewHandler(notifSvc)
 
 	// Sidecar predictor XGBoost (SCA-400). PREDICTOR_URL default localhost:8090;
 	// PREDICTOR_AUTH_TOKEN (opcional, F-B7) agrega Authorization Bearer en
@@ -224,6 +269,8 @@ func main() {
 	loteSectorHandler.SetOnAbierto(controlHandler.EnsureLoopForLote)
 	// Reanudar los lotes que quedaron ABIERTO si el backend se reinició.
 	go controlHandler.ResumeLotesAbiertos(rootCtx)
+	// Vigilar telemetría desactualizada y T1 de lotes MANUAL.
+	go controlHandler.StartTelemetriaMonitor(rootCtx, telemetriaIntervalo, telemetriaUmbral)
 	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
 	controlSSEHandler := controlController.NewControlSSEHandler(controlSSEBroker)
 
@@ -250,6 +297,15 @@ func main() {
 	// Rutas de Administración de Usuarios (Solo Administrador)
 	mux.HandleFunc("/api/v1/admin/usuarios", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleAdmin}, management(userHandler.HandleUsers)))))
 	mux.HandleFunc("/api/v1/admin/usuarios/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleAdmin}, management(userHandler.HandleUserByID)))))
+
+	// Configuración admin de notificaciones (sólo Administrador).
+	notifAdmin := func(next http.HandlerFunc) http.HandlerFunc {
+		return loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes,
+			authController.RequireRoleFromDB(userRepo, []string{user.RoleAdmin}, management(next))))
+	}
+	mux.HandleFunc("/api/v1/admin/notificaciones", notifAdmin(notificacionHandler.HandleColeccion))
+	mux.HandleFunc("/api/v1/admin/notificaciones/test", notifAdmin(notificacionHandler.HandleTest))
+	mux.HandleFunc("/api/v1/admin/notificaciones/", notifAdmin(notificacionHandler.HandleUsuario))
 
 	// Rutas del dominio industrial
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoHandler.GetHornoStatus)))
@@ -459,6 +515,11 @@ func main() {
 	// 7. Launch reaper goroutine: detects offline devices and emits SSE events
 	go dispositivoSvc.StartReaper(rootCtx, reaperInterval, offlineThreshold)
 
+	// Worker de notificaciones: reintenta el outbox mientras rootCtx viva.
+	notifInterval := getEnvDuration("NOTIFICACIONES_INTERVALO", 15*time.Second)
+	notifMaxIntentos := getEnvInt("NOTIFICACIONES_MAX_INTENTOS", 5)
+	go notifSvc.StartWorker(rootCtx, notifInterval, notifMaxIntentos)
+
 	// 8. Launch server with graceful shutdown
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -634,6 +695,21 @@ func getEnvFloatSeconds(key string, defSeconds float64) time.Duration {
 		return time.Duration(defSeconds * float64(time.Second))
 	}
 	return time.Duration(secs * float64(time.Second))
+}
+
+// getEnvInt lee una variable de entorno entera positiva, devolviendo el default
+// si no está configurada o es inválida.
+func getEnvInt(key string, def int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		log.Printf("Advertencia: valor inválido para %s ('%s'), usando default %d", key, raw, def)
+		return def
+	}
+	return v
 }
 
 func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
