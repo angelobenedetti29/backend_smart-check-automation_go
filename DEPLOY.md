@@ -76,8 +76,8 @@ El control MPC (SCA-400) expone, entre otros:
 
 ## Base de datos
 
-Schema aplicado: `database/schema.sql` (idempotente; el backend lo vuelve a
-aplicar en cada arranque).
+Schema aplicado: `database/schema.sql` + `database/migrations/` (el backend
+aplica ambos en cada arranque; las versiones quedan en `schema_migrations`).
 
 Tablas principales:
 
@@ -119,10 +119,9 @@ no vienen sembrados.
 `.github/workflows/migrate.yml` se ejecuta con push a `staging` o `main`:
 
 1. Resuelve el GitHub Environment `staging` o `production` según la rama.
-2. Instala `postgresql-client`.
-3. Ejecuta `psql "$DATABASE_URL" -f database/schema.sql` con el secret
-   `DATABASE_URL` del environment.
-4. Dispara el deploy de Render con `POST $RENDER_DEPLOY_HOOK` (secret
+2. Instala Go y ejecuta `go run ./cmd/migrate` con el secret `DATABASE_URL` del
+   environment. El comando aplica `schema.sql` y las migraciones pendientes.
+3. Dispara el deploy de Render con `POST $RENDER_DEPLOY_HOOK` (secret
    `RENDER_DEPLOY_HOOK`).
 
 Cada environment de GitHub necesita sus propios secrets `DATABASE_URL` y
@@ -130,9 +129,9 @@ Cada environment de GitHub necesita sus propios secrets `DATABASE_URL` y
 deploya al hacer push; el deploy lo dispara el workflow después de aplicar las
 migraciones.
 
-Al agregar tablas nuevas, crear un nuevo archivo `.sql` en `database/` y
-aplicarlo en el workflow, o migrar a `golang-migrate` cuando el esquema
-evolucione.
+Para evolucionar el esquema, agregá `database/migrations/NNNN_descripcion.sql`.
+El runner las aplica en orden y registra cada versión en `schema_migrations`;
+no hace falta tocar `schema.sql` para bases existentes.
 
 ---
 

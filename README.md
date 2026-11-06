@@ -32,14 +32,17 @@ internal/
   repository/                   # Repositorios reales contra PostgreSQL
   provider/database/            # Conexión al pool de PostgreSQL
 database/schema.sql             # Esquema canónico de instalación limpia: tablas, constraints, índices, seed
+database/migrations/            # Migraciones incrementales para bases existentes (schema_migrations)
 docker-compose.yml              # db + app + predictor-svc
 ```
 
 El backend aplica `database/schema.sql` embebido en cada arranque
-(`database/schema.go`); el contenedor `db` también lo ejecuta al inicializar un
-volumen vacío. La aplicación es idempotente pero **no migra bases existentes**:
-solo crea los objetos que faltan. Un cambio estructural requiere recrear la
-base/volumen o aplicar una migración manual.
+(`database/schema.go`) y luego las migraciones pendientes de
+`database/migrations/` (registradas en `schema_migrations`). El contenedor `db`
+también ejecuta `schema.sql` al inicializar un volumen vacío. Para cambios
+estructurales, agregá `database/migrations/NNNN_descripcion.sql`; no edites
+`schema.sql` para bases existentes. `go run ./cmd/migrate` aplica lo mismo sin
+levantar el servidor.
 
 ## Servicios de Docker Compose
 

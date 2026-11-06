@@ -19,8 +19,8 @@ BEGIN;
 -- DDL se cuelga, abortamos en vez de bloquear el arranque indefinidamente. El
 -- advisory lock de abajo queda acotado por lock_timeout; el resto de la
 -- aplicación por statement_timeout.
-SET lock_timeout = '3s';
-SET statement_timeout = '60s';
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '60s';
 
 -- Serialize the complete schema application before any extension, table or seed DDL.
 SELECT pg_advisory_xact_lock(hashtextextended('smart-check:schema', 0));
@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
     CONSTRAINT usuarios_pkey PRIMARY KEY (id)
 );
 
-COMMENT ON TABLE usuarios IS 'Usuarios corporativos autorizados para acceder a la plataforma Smart-Check.';
+COMMENT ON TABLE usuarios IS 'Usuarios corporativos autorizados para acceder a la plataforma SmartCheck.';
 COMMENT ON COLUMN usuarios.email IS 'Correo corporativo. Debe existir aquí para poder autenticarse.';
 COMMENT ON COLUMN usuarios.rol IS 'Nivel de acceso: Administrador, Supervisor u Operario.';
 COMMENT ON COLUMN usuarios.password_hash IS 'Hash bcrypt de la contraseña para autenticación local (nullable si solo usa OAuth).';

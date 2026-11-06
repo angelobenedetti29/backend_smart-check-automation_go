@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
 	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
@@ -54,8 +55,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 
@@ -120,8 +120,7 @@ func (h *AuthHandler) LoginWithGoogle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 
@@ -214,7 +213,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   -1,            // -1 instruye al browser a eliminar la cookie inmediatamente
+		MaxAge:   -1,              // -1 instruye al browser a eliminar la cookie inmediatamente
 		Expires:  time.Unix(0, 0), // compatibilidad con clientes HTTP/1.0
 	})
 

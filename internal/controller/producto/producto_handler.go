@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
@@ -126,8 +127,7 @@ func (h *ProductoHandler) deactivate(w http.ResponseWriter, r *http.Request) {
 func (h *ProductoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Request) (producto.ProductoRequest, bool) {
 	var req producto.ProductoRequest
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return req, false
 	}
 

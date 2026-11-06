@@ -91,7 +91,7 @@ registro (`POST /api/v1/registration-requests`).
 
 ## Referencia del cliente
 
-El cliente Python (`rework-rb/backend/device/`) ya envía `type` en el alta, lo valida,
+El cliente Python (`raspberry_front_back_smart-check/backend/device/`) ya envía `type` en el alta, lo valida,
 lo persiste localmente y descarta un `device.json` legado sin `type` (fuerza un nuevo
 registro). Este backend debe persistirlo y devolverlo para que el tipo sea consistente
 del lado servidor.

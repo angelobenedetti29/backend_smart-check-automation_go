@@ -141,8 +141,7 @@ func (h *SectorHandler) handleDelete(w http.ResponseWriter, r *http.Request, id 
 // alta de sector.
 func decodeCreate(w http.ResponseWriter, r *http.Request) (sector.CreateSectorRequest, bool) {
 	var req sector.CreateSectorRequest
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return req, false
 	}
 	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
@@ -159,8 +158,7 @@ func decodeCreate(w http.ResponseWriter, r *http.Request) (sector.CreateSectorRe
 // la modificación de sector.
 func decodeUpdate(w http.ResponseWriter, r *http.Request) (sector.UpdateSectorRequest, bool) {
 	var req sector.UpdateSectorRequest
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return req, false
 	}
 	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {

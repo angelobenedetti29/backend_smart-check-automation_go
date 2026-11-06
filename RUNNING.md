@@ -1,5 +1,8 @@
 # Cómo levantar el proyecto
 
+> Quickstart para desarrollo local. El manual completo de instalación,
+> variables, despliegue y verificación es `MANUAL_INSTALACION.md`.
+
 ## Requisitos
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) instalado y corriendo
@@ -62,6 +65,10 @@ Esto levanta tres contenedores:
 - **db** — PostgreSQL 16, crea las tablas automáticamente desde `database/schema.sql`
 - **app** — la API Go, espera a que la DB esté lista y a que el predictor arranque
 - **predictor-svc** — sidecar Python/FastAPI con el predictor XGBoost (puerto `8090`)
+
+El backend aplica `schema.sql` y las migraciones pendientes de
+`database/migrations/` en cada arranque; cada versión queda registrada en
+`schema_migrations`.
 
 La primera vez descarga las imágenes y compila el binario (tarda ~1 min). Las siguientes veces es mucho más rápido.
 

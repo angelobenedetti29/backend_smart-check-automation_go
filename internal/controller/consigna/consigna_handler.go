@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
@@ -40,8 +41,7 @@ func (h *ConsignaHandler) DispatchManual(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 1. Validate Content-Type
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 

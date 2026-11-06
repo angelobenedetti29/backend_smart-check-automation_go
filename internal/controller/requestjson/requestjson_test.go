@@ -93,3 +93,35 @@ func TestDecodeStrictObjectRejectsOversizedBody(t *testing.T) {
 		t.Fatalf("ok=%v code=%d, want 400", ok, code)
 	}
 }
+
+func TestRequireJSON(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		want        bool
+	}{
+		{"canonical", "application/json", true},
+		{"charset", "application/json; charset=utf-8", true},
+		{"spaces", " application/json ; charset=utf-8 ", true},
+		{"missing", "", false},
+		{"text", "text/plain", false},
+		{"form", "application/x-www-form-urlencoded", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/x", nil)
+			if tc.contentType != "" {
+				r.Header.Set("Content-Type", tc.contentType)
+			}
+			rw := httptest.NewRecorder()
+
+			if got := RequireJSON(rw, r); got != tc.want {
+				t.Fatalf("RequireJSON() = %v, want %v", got, tc.want)
+			}
+			if !tc.want && rw.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("status = %d, want 415", rw.Code)
+			}
+		})
+	}
+}

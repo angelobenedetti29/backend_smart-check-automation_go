@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"mime"
 	"net/http"
 	"reflect"
 	"strings"
@@ -20,6 +21,18 @@ import (
 
 // DefaultLimit is the conservative bound used when a caller passes no limit.
 const DefaultLimit int64 = 8192
+
+// RequireJSON valida que el Content-Type sea application/json, aceptando
+// parámetros opcionales como charset=utf-8. Escribe el 415 estándar y devuelve
+// false cuando el media type no corresponde.
+func RequireJSON(w http.ResponseWriter, r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+		return false
+	}
+	return true
+}
 
 // Decode reads exactly one bounded JSON object from r.Body and decodes it into
 // dst. On any violation it writes the controller 400 envelope and returns false.

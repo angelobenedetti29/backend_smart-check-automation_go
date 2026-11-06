@@ -2,6 +2,7 @@ package response
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
@@ -37,7 +38,9 @@ func JSON(w http.ResponseWriter, status int, success bool, message string, data 
 		Errors:  errs,
 	}
 
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("response: error al serializar respuesta: %v", err)
+	}
 }
 
 // OK sends a 200 OK standard success response.
@@ -66,7 +69,9 @@ func PaginatedWithCursor(w http.ResponseWriter, message string, data interface{}
 		SiguienteCursor: siguienteCursor,
 	}
 
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("response: error al serializar respuesta paginada: %v", err)
+	}
 }
 
 // Error sends an error response with custom status code and messages.

@@ -31,7 +31,7 @@ from .schemas import PredictRequest, PredictResponse
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Smart-Check Predictor (SCA-400)",
+    title="SmartCheck Predictor (SCA-400)",
     description="Sidecar XGBoost per-producto para el MPC del horno.",
 )
 

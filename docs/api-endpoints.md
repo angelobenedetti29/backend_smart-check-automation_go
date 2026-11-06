@@ -18,6 +18,10 @@ Los endpoints paginados (`GET /api/v1/lotes`, `GET /api/v1/dispositivos/metricas
 { "success": true, "message": "...", "data": [ ... ], "total": 42, "page": 1, "pageSize": 20, "siguiente_cursor": "..." }
 ```
 
+### Content-Type
+
+Los endpoints que reciben JSON aceptan `application/json` con parámetros opcionales (por ejemplo `application/json; charset=utf-8`). Cualquier otro media type responde `415`.
+
 ### Autenticación
 
 Hay dos esquemas de credencial, mutuamente excluyentes:
@@ -370,7 +374,7 @@ curl -X POST -b "session_token=$JWT" -H "Content-Type: application/json" \
 
 ### Notas de migración y despliegue (sectores)
 
-- **`ubicacion` eliminada e irreversible:** al arrancar, la columna legacy `dispositivos.ubicacion` se migra a `sectores` (id = slug del nombre; si dos dispositivos del mismo tipo comparten ubicación, solo el primero queda asignado y el resto en `NULL`) y luego se elimina con `DROP COLUMN`. Un rollback al binario anterior requiere restaurar la columna manualmente.
+- **`ubicacion` eliminada e irreversible:** `database/migrations/0002_legacy_ubicacion.sql` migra la columna legacy `dispositivos.ubicacion` a `sectores` (id = slug del nombre; si dos dispositivos del mismo tipo comparten ubicación, solo el primero queda asignado y el resto en `NULL`) y luego la elimina con `DROP COLUMN`. El runner la aplica al arrancar. Un rollback al binario anterior requiere restaurar la columna manualmente.
 - **Slugs colisionantes:** dos ubicaciones distintas que sluggean igual ("Línea A" y "linea-a") generan un único sector; `ON CONFLICT DO NOTHING` conserva uno de los nombres de forma no determinista. Revisar el catálogo tras la primera migración si existieran variantes.
 - **Deploy coordinado frontend/backend:** el decoder es estricto. Un frontend viejo que aún envía `ubicacion` recibe 400 del backend nuevo; un frontend nuevo que envía `sectorId` recibe 400 del backend viejo. Desplegar ambos juntos.
 - **Caché en memoria:** tras borrar un sector, el `MemoryDispositivoStateStore` puede conservar el `sectorId` viejo hasta el próximo ping/snapshot (≤30 s); se autocorrige.

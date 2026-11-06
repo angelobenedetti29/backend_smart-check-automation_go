@@ -160,8 +160,7 @@ func (h *DispositivoHandler) HandleDelete(w http.ResponseWriter, r *http.Request
 func (h *DispositivoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Request) (dispositivo.CreateDispositivoRequest, bool) {
 	var req dispositivo.CreateDispositivoRequest
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return req, false
 	}
 
@@ -183,8 +182,7 @@ func (h *DispositivoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Re
 func (h *DispositivoHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *http.Request) (dispositivo.UpdateDispositivoRequest, bool) {
 	var req dispositivo.UpdateDispositivoRequest
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return req, false
 	}
 
@@ -222,8 +220,7 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 
@@ -273,8 +270,7 @@ func (h *DispositivoHandler) HandleRename(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 
@@ -317,8 +313,7 @@ func (h *DispositivoHandler) HandleRenameURL(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 
@@ -380,8 +375,7 @@ func (h *DispositivoHandler) HandleRenameByID(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 

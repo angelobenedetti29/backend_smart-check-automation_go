@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -48,7 +49,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeFlat(w, http.StatusMethodNotAllowed, map[string]string{"error": "Método no permitido"})
 		return
 	}
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
 		writeFlat(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type debe ser application/json"})
 		return
 	}

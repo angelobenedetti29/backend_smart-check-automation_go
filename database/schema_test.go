@@ -162,7 +162,7 @@ func TestApply_ConcurrentPoolsNoDeadlock(t *testing.T) {
 }
 
 // TestApply_CreaEsquemaSectorLotes verifica las columnas nuevas del contrato
-// rework-rb: baja lógica de productos, sectores, sector de dispositivos y el
+// legacy de sectores: baja lógica de productos, sectores, sector de dispositivos y el
 // ciclo ABIERTO/CERRADO de lotes_productivos más eventos_lote.
 func TestApply_CreaEsquemaSectorLotes(t *testing.T) {
 	p := isolatedPool(t)
