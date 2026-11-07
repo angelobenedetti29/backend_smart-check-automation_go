@@ -28,6 +28,7 @@ type Service interface {
 	ListarDestinatarios(ctx context.Context) ([]notificacion.Destinatario, error)
 	ActualizarPreferencias(ctx context.Context, usuarioID string, patch notificacion.PreferenciasPatch) (*notificacion.Destinatario, error)
 	Probar(ctx context.Context, usuarioID string, canal notificacion.Canal) error
+	ProbarAlerta(ctx context.Context, usuarioID string, canal notificacion.Canal, tipo string) error
 	Configuracion() notificacionService.Configuracion
 }
 
@@ -122,6 +123,9 @@ func (h *Handler) HandleUsuario(w http.ResponseWriter, r *http.Request) {
 type probarPayload struct {
 	Canal     string `json:"canal"`
 	UsuarioID string `json:"usuario_id"`
+	// Tipo es opcional: si viene, se envía el mensaje real de ese tipo de alerta
+	// con datos de ejemplo; si no, el mensaje de prueba genérico.
+	Tipo string `json:"tipo"`
 }
 
 // HandleTest maneja POST /api/v1/admin/notificaciones/test.
@@ -153,14 +157,21 @@ func (h *Handler) HandleTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), notificacionRequestTimeout)
 	defer cancel()
 
-	if err := h.svc.Probar(ctx, usuarioID, canal); err != nil {
+	tipo := strings.ToUpper(strings.TrimSpace(payload.Tipo))
+	var err error
+	if tipo != "" {
+		err = h.svc.ProbarAlerta(ctx, usuarioID, canal, tipo)
+	} else {
+		err = h.svc.Probar(ctx, usuarioID, canal)
+	}
+	if err != nil {
 		// El detalle queda en el log del servidor; al cliente sólo va el mensaje
 		// genérico para no exponer configuración del proveedor.
-		log.Printf("[NOTIFICACIONES] Prueba fallida usuario=%s canal=%s: %v", usuarioID, canal, err)
+		log.Printf("[NOTIFICACIONES] Prueba fallida usuario=%s canal=%s tipo=%s: %v", usuarioID, canal, tipo, err)
 		h.escribirError(w, err)
 		return
 	}
-	response.OK(w, "Notificación de prueba enviada", map[string]any{"canal": canal})
+	response.OK(w, "Notificación de prueba enviada", map[string]any{"canal": canal, "tipo": tipo})
 }
 
 // escribirError traduce los errores del service a la respuesta HTTP.
@@ -174,6 +185,9 @@ func (h *Handler) escribirError(w http.ResponseWriter, err error) {
 	case errors.Is(err, notificacion.ErrSinDestino):
 		response.Error(w, http.StatusBadRequest, "El usuario no tiene destino para el canal",
 			map[string]string{"code": "sin_destino"})
+	case errors.Is(err, notificacion.ErrTipoAlertaInvalido):
+		response.Error(w, http.StatusBadRequest, "Tipo de alerta inválido: use "+
+			strings.Join(notificacionService.TiposAlertaPrueba(), ", "), nil)
 	case errors.Is(err, notificacion.ErrChatIDInvalido):
 		response.Error(w, http.StatusBadRequest, notificacion.ErrChatIDInvalido.Error(), nil)
 	default:

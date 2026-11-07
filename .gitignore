@@ -21,3 +21,4 @@ Thumbs.db
 
 # Binario local de `go build ./cmd/server`
 /server
+.env.old

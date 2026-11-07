@@ -42,6 +42,11 @@ func (f *fakeService) Probar(ctx context.Context, usuarioID string, canal notifi
 	return f.probarErr
 }
 
+func (f *fakeService) ProbarAlerta(ctx context.Context, usuarioID string, canal notificacion.Canal, tipo string) error {
+	f.probarID, f.probarCanal = usuarioID, canal
+	return f.probarErr
+}
+
 func (f *fakeService) Configuracion() notificacionService.Configuracion { return f.cfg }
 
 type envelope struct {

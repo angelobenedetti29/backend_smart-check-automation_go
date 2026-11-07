@@ -33,6 +33,7 @@ var (
 	ErrCanalNoConfigurado       = errors.New("canal de notificación no configurado")
 	ErrSinDestino               = errors.New("el usuario no tiene destino para el canal")
 	ErrChatIDInvalido           = errors.New("chat ID de Telegram inválido")
+	ErrTipoAlertaInvalido       = errors.New("tipo de alerta inválido")
 )
 
 // Preferencias es el estado persistido de preferencias de un usuario.
