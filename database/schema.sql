@@ -33,7 +33,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE IF NOT EXISTS productos (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     nombre character varying(100) NOT NULL,
-    capacidad_nominal_kg_h numeric(10,3),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     peso_referencia_kg numeric(10,3) NOT NULL,
     tolerancia_peso_pct numeric(5,2) NOT NULL,
@@ -49,7 +48,6 @@ CREATE TABLE IF NOT EXISTS productos (
     activo boolean DEFAULT true NOT NULL,
     delta_temp1_max_c numeric(5,2) DEFAULT 10.0 NOT NULL,
     delta_vel_max numeric(5,3) DEFAULT 0.05 NOT NULL,
-    CONSTRAINT chk_productos_capacidad_nominal_positiva CHECK (((capacidad_nominal_kg_h IS NULL) OR (capacidad_nominal_kg_h > (0)::numeric))),
     CONSTRAINT chk_productos_delta_temp1_pos CHECK ((delta_temp1_max_c > (0)::numeric)),
     CONSTRAINT chk_productos_delta_vel_pos CHECK ((delta_vel_max > (0)::numeric)),
     CONSTRAINT chk_productos_dimension_positiva CHECK ((dimension_base_cm > (0)::numeric)),
@@ -66,7 +64,9 @@ CREATE TABLE IF NOT EXISTS productos (
 COMMENT ON TABLE productos IS 'Catálogo maestro de productos panificados de Fermar S.A.';
 COMMENT ON COLUMN productos.id IS 'Identificador único universal del producto';
 COMMENT ON COLUMN productos.nombre IS 'Nombre descriptivo del producto (ej: Tostada Integral, Pan Francés)';
-COMMENT ON COLUMN productos.capacidad_nominal_kg_h IS 'Capacidad nominal de producción del producto en kg por hora; nullable, si se informa debe ser mayor a 0';
+-- capacidad_nominal_kg_h (columna, CHECK y comentario) se agrega en
+-- database/migrations/0007_productos_capacidad_nominal.sql para no romper bases
+-- existentes (schema.sql se aplica antes que las migraciones).
 COMMENT ON COLUMN productos.peso_referencia_kg IS 'Peso patrón/ideal de una unidad del producto (kg)';
 COMMENT ON COLUMN productos.tolerancia_peso_pct IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
 COMMENT ON COLUMN productos.dimension_base_cm IS 'Dimensión base/tamaño ideal del producto (cm)';
