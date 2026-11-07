@@ -122,3 +122,21 @@ BEGIN
         SET estado = CASE WHEN exitosa THEN 'APLICADA' ELSE 'RECHAZADA' END;
     END IF;
 END $$;
+
+-- ---- registration_requests: alta de nodos ----------------------------------
+ALTER TABLE IF EXISTS registration_requests
+    ADD COLUMN IF NOT EXISTS device_id uuid,
+    ADD COLUMN IF NOT EXISTS secret text,
+    ADD COLUMN IF NOT EXISTS rename_url text,
+    ADD COLUMN IF NOT EXISTS resolved_by uuid,
+    ADD COLUMN IF NOT EXISTS resolved_at timestamp with time zone,
+    ADD COLUMN IF NOT EXISTS tipo character varying(16);
+
+-- ---- usuarios / sectores ---------------------------------------------------
+ALTER TABLE IF EXISTS usuarios
+    ADD COLUMN IF NOT EXISTS password_hash character varying(255),
+    ADD COLUMN IF NOT EXISTS activo boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone NOT NULL DEFAULT now();
+
+ALTER TABLE IF EXISTS sectores
+    ADD COLUMN IF NOT EXISTS created_at timestamp with time zone NOT NULL DEFAULT now();
