@@ -35,13 +35,32 @@ MPC opera degradado y las decisiones se auditan como `skipped`.
 | `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` | Timeout de precalentamiento en AUTOMATICO (default `1800`) |
 | `MPC_PREHEAT_POLL_SEGUNDOS` | Cadencia de lectura durante el precalentamiento (default `15`) |
 | `MPC_PERMITIR_PLACEHOLDER` | Permite operar en AUTOMATICO con el predictor placeholder; solo demo/tesis (default `false`) |
+| `TELEMETRIA_MONITOR_INTERVALO` | Cadencia del monitor de telemetría de lotes abiertos (default `15s`) |
+| `TELEMETRIA_DESACTUALIZADA_SEGUNDOS` | Antigüedad máxima de la última muestra antes de alertar telemetría desactualizada (default `30s`) |
+| `NOTIFICACIONES_EMAIL_PROVIDER` | Proveedor de email: `resend` (default) o `gmail`/`gmail_api` |
+| `RESEND_API_KEY` | API key de Resend; si falta, el canal email queda deshabilitado |
+| `GMAIL_CLIENT_ID` | OAuth Client ID con Gmail API habilitada (solo proveedor Gmail) |
+| `GMAIL_CLIENT_SECRET` | OAuth Client Secret del mismo cliente |
+| `GMAIL_REFRESH_TOKEN` | Refresh token con scope `gmail.send` |
+| `NOTIFICACIONES_EMAIL_FROM` | Remitente; si falta, el canal email queda deshabilitado (con Gmail, la misma cuenta autenticada) |
+| `TELEGRAM_BOT_TOKEN` | Token del bot de Telegram; si falta, el canal Telegram queda deshabilitado |
+| `NOTIFICACIONES_PANEL_URL` | URL base del panel; agrega el enlace `/alertas` al mensaje (opcional) |
+| `NOTIFICACIONES_INTERVALO` | Cadencia del worker del outbox de notificaciones (default `15s`) |
+| `NOTIFICACIONES_MAX_INTENTOS` | Intentos máximos por notificación antes de marcarla `FALLIDO` (default `5`) |
 | `PORT` | `8080` |
 
 Claves alineadas con [`render.yaml`](render.yaml) para el backend:
 `DATABASE_URL`, `JWT_SECRET`, `GOOGLE_CLIENT_ID`, `FRONTEND_ORIGINS`,
-`PREDICTOR_URL`, `PREDICTOR_AUTH_TOKEN` y `PORT`. Las `MPC_*` no están
-declaradas en `render.yaml`; si no se configuran aplican los defaults del
-código. El backend no se conecta al PLC ni lee variables de driver Modbus.
+`PREDICTOR_URL`, `PREDICTOR_AUTH_TOKEN`, `NOTIFICACIONES_EMAIL_PROVIDER`,
+`RESEND_API_KEY`, `NOTIFICACIONES_EMAIL_FROM`, `GMAIL_CLIENT_ID`,
+`GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`, `TELEGRAM_BOT_TOKEN`,
+`NOTIFICACIONES_PANEL_URL`, `TELEMETRIA_MONITOR_INTERVALO`,
+`TELEMETRIA_DESACTUALIZADA_SEGUNDOS` y `PORT`. Las `MPC_*`,
+`NOTIFICACIONES_INTERVALO` y `NOTIFICACIONES_MAX_INTENTOS` no están declaradas
+en `render.yaml`; si no se configuran aplican los defaults del código. Cada canal
+de notificación queda deshabilitado si su configuración está incompleta: el
+backend arranca igual y solo loguea el canal inactivo. El backend no se conecta
+al PLC ni lee variables de driver Modbus.
 
 **La Pi ENTRADA es la única que escribe el PLC real** con su propio
 `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend no
@@ -92,7 +111,12 @@ Tablas principales:
 - `eventos_lote` — detecciones individuales de la salida que alimentan los conteos.
 - `historial_consignas` — auditoría de consignas despachadas al horno.
 - `decisiones_control` — auditoría del MPC (propuestas, skips y aprobaciones).
-- `alertas` — alertas operativas (temperatura, fallo de enlace, precalentamiento).
+- `alertas` — alertas operativas (temperatura, telemetría desactualizada,
+  dispositivo offline, precalentamiento y calidad).
+- `usuarios_notificaciones` — preferencias de notificación por usuario (email,
+  Telegram y chat ID); la ausencia de fila equivale a ambos canales habilitados.
+- `notificaciones_outbox` — outbox persistente de notificaciones por alerta,
+  usuario y canal, con reintentos y backoff.
 - `usuarios` — autenticación corporativa (email, rol, password hash).
 - `registration_requests` y `device_lifecycle_audit` — enrolamiento y auditoría
   del ciclo de vida de dispositivos.
@@ -145,3 +169,7 @@ no hace falta tocar `schema.sql` para bases existentes.
 - Si se usa el predictor en producción, desplegarlo como servicio aparte y
   apuntar `PREDICTOR_URL` a una URL alcanzable desde Render. Sin predictor, el
   MPC funciona en modo degradado.
+- Para reenviar una alerta existente a destinatarios concretos, ejecutar
+  `go run ./cmd/notificar_alerta -emails "a@x.com,b@y.com"` (o `-alerta-id <uuid>`).
+  El comando encola filas `EMAIL` en `notificaciones_outbox`; no envía directo:
+  el worker del backend las entrega con el proveedor configurado.

@@ -53,6 +53,10 @@ PORT=8080
 > encola la consigna manual y publica propuestas del MPC para que la Pi las
 > levante por pull. Detalle en [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md).
 
+> **Notificaciones (opcional):** los canales de email (Resend o Gmail API) y
+> Telegram quedan deshabilitados si no se configuran, sin impedir el arranque.
+> Variables y pasos en `.env.example` y [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md) §3.5.
+
 ---
 
 ## 2. Levantar los contenedores
@@ -99,6 +103,11 @@ curl http://localhost:8080/api/v1/lotes
 # Listar el catálogo de productos (acepta cookie JWT o Bearer de dispositivo;
 # ya viene con el seed de Tostada Integral)
 curl http://localhost:8080/api/v1/productos
+
+# Alertas del backend (requiere cookie JWT). Tipos actuales: TEMPERATURA_HORNO,
+# TELEMETRIA_DESACTUALIZADA, DISPOSITIVO_OFFLINE, PRECALENTAMIENTO_TIMEOUT,
+# PORCENTAJE_QUEMADOS_ALTO y PORCENTAJE_CRUDOS_ALTO; quedan ACTIVA hasta el ACK.
+curl -b "session_token=<JWT>" http://localhost:8080/api/v1/alertas
 ```
 
 > El predictor es opcional para levantar la API: si no responde, el MPC opera
@@ -185,6 +194,12 @@ docker compose logs -f predictor-svc
 
 # Correr solo la DB (para desarrollo local con go run)
 docker compose up db
+
+# Reenviar una alerta existente a destinatarios concretos (encola en el outbox;
+# el worker del backend envía). Sin -alerta-id toma la última ACTIVA
+# PORCENTAJE_QUEMADOS_ALTO. Requiere DATABASE_URL accesible desde el host.
+go run ./cmd/notificar_alerta -emails "a@x.com,b@y.com"
+go run ./cmd/notificar_alerta -alerta-id <uuid> -emails "a@x.com"
 ```
 
 ---
