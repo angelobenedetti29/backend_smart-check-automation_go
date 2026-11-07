@@ -2137,10 +2137,29 @@ Envía una prueba directa (no pasa por el outbox). Body:
 `canal` acepta `EMAIL` o `TELEGRAM` (case-insensitive). El email usa el email
 del usuario; Telegram exige un chat ID cargado.
 
+`tipo` es **opcional**. Sin `tipo` se envía el mensaje de prueba genérico. Con
+`tipo` se envía el mensaje real de ese tipo de alerta (mismo renderizador que
+producción: asunto, emojis, HTML del email y enlace al panel) con datos de
+ejemplo marcados `[PRUEBA]` y la severidad real del tipo. No crea alertas ni
+filas de outbox y no notifica a otros usuarios.
+
+```json
+{ "canal": "TELEGRAM", "usuario_id": "11111111-1111-1111-1111-111111111111", "tipo": "DISPOSITIVO_OFFLINE" }
+```
+
+Valores válidos de `tipo` (case-insensitive): `TEMPERATURA_HORNO` (WARNING),
+`PRECALENTAMIENTO_TIMEOUT` (CRITICAL), `PORCENTAJE_QUEMADOS_ALTO` (WARNING),
+`PORCENTAJE_CRUDOS_ALTO` (WARNING), `DISPOSITIVO_OFFLINE` (WARNING) y
+`TELEMETRIA_DESACTUALIZADA` (WARNING). La respuesta 200 devuelve
+`data: { "canal": ..., "tipo": ... }`.
+
+> El decoder es estricto (rechaza campos desconocidos): contra un backend
+> anterior a este campo, enviar `tipo` responde `400 Formato JSON inválido`.
+
 | Código | Motivo |
 |---|---|
 | 200 | Prueba enviada |
-| 400 | Canal inválido, falta `usuario_id`, sin destino (`errors.code = "sin_destino"`) o chat ID inválido |
+| 400 | Canal inválido, `tipo` inválido, falta `usuario_id`, sin destino (`errors.code = "sin_destino"`) o chat ID inválido |
 | 404 | Usuario desconocido |
 | 409 | Canal no configurado (`errors.code = "canal_no_configurado"`) |
 | 415 | Content-Type distinto de `application/json` |

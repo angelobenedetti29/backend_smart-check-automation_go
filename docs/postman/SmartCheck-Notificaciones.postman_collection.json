@@ -1,0 +1,441 @@
+{
+  "info": {
+    "name": "SmartCheck - Todos los mensajes de notificacion",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Requiere el backend desplegado con el campo 'tipo' en POST /admin/notificaciones/test. Orden: 0-2 (preparacion), luego las carpetas Telegram y/o Email. Los mensajes llevan [PRUEBA] y no crean alertas reales."
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://backend-smart-check-automation-go.onrender.com"
+    },
+    {
+      "key": "adminEmail",
+      "value": "admin@fermar.com.ar"
+    },
+    {
+      "key": "adminPassword",
+      "value": "password123"
+    },
+    {
+      "key": "miEmail",
+      "value": "TU_MAIL_REAL@gmail.com"
+    },
+    {
+      "key": "usuarioId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Health (despierta el servicio)",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/health"
+      }
+    },
+    {
+      "name": "1. Login admin",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/api/v1/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}"
+        }
+      }
+    },
+    {
+      "name": "2. Capturar usuarioId (por miEmail) y ver canales",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "const mi = ((body.data || {}).destinatarios || []).find(d => (d.email||'').toLowerCase() === pm.collectionVariables.get('miEmail').toLowerCase());",
+              "pm.test('usuario encontrado por miEmail', () => pm.expect(mi, 'miEmail no aparece en destinatarios').to.exist);",
+              "if (mi) { pm.collectionVariables.set('usuarioId', mi.usuario_id); console.log('usuarioId:', mi.usuario_id, '| telegram_chat_id:', mi.telegram_chat_id); }",
+              "const c = (body.data || {}).canales || {};",
+              "console.log('email configurado:', (c.email||{}).configurado, '| telegram configurado:', (c.telegram||{}).configurado);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/v1/admin/notificaciones"
+      }
+    },
+    {
+      "name": "Telegram - los 6 mensajes",
+      "item": [
+        {
+          "name": "🌡️ Temperatura de horno (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"TELEGRAM\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"TEMPERATURA_HORNO\"\n}"
+            }
+          }
+        },
+        {
+          "name": "⏱️ Precalentamiento agotado (CRITICAL)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"TELEGRAM\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"PRECALENTAMIENTO_TIMEOUT\"\n}"
+            }
+          }
+        },
+        {
+          "name": "🔥 Alto % de quemados (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"TELEGRAM\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"PORCENTAJE_QUEMADOS_ALTO\"\n}"
+            }
+          }
+        },
+        {
+          "name": "🥖 Alto % de crudos (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"TELEGRAM\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"PORCENTAJE_CRUDOS_ALTO\"\n}"
+            }
+          }
+        },
+        {
+          "name": "📴 Dispositivo offline (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"TELEGRAM\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"DISPOSITIVO_OFFLINE\"\n}"
+            }
+          }
+        },
+        {
+          "name": "📡 Telemetría desactualizada (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"TELEGRAM\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"TELEMETRIA_DESACTUALIZADA\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Email - los 6 mensajes",
+      "item": [
+        {
+          "name": "🌡️ Temperatura de horno (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"EMAIL\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"TEMPERATURA_HORNO\"\n}"
+            }
+          }
+        },
+        {
+          "name": "⏱️ Precalentamiento agotado (CRITICAL)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"EMAIL\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"PRECALENTAMIENTO_TIMEOUT\"\n}"
+            }
+          }
+        },
+        {
+          "name": "🔥 Alto % de quemados (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"EMAIL\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"PORCENTAJE_QUEMADOS_ALTO\"\n}"
+            }
+          }
+        },
+        {
+          "name": "🥖 Alto % de crudos (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"EMAIL\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"PORCENTAJE_CRUDOS_ALTO\"\n}"
+            }
+          }
+        },
+        {
+          "name": "📴 Dispositivo offline (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"EMAIL\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"DISPOSITIVO_OFFLINE\"\n}"
+            }
+          }
+        },
+        {
+          "name": "📡 Telemetría desactualizada (WARNING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enviado (200)', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"canal\": \"EMAIL\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"TELEMETRIA_DESACTUALIZADA\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Error esperado - tipo invalido (debe dar 400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/api/v1/admin/notificaciones/test",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"canal\": \"EMAIL\",\n  \"usuario_id\": \"{{usuarioId}}\",\n  \"tipo\": \"NO_EXISTE\"\n}"
+        }
+      }
+    }
+  ]
+}

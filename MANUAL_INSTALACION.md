@@ -176,6 +176,72 @@ Los endpoints de administración (`GET/PATCH /api/v1/admin/notificaciones` y
 editar preferencias por usuario y enviar una prueba directa, sin pasar por el
 outbox.
 
+#### Alertas que se notifican
+
+Sólo las alertas `WARNING` y `CRITICAL` se notifican (las `INFO` no). Cada una
+llega a todos los usuarios activos por los canales habilitados, con el mismo
+formato en Telegram (texto con emojis) y en email (HTML con fallback de texto):
+
+| Tipo | Severidad | Se genera cuando |
+|---|---|---|
+| `TEMPERATURA_HORNO` | WARNING | T1 se aleja del objetivo más que `tolerancia_temp_c` (2 °C por defecto) |
+| `PRECALENTAMIENTO_TIMEOUT` | CRITICAL | El horno no llega a temperatura en `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` |
+| `PORCENTAJE_QUEMADOS_ALTO` | WARNING | % de quemados de la ventana supera el umbral (5 % por defecto) |
+| `PORCENTAJE_CRUDOS_ALTO` | WARNING | % de crudos de la ventana supera el umbral (5 % por defecto) |
+| `DISPOSITIVO_OFFLINE` | WARNING | Un dispositivo supera `DISPOSITIVO_OFFLINE_THRESHOLD` sin ping |
+| `TELEMETRIA_DESACTUALIZADA` | WARNING | El lote abierto supera `TELEMETRIA_DESACTUALIZADA_SEGUNDOS` sin muestra |
+
+#### Probar las notificaciones
+
+Pasos para verificar ambos canales en un entorno desplegado (usar el rol
+Administrador):
+
+1. **Variables de entorno:** cargar las de §3.5 en el servicio (en Render, en
+   *Environment*; el `.env` sólo lo lee la máquina local). Al arrancar no deben
+   aparecer los avisos `Canal EMAIL deshabilitado` / `Canal TELEGRAM
+   deshabilitado`.
+2. **Login:** `POST /api/v1/auth/login` (la cookie `session_token` queda en el
+   cliente).
+3. **Canales:** `GET /api/v1/admin/notificaciones` debe devolver
+   `canales.email.configurado` y `canales.telegram.configurado` en `true`, y
+   lista cada usuario con su `usuario_id` y `telegram_chat_id`.
+4. **Destinatario:** el email se envía a `usuarios.email`. Si hace falta uno
+   propio, crear un usuario con `POST /api/v1/admin/usuarios` (el email no se
+   puede editar con `PATCH`).
+5. **Chat ID de Telegram:** el usuario inicia el bot (`/start`), se obtiene su
+   chat ID (ver arriba) y se carga con
+   `PATCH /api/v1/admin/notificaciones/{usuario_id}` y
+   `{"telegram_chat_id": "123456789"}`.
+6. **Prueba genérica:** `POST /api/v1/admin/notificaciones/test` con
+   `{"canal": "EMAIL"|"TELEGRAM", "usuario_id": "..."}`.
+7. **Un mensaje por tipo de alerta:** el mismo endpoint con el campo `tipo`
+   (ver la tabla anterior y `docs/api-endpoints.md` #40). El mensaje lleva
+   `[PRUEBA]` y no crea alertas reales.
+8. **Flujo real (outbox + worker):** provocar una alerta real, por ejemplo
+   `DISPOSITIVO_OFFLINE` (un dispositivo hace ping y se apaga; a los ~90 s se
+   crea la alerta) y revisar el estado:
+
+   ```sql
+   SELECT canal, destino, estado, intentos, ultimo_error, created_at
+   FROM notificaciones_outbox ORDER BY created_at DESC LIMIT 20;
+   ```
+
+   `ENVIADO` = entregada; `PENDIENTE` con `ultimo_error` = reintentando;
+   `FALLIDO` = agotó `NOTIFICACIONES_MAX_INTENTOS`.
+
+Una colección de Postman con los pasos 2, 3 y 7 está en
+[`docs/postman/`](docs/postman/SmartCheck-Notificaciones.postman_collection.json):
+se importa, se completa `miEmail` en las variables de la colección y se ejecuta
+en orden.
+
+Errores frecuentes: `409 canal_no_configurado` (falta una variable de entorno),
+`400 sin_destino` (el usuario no tiene email o chat ID), `502` (el proveedor
+rechazó el envío; el motivo está en el log, línea `[NOTIFICACIONES] Prueba
+fallida`), y `400 Formato JSON inválido` al enviar `tipo` (el despliegue sigue
+con una versión anterior del backend). Con Gmail en modo *Testing* de Google
+Cloud, el refresh token vence a los 7 días (`invalid_grant`): hay que
+regenerarlo.
+
 #### Reenvío manual de una alerta
 
 Para encolar una alerta existente a destinatarios concretos (por ejemplo, una
