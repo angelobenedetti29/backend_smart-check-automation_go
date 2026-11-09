@@ -25,7 +25,7 @@ var protectedExact = map[string]struct{}{
 // segmento no vacío. Deliberadamente NO coincide con /api/v1/lotes/inicio,
 // /api/v1/lotes/abierto ni /api/v1/lotes/events (esos últimos se resuelven por
 // match exacto o quedan fuera del set device-only).
-var loteEventPattern = regexp.MustCompile(`^/api/v1/lotes/[^/]+/(eventos|cierre|metricas-horno|consigna/ack)$`)
+var loteEventPattern = regexp.MustCompile(`^/api/v1/lotes/[^/]+/(eventos|cierre|metricas-horno|alertas-calidad|consigna/ack)$`)
 
 // isProtectedTarget indica si la petición pertenece al conjunto device-only:
 // coincidencia exacta más el patrón POST /lotes/{id}/(eventos|cierre).

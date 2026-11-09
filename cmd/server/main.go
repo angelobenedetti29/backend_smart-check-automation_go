@@ -153,6 +153,7 @@ func main() {
 		os.Getenv("NOTIFICACIONES_PANEL_URL"), notifEmailFrom)
 	// Encolar sólo después de un INSERT real de alerta (la deduplicación no encola).
 	alertaRepo.SetEncolador(notifSvc)
+	notifSvc.SetAlertas(alertaRepo)
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
@@ -221,6 +222,7 @@ func main() {
 	planificacionHandler := planificacionController.NewHandler(planificacionSvc)
 	loteSectorHandler := loteSectorController.NewLoteSectorHandler(loteSectorSvc)
 	metricasHornoHandler := metricashornoController.NewMetricasHornoHandler(metricasHornoRepo, loteSectorSvc)
+	alertaCalidadHandler := alertaController.NewAlertaCalidadHandler(alertaRepo, loteSectorSvc)
 	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
 	notificacionHandler := notificacionController.NewHandler(notifSvc)
 
@@ -344,6 +346,8 @@ func main() {
 			loteSectorHandler.HandleCierre(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
 			metricasHornoHandler.Handle(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/alertas-calidad"):
+			alertaCalidadHandler.Handle(w, r)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
 			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, metricasHornoHandler.HandleUltimas)(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/consigna/ack"):

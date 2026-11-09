@@ -40,6 +40,19 @@ type Service struct {
 	telegram  domain.EnviadorTelegram
 	panelURL  string
 	emailFrom string
+	alertas   UltimaAlertaProvider
+}
+
+// UltimaAlertaProvider devuelve la alerta real más reciente de un tipo, o nil si
+// todavía no hay ninguna. Lo usa el envío de prueba para no inventar datos.
+type UltimaAlertaProvider interface {
+	UltimaPorTipo(ctx context.Context, tipo string) (*alerta.Alerta, error)
+}
+
+// SetAlertas configura el origen de alertas reales para el envío de prueba.
+// Nil lo deshabilita y se usa el ejemplo.
+func (s *Service) SetAlertas(p UltimaAlertaProvider) {
+	s.alertas = p
 }
 
 // NewService construye el service de notificaciones. Un enviador nil deshabilita

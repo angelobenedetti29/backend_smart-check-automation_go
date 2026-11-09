@@ -108,6 +108,23 @@ func (r *AlertaPostgresRepository) GetByHornoID(hornoID string) ([]alerta.Alerta
 	return scanAlertas(rows)
 }
 
+// UltimaPorTipo devuelve la alerta más reciente del tipo dado, o nil si no hay.
+func (r *AlertaPostgresRepository) UltimaPorTipo(ctx context.Context, tipo string) (*alerta.Alerta, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT `+selectAlertaColumns+`
+		WHERE a.tipo = $1
+		ORDER BY a.created_at DESC
+		LIMIT 1`, tipo)
+	if err != nil {
+		return nil, fmt.Errorf("query última alerta por tipo: %w", err)
+	}
+	alertas, err := scanAlertas(rows)
+	if err != nil || len(alertas) == 0 {
+		return nil, err
+	}
+	return &alertas[0], nil
+}
+
 // Listar devuelve las últimas 200 alertas, opcionalmente filtradas por estado.
 func (r *AlertaPostgresRepository) Listar(ctx context.Context, estado string) ([]alerta.Alerta, error) {
 	query := `SELECT ` + selectAlertaColumns

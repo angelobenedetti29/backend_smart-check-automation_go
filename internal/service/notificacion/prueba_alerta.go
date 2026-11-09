@@ -59,12 +59,20 @@ func alertaEjemplo(tipo string) (*alerta.Alerta, bool) {
 	return a, true
 }
 
-// ProbarAlerta envía al usuario, por el canal indicado, el mensaje real de un
-// tipo de alerta con datos de ejemplo. No crea ninguna alerta ni outbox.
+// ProbarAlerta envía al usuario, por el canal indicado, el mensaje de la última
+// alerta real de ese tipo (o datos de ejemplo si nunca se generó una). No crea
+// ninguna alerta ni outbox.
 func (s *Service) ProbarAlerta(ctx context.Context, usuarioID string, canal domain.Canal, tipo string) error {
-	a, ok := alertaEjemplo(strings.ToUpper(strings.TrimSpace(tipo)))
+	tipo = strings.ToUpper(strings.TrimSpace(tipo))
+	a, ok := alertaEjemplo(tipo)
 	if !ok {
 		return domain.ErrTipoAlertaInvalido
+	}
+	// Preferimos la última alerta real del tipo; el ejemplo es solo fallback.
+	if s.alertas != nil {
+		if real, err := s.alertas.UltimaPorTipo(ctx, tipo); err == nil && real != nil {
+			a = real
+		}
 	}
 	d, err := s.repo.ObtenerDestinatario(ctx, usuarioID)
 	if err != nil {

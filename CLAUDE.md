@@ -204,6 +204,7 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | GET | /api/v1/lotes/{id}/confianza-clases | JWT cookie | cualquier rol |
 | POST | /api/v1/lotes/{id}/metricas-horno | Bearer dispositivo | — |
 | GET | /api/v1/lotes/{id}/metricas-horno | Bearer dispositivo o JWT cookie | — |
+| POST | /api/v1/lotes/{id}/alertas-calidad | Bearer dispositivo | — (lote de su sector, ABIERTO) |
 | GET | /api/v1/lotes/{id}/control/events | JWT cookie | cualquier rol |
 | POST/GET | /api/v1/registration-requests | — (POST/GET por id) · JWT Supervisor/Admin (listado y approve/reject) | — |
 

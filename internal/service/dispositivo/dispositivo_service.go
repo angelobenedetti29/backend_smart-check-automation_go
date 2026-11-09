@@ -400,8 +400,8 @@ func (s *DispositivoService) alertarOffline(estado dispositivo.EstadoDispositivo
 		Tipo:          alerta.TipoDispositivoOffline,
 		Severidad:     alerta.SeveridadWarning,
 		Estado:        alerta.EstadoActiva,
-		Mensaje: fmt.Sprintf("Dispositivo %s (%s) sin reportar desde hace más de %s",
-			estado.Nombre, estado.DispositivoID, umbral),
+		Mensaje: fmt.Sprintf("Dispositivo %s sin reportar desde hace más de %s",
+			estado.Nombre, umbral),
 	}
 	if err := s.alertas.Save(a); err != nil {
 		log.Printf("[DISPOSITIVO] No se pudo guardar alerta offline de %s: %v", estado.DispositivoID, err)

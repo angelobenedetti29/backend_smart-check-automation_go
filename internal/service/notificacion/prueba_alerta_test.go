@@ -3,11 +3,35 @@ package notificacion
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	domain "github.com/angelobenedetti29/smart-check-automation/internal/domain/notificacion"
 )
+
+type fakeUltimaAlerta struct{ a *alerta.Alerta }
+
+func (f fakeUltimaAlerta) UltimaPorTipo(context.Context, string) (*alerta.Alerta, error) {
+	return f.a, nil
+}
+
+func TestProbarAlertaUsaAlertaReal(t *testing.T) {
+	repo := &fakeRepo{destinatarios: []domain.Destinatario{
+		{UsuarioID: "u1", Email: "a@x.com", Activo: true, TelegramChatID: chatPtr("123456")},
+	}}
+	telegram := &fakeTelegram{}
+	svc := NewService(repo, &fakeEmail{}, telegram, "", "")
+	svc.SetAlertas(fakeUltimaAlerta{a: &alerta.Alerta{
+		Tipo: alerta.TipoDispositivoOffline, Severidad: alerta.SeveridadWarning,
+		Mensaje: "Dispositivo rb-1 sin reportar desde hace más de 1m30s", CreadaEn: time.Now(),
+	}})
+
+	require.NoError(t, svc.ProbarAlerta(context.Background(), "u1", domain.CanalTelegram, "DISPOSITIVO_OFFLINE"))
+	require.Contains(t, telegram.texto, "rb-1")
+	require.NotContains(t, telegram.texto, "[PRUEBA]")
+}
 
 func TestProbarAlertaTodosLosTipos(t *testing.T) {
 	repo := &fakeRepo{destinatarios: []domain.Destinatario{
