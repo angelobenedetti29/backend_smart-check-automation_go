@@ -44,10 +44,10 @@ func alertaEjemplo(tipo string) (*alerta.Alerta, bool) {
 		a.Mensaje = "[PRUEBA] El horno no alcanzó la temperatura objetivo tras 30 minutos de precalentamiento"
 	case alerta.TipoPorcentajeQuemadosAlto:
 		a.LoteID = &lote
-		a.Mensaje = "[PRUEBA] Quemados en la ventana: 8.4 % (umbral 5.0 %)"
+		a.Mensaje = "[PRUEBA] Porcentaje de quemados alto: 8.4 % en la ventana de 10s"
 	case alerta.TipoPorcentajeCrudosAlto:
 		a.LoteID = &lote
-		a.Mensaje = "[PRUEBA] Crudos en la ventana: 7.1 % (umbral 5.0 %)"
+		a.Mensaje = "[PRUEBA] Porcentaje de crudos alto: 7.1 % en la ventana de 10s"
 	case alerta.TipoDispositivoOffline:
 		a.Mensaje = "[PRUEBA] El dispositivo raspberry-entrada dejó de reportar hace más de 90 s"
 	case alerta.TipoTelemetriaDesactualizada:

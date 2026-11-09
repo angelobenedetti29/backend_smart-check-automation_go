@@ -111,7 +111,9 @@ func (h *AlertaCalidadHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sectorID, loteRef := lote.SectorID, lote.ID
-	mensaje := fmt.Sprintf("Porcentaje de %s %.1f%% supera el umbral de aceptación %.1f%%", etiqueta, req.Porcentaje, req.Umbral)
+	// El umbral se valida pero no se muestra: la Pi y el backend pueden usar
+	// umbrales distintos y el mensaje salía contradictorio (3.6 % vs 5.0 %).
+	mensaje := fmt.Sprintf("Porcentaje de %s alto: %.1f%%", etiqueta, req.Porcentaje)
 	if req.VentanaSegundos > 0 {
 		mensaje += fmt.Sprintf(" en la ventana de %ds", req.VentanaSegundos)
 	}

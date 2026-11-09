@@ -646,8 +646,8 @@ func (loop *Loop) evaluarCalidadUmbral(tipo, etiqueta string, pct, umbral float6
 		Tipo:      tipo,
 		Severidad: alerta.SeveridadWarning,
 		Estado:    alerta.EstadoActiva,
-		Mensaje: fmt.Sprintf("Porcentaje de %s %.1f%% supera el umbral de aceptación %.1f%% en la ventana de %ds",
-			etiqueta, pct, umbral, loop.ventanaEvalSeg),
+		Mensaje: fmt.Sprintf("Porcentaje de %s alto: %.1f%% en la ventana de %ds",
+			etiqueta, pct, loop.ventanaEvalSeg),
 	}
 	if err := loop.alertas.Save(a); err != nil {
 		log.Printf("[control] Save alerta (%s) lote %s: %v", tipo, loop.loteID, err)
