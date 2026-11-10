@@ -22,6 +22,33 @@ type fakeReportesService struct {
 	err          error
 }
 
+func (f *fakeReportesService) ImpactoEconomico(_ context.Context, q reportesService.Query) (*reportes.ReporteEconomico, error) {
+	f.query = q
+	return &reportes.ReporteEconomico{}, f.err
+}
+
+func TestHandleImpactoEconomico(t *testing.T) {
+	for _, tc := range []struct {
+		method string
+		err    error
+		status int
+	}{
+		{http.MethodGet, nil, http.StatusOK},
+		{http.MethodGet, reportes.ErrFechaInvalida, http.StatusBadRequest},
+		{http.MethodGet, context.DeadlineExceeded, http.StatusInternalServerError},
+		{http.MethodPost, nil, http.StatusMethodNotAllowed},
+	} {
+		svc := &fakeReportesService{err: tc.err}
+		rr := httptest.NewRecorder()
+		HandleImpactoEconomico(ReportesDeps{Service: svc})(rr, httptest.NewRequest(tc.method, "/api/v1/reportes/impacto-economico?desde=2026-11-01&sector_id=horno-1&turno=tarde", nil))
+		require.Equal(t, tc.status, rr.Code)
+		if tc.method == http.MethodGet {
+			require.Equal(t, "horno-1", svc.query.SectorID)
+			require.Equal(t, "tarde", svc.query.Turno)
+		}
+	}
+}
+
 func (f *fakeReportesService) Alertas(_ context.Context, q reportesService.Query) (*reportes.PaginaAlertas, error) {
 	f.query = q
 	if f.err != nil {

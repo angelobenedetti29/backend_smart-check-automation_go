@@ -145,6 +145,11 @@ func (r *ReportesPostgresRepository) Resumen(ctx context.Context, periodo report
 	if err := r.produccion(ctx, tx, f, resumen); err != nil {
 		return nil, err
 	}
+	economia, err := consultarImpactoEconomico(ctx, tx, f)
+	if err != nil {
+		return nil, err
+	}
+	resumen.ImpactoEconomico = *economia
 	if err := r.proceso(ctx, tx, f, resumen); err != nil {
 		return nil, err
 	}
@@ -628,7 +633,12 @@ const loteReporteSelect = `lp.id::text, COALESCE(lp.sector_id,''), COALESCE(s.no
 		       lp.correctos, lp.crudas, lp.quemados,
 		       (%s)::int,
 		       lp.correctos_kg, lp.crudos_kg, lp.quemados_kg,
-		       lp.confianza_promedio`
+		       lp.confianza_promedio, pr.costo_fabricacion_unitario_ars,
+		       CASE
+		         WHEN lp.crudas IS NULL AND lp.quemados IS NULL THEN NULL
+		         WHEN COALESCE(lp.crudas,0)::bigint + COALESCE(lp.quemados,0) = 0 THEN 0
+		         ELSE (COALESCE(lp.crudas,0)::numeric + COALESCE(lp.quemados,0)) * pr.costo_fabricacion_unitario_ars
+		       END::float8`
 
 // scanLoteReporte mapea las columnas de loteReporteSelect y deriva las
 // métricas calculadas.
@@ -641,6 +651,7 @@ func scanLoteReporte(row rowScanner) (reportes.LoteReporte, error) {
 		&l.Conteos.OK, &l.Conteos.Crudo, &l.Conteos.Quemado, &l.Conteos.Total,
 		&l.Kg.OK, &l.Kg.Crudo, &l.Kg.Quemado,
 		&l.ConfianzaPromedio,
+		&l.CostoFabricacionUnitarioARS, &l.PerdidaMermaARS,
 	); err != nil {
 		return l, err
 	}

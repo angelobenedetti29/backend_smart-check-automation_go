@@ -7,8 +7,10 @@ package producto
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -64,7 +66,11 @@ type Producto struct {
 	// CapacidadNominalKgH es la capacidad nominal de producción en kg/h.
 	// Nullable: si no está cargada, el producto no participa de cálculos de
 	// capacidad/OEE.
-	CapacidadNominalKgH *float64 `json:"capacidadNominalKgH"`
+	CapacidadNominalKgH         *float64 `json:"capacidadNominalKgH"`
+	CostoFabricacionUnitarioARS *float64 `json:"costoFabricacionUnitarioArs"`
+	// Sólo para persistencia: permite conservar el costo en PUT de clientes
+	// anteriores que no incluyen el nuevo campo. Un null explícito lo elimina.
+	CostoFabricacionInformado bool `json:"-"`
 	// TempSetpoint y VelocidadCintaSetpoint son opcionales (nullable): valor
 	// puntual dentro del rango min/max, sólo usado si se reactiva el despacho
 	// automático de consigna (SCA-142).
@@ -91,7 +97,9 @@ type ProductoRequest struct {
 	VelocidadCintaMin     float64 `json:"velocidadCintaMin"`
 	VelocidadCintaMax     float64 `json:"velocidadCintaMax"`
 	// CapacidadNominalKgH es opcional (nullable) y, si viene, debe ser > 0.
-	CapacidadNominalKgH *float64 `json:"capacidadNominalKgH"`
+	CapacidadNominalKgH         *float64 `json:"capacidadNominalKgH"`
+	CostoFabricacionUnitarioARS *float64 `json:"costoFabricacionUnitarioArs"`
+	CostoFabricacionInformado   bool     `json:"-"`
 	// Setpoints opcionales: si se envían, deben caer dentro del rango min/max.
 	TempSetpoint           *float64 `json:"tempSetpoint,omitempty"`
 	VelocidadCintaSetpoint *float64 `json:"velocidadCintaSetpoint,omitempty"`
@@ -99,10 +107,25 @@ type ProductoRequest struct {
 	DeltaVelMax            *float64 `json:"deltaVelMax,omitempty"`    // default 0.05 si nil
 }
 
-// Validate verifica todas las reglas de negocio del ProductoRequest, replicando
-// en el servidor los CHECK constraints de la tabla productos. Retorna un
-// *ValidationError con el mapa campo→mensaje de todos los campos inválidos, o
-// nil si es válido.
+// UnmarshalJSON distingue costo omitido de null explícito para que los
+// clientes anteriores puedan seguir actualizando parámetros sin borrar costos.
+func (req *ProductoRequest) UnmarshalJSON(data []byte) error {
+	type plain ProductoRequest
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*req = ProductoRequest(value)
+	_, req.CostoFabricacionInformado = fields["costoFabricacionUnitarioArs"]
+	return nil
+}
+
+// Validate replica los CHECK constraints del catálogo y devuelve todos los
+// campos inválidos como ValidationError.
 func (req ProductoRequest) Validate() error {
 	fields := map[string]string{}
 
@@ -133,6 +156,12 @@ func (req ProductoRequest) Validate() error {
 	}
 	if req.CapacidadNominalKgH != nil && *req.CapacidadNominalKgH <= 0 {
 		fields["capacidadNominalKgH"] = "debe ser un valor numérico mayor a 0"
+	}
+	if req.CostoFabricacionUnitarioARS != nil {
+		costo := *req.CostoFabricacionUnitarioARS
+		if math.IsNaN(costo) || math.IsInf(costo, 0) || costo < 0 || costo > 9999999999.99 || costo != math.Round(costo*100)/100 {
+			fields["costoFabricacionUnitarioArs"] = "debe ser un importe entre 0 y 9999999999.99 ARS, con hasta 2 decimales"
+		}
 	}
 	if req.TempSetpoint != nil && (*req.TempSetpoint < req.TempMin || *req.TempSetpoint > req.TempMax) {
 		fields["tempSetpoint"] = "debe estar entre tempMin y tempMax"

@@ -17,6 +17,7 @@ import (
 
 // ReportesService es el contrato que consume el handler.
 type ReportesService interface {
+	ImpactoEconomico(ctx context.Context, q reportesService.Query) (*reportes.ReporteEconomico, error)
 	Resumen(ctx context.Context, q reportesService.Query) (*reportes.Resumen, error)
 	Lotes(ctx context.Context, q reportesService.Query) (*reportes.PaginaLotes, error)
 	Trazabilidad(ctx context.Context, q reportesService.Query) (*reportes.Trazabilidad, error)
@@ -26,6 +27,26 @@ type ReportesService interface {
 // ReportesDeps agrupa las dependencias del handler.
 type ReportesDeps struct {
 	Service ReportesService
+}
+
+func HandleImpactoEconomico(deps ReportesDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+			return
+		}
+		q := r.URL.Query()
+		data, err := deps.Service.ImpactoEconomico(r.Context(), reportesService.Query{Desde: q.Get("desde"), Hasta: q.Get("hasta"), SectorID: q.Get("sector_id"), ProductoID: q.Get("producto_id"), Turno: q.Get("turno")})
+		if err != nil {
+			if esErrorValidacion(err) {
+				response.Error(w, http.StatusBadRequest, err.Error(), nil)
+			} else {
+				response.Error(w, http.StatusInternalServerError, "Error al calcular el impacto económico", nil)
+			}
+			return
+		}
+		response.OK(w, "Impacto económico de las mermas", data)
+	}
 }
 
 // HandleResumen maneja GET /api/v1/reportes/resumen. El JWT (cualquier rol) se

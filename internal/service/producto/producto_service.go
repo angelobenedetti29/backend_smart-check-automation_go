@@ -109,6 +109,8 @@ func (s *Service) Deactivate(ctx context.Context, id string) error {
 // applyDefaults normaliza los Δmáx y aplica defaults.
 // Validate() ya garantizó la consistencia; acá sólo copiamos y completamos.
 func (s *Service) applyDefaults(p *producto.Producto, req producto.ProductoRequest) *producto.Producto {
+	p.CostoFabricacionUnitarioARS = req.CostoFabricacionUnitarioARS
+	p.CostoFabricacionInformado = req.CostoFabricacionInformado || req.CostoFabricacionUnitarioARS != nil
 	deltaT1 := defaultDeltaTemp1MaxC
 	if req.DeltaTemp1MaxC != nil {
 		deltaT1 = *req.DeltaTemp1MaxC
