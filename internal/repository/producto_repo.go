@@ -29,7 +29,7 @@ const selectProductoColumns = `
 	temp_min, temp_max,
 	velocidad_cinta_min, velocidad_cinta_max,
 	temp_setpoint, velocidad_cinta_setpoint,
-	capacidad_nominal_kg_h,
+	capacidad_nominal_kg_h, costo_fabricacion_unitario_ars,
 	delta_temp1_max_c, delta_vel_max,
 	activo, created_at, updated_at`
 
@@ -43,6 +43,7 @@ func scanProducto(row pgx.Row, p *producto.Producto) error {
 		&p.VelocidadCintaMin, &p.VelocidadCintaMax,
 		&p.TempSetpoint, &p.VelocidadCintaSetpoint,
 		&p.CapacidadNominalKgH,
+		&p.CostoFabricacionUnitarioARS,
 		&p.DeltaTemp1MaxC, &p.DeltaVelMax,
 		&p.Activo, &p.CreatedAt, &p.UpdatedAt,
 	)
@@ -118,12 +119,12 @@ func (r *ProductoPostgresRepository) Create(ctx context.Context, p *producto.Pro
 			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
 			temp_setpoint, velocidad_cinta_setpoint,
 			delta_temp1_max_c, delta_vel_max,
-			capacidad_nominal_kg_h
+			capacidad_nominal_kg_h, costo_fabricacion_unitario_ars
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-			$13, $14
+			$13, $14, $15
 		)
-		RETURNING id, temp_setpoint, velocidad_cinta_setpoint, capacidad_nominal_kg_h, created_at, updated_at, activo`
+		RETURNING id, temp_setpoint, velocidad_cinta_setpoint, capacidad_nominal_kg_h, costo_fabricacion_unitario_ars, created_at, updated_at, activo`
 
 	err := r.db.QueryRow(ctx, query,
 		p.Nombre,
@@ -139,7 +140,8 @@ func (r *ProductoPostgresRepository) Create(ctx context.Context, p *producto.Pro
 		p.VelocidadCintaSetpoint,
 		p.DeltaTemp1MaxC, p.DeltaVelMax,
 		p.CapacidadNominalKgH,
-	).Scan(&p.ID, &p.TempSetpoint, &p.VelocidadCintaSetpoint, &p.CapacidadNominalKgH, &p.CreatedAt, &p.UpdatedAt, &p.Activo)
+		p.CostoFabricacionUnitarioARS,
+	).Scan(&p.ID, &p.TempSetpoint, &p.VelocidadCintaSetpoint, &p.CapacidadNominalKgH, &p.CostoFabricacionUnitarioARS, &p.CreatedAt, &p.UpdatedAt, &p.Activo)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, producto.ErrDuplicado
@@ -168,6 +170,7 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 			delta_temp1_max_c = $13,
 			delta_vel_max = $14,
 			capacidad_nominal_kg_h = $15,
+			costo_fabricacion_unitario_ars = CASE WHEN $17 THEN $16::numeric ELSE costo_fabricacion_unitario_ars END,
 			updated_at = now()
 		WHERE id = $1
 		RETURNING ` + selectProductoColumns
@@ -187,6 +190,7 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 		p.VelocidadCintaSetpoint,
 		p.DeltaTemp1MaxC, p.DeltaVelMax,
 		p.CapacidadNominalKgH,
+		p.CostoFabricacionUnitarioARS, p.CostoFabricacionInformado || p.CostoFabricacionUnitarioARS != nil,
 	), p)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, producto.ErrDesconocido

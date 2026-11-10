@@ -64,6 +64,28 @@ func NewService(repo domain.Repository) *Service {
 	return &Service{repo: repo, now: time.Now}
 }
 
+// ImpactoEconomico comparte exactamente período y filtros con el resumen,
+// pero permite refrescar el KPI del panel sin consultar el resto del reporte.
+func (s *Service) ImpactoEconomico(ctx context.Context, q Query) (*domain.ReporteEconomico, error) {
+	periodo, err := s.parsePeriodo(q.Desde, q.Hasta)
+	if err != nil {
+		return nil, err
+	}
+	filtros, err := parseFiltros(q)
+	if err != nil {
+		return nil, err
+	}
+	impacto, err := s.repo.ImpactoEconomico(ctx, periodo, filtros)
+	if err != nil {
+		return nil, err
+	}
+	return &domain.ReporteEconomico{
+		Periodo:          domain.PeriodoResumen{Desde: periodo.Desde.Format(layoutFecha), Hasta: periodo.Hasta.Format(layoutFecha), Timezone: domain.Timezone},
+		Filtros:          domain.FiltrosResumen{SectorID: filtros.SectorID, ProductoID: filtros.ProductoID, Turno: filtros.Turno},
+		ImpactoEconomico: *impacto,
+	}, nil
+}
+
 // Resumen valida el período y los filtros, delega en el repositorio y completa
 // la metadata (período/filtros) que devuelve el endpoint.
 func (s *Service) Resumen(ctx context.Context, q Query) (*domain.Resumen, error) {

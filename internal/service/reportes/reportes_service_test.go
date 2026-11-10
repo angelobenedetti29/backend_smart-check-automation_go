@@ -52,6 +52,11 @@ func (f *fakeRepo) Trazabilidad(_ context.Context, loteID string) (*domain.Traza
 	return &domain.Trazabilidad{}, nil
 }
 
+func (f *fakeRepo) ImpactoEconomico(_ context.Context, periodo domain.Periodo, filtros domain.Filtros) (*domain.ImpactoEconomico, error) {
+	f.periodo, f.filtros, f.llamado = periodo, filtros, true
+	return &domain.ImpactoEconomico{Moneda: "ARS"}, nil
+}
+
 func (f *fakeRepo) Resumen(_ context.Context, periodo domain.Periodo, filtros domain.Filtros) (*domain.Resumen, error) {
 	f.periodo = periodo
 	f.filtros = filtros
@@ -72,6 +77,21 @@ func servicioDePrueba(repo domain.Repository) *Service {
 		return time.Date(2026, time.November, 4, 18, 0, 0, 0, time.UTC)
 	}
 	return svc
+}
+
+func TestImpactoEconomicoCompartePeriodoYValidaciones(t *testing.T) {
+	repo := &fakeRepo{}
+	svc := servicioDePrueba(repo)
+	data, err := svc.ImpactoEconomico(context.Background(), Query{SectorID: "sector", Turno: "tarde"})
+	require.NoError(t, err)
+	require.Equal(t, "2026-10-06", data.Periodo.Desde)
+	require.Equal(t, "2026-11-04", data.Periodo.Hasta)
+	require.Equal(t, "sector", *repo.filtros.SectorID)
+	require.Equal(t, "tarde", *repo.filtros.Turno)
+	for _, q := range []Query{{Desde: "no-es-fecha"}, {ProductoID: "invalido"}, {Turno: "otro"}, {Desde: "2020-01-01"}} {
+		_, err := svc.ImpactoEconomico(context.Background(), q)
+		require.Error(t, err)
+	}
 }
 
 func TestResumen_DefaultUltimos30Dias(t *testing.T) {

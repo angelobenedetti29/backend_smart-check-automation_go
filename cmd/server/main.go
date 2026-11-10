@@ -494,6 +494,7 @@ func main() {
 
 	// Reportes: resumen agregado y detalle paginado del período para cualquier
 	// rol autenticado.
+	mux.HandleFunc("/api/v1/reportes/impacto-economico", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleImpactoEconomico(reportesController.ReportesDeps{Service: reportesSvc}))))
 	mux.HandleFunc("/api/v1/reportes/resumen", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleResumen(reportesController.ReportesDeps{Service: reportesSvc}))))
 	mux.HandleFunc("/api/v1/reportes/lotes", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleLotes(reportesController.ReportesDeps{Service: reportesSvc}))))
 	mux.HandleFunc("/api/v1/reportes/trazabilidad", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleTrazabilidad(reportesController.ReportesDeps{Service: reportesSvc}))))

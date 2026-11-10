@@ -179,13 +179,14 @@ type Automatizacion struct {
 
 // Resumen es el cuerpo del endpoint GET /api/v1/reportes/resumen.
 type Resumen struct {
-	Periodo        PeriodoResumen `json:"periodo"`
-	Filtros        FiltrosResumen `json:"filtros"`
-	Produccion     Produccion     `json:"produccion"`
-	Calidad        Calidad        `json:"calidad"`
-	Proceso        Proceso        `json:"proceso"`
-	Alertas        Alertas        `json:"alertas"`
-	Automatizacion Automatizacion `json:"automatizacion"`
+	ImpactoEconomico ImpactoEconomico `json:"impacto_economico"`
+	Periodo          PeriodoResumen   `json:"periodo"`
+	Filtros          FiltrosResumen   `json:"filtros"`
+	Produccion       Produccion       `json:"produccion"`
+	Calidad          Calidad          `json:"calidad"`
+	Proceso          Proceso          `json:"proceso"`
+	Alertas          Alertas          `json:"alertas"`
+	Automatizacion   Automatizacion   `json:"automatizacion"`
 }
 
 // LoteConteos conserva NULL por bucket (el modelo no produjo ese estado) y el
@@ -211,24 +212,26 @@ type LoteKg struct {
 // los CSV y del anexo del PDF. Las métricas derivadas van en null cuando no
 // hay denominador.
 type LoteReporte struct {
-	ID                string      `json:"id"`
-	SectorID          string      `json:"sector_id"`
-	SectorNombre      string      `json:"sector_nombre"`
-	ProductoID        string      `json:"producto_id"`
-	ProductoNombre    string      `json:"producto_nombre"`
-	Turno             *string     `json:"turno"`
-	Estado            string      `json:"estado"`
-	AbiertoEn         time.Time   `json:"abierto_en"`
-	CerradoEn         *time.Time  `json:"cerrado_en"`
-	MotivoCierre      *string     `json:"motivo_cierre"`
-	Modo              string      `json:"modo"`
-	Conteos           LoteConteos `json:"conteos"`
-	Kg                LoteKg      `json:"kg"`
-	ConfianzaPromedio *float64    `json:"confianza_promedio"`
-	DuracionMin       *float64    `json:"duracion_min"`
-	FPYPct            *float64    `json:"fpy_pct"`
-	CrudoPct          *float64    `json:"crudo_pct"`
-	QuemadoPct        *float64    `json:"quemado_pct"`
+	CostoFabricacionUnitarioARS *float64    `json:"costo_fabricacion_unitario_ars"`
+	PerdidaMermaARS             *float64    `json:"perdida_merma_ars"`
+	ID                          string      `json:"id"`
+	SectorID                    string      `json:"sector_id"`
+	SectorNombre                string      `json:"sector_nombre"`
+	ProductoID                  string      `json:"producto_id"`
+	ProductoNombre              string      `json:"producto_nombre"`
+	Turno                       *string     `json:"turno"`
+	Estado                      string      `json:"estado"`
+	AbiertoEn                   time.Time   `json:"abierto_en"`
+	CerradoEn                   *time.Time  `json:"cerrado_en"`
+	MotivoCierre                *string     `json:"motivo_cierre"`
+	Modo                        string      `json:"modo"`
+	Conteos                     LoteConteos `json:"conteos"`
+	Kg                          LoteKg      `json:"kg"`
+	ConfianzaPromedio           *float64    `json:"confianza_promedio"`
+	DuracionMin                 *float64    `json:"duracion_min"`
+	FPYPct                      *float64    `json:"fpy_pct"`
+	CrudoPct                    *float64    `json:"crudo_pct"`
+	QuemadoPct                  *float64    `json:"quemado_pct"`
 }
 
 // LotesParams pagina el detalle de lotes del período. AntesDe/AntesDeID forman
@@ -392,6 +395,7 @@ type PaginaAlertas struct {
 // detalle paginado de lotes, de la trazabilidad de un lote y del export de
 // alertas.
 type Repository interface {
+	ImpactoEconomico(ctx context.Context, periodo Periodo, filtros Filtros) (*ImpactoEconomico, error)
 	Resumen(ctx context.Context, periodo Periodo, filtros Filtros) (*Resumen, error)
 	Lotes(ctx context.Context, params LotesParams) ([]LoteReporte, int, error)
 	Trazabilidad(ctx context.Context, loteID string) (*Trazabilidad, error)

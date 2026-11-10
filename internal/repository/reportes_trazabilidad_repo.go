@@ -86,6 +86,7 @@ func loteTrazabilidad(ctx context.Context, tx pgx.Tx, loteID string) (reportes.L
 		&l.Conteos.OK, &l.Conteos.Crudo, &l.Conteos.Quemado, &l.Conteos.Total,
 		&l.Kg.OK, &l.Kg.Crudo, &l.Kg.Quemado,
 		&l.ConfianzaPromedio,
+		&l.CostoFabricacionUnitarioARS, &l.PerdidaMermaARS,
 		&l.Temp1Objetivo, &l.VelObjetivo, &l.ToleranciaTempC,
 		&l.UmbralAceptacionCrudo, &l.UmbralAceptacionQuemado,
 		&l.DeltaTemp1MaxC, &l.DeltaVelMax,

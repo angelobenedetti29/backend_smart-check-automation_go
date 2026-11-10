@@ -171,6 +171,9 @@ mayor impacto:
 
 ## Documentación
 
+- [`docs/impacto-economico-mermas.md`](docs/impacto-economico-mermas.md) — costos
+  unitarios en ARS, KPI de mermas, datos incompletos y criterio de valorización.
+
 - [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md) — instalación, variables de
   entorno, ejecución, tests y despliegue.
 - [`docs/api-endpoints.md`](docs/api-endpoints.md) — contrato detallado de los
