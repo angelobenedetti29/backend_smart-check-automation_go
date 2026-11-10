@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
@@ -16,9 +17,9 @@ const maxRequestBodyBytes = 1 << 20 // 1 MB
 // ConsignaHandler maneja los endpoints HTTP del envío manual de consigna
 // térmica al horno (SCA-320) y la consulta de su historial de auditoría.
 //
-// NOTA: este endpoint todavía no requiere autenticación de usuario porque el
-// login con Google OAuth 2.0 está pendiente (ver CLAUDE.md), igual que
-// parametros_producto. Cuando se implemente, debería restringirse a Operario/Supervisor.
+// NOTA: los endpoints exigen JWT (cookie session_token) y rol Operario,
+// Supervisor o Administrador; el control de rol se aplica en el wiring de rutas
+// (ver cmd/server/main.go).
 type ConsignaHandler struct {
 	service consigna.Service
 }
@@ -30,8 +31,8 @@ func NewConsignaHandler(svc consigna.Service) *ConsignaHandler {
 
 // DispatchManual maneja POST /api/v1/horno/consigna — el operario carga
 // manualmente una temperatura y velocidad de cinta objetivo desde el panel
-// y el sistema las valida contra el rango seguro del producto antes de
-// despacharlas al controlador físico del horno.
+// y el sistema las valida contra el lote abierto MANUAL y el rango seguro del
+// producto antes de encolarlas para la Pi ENTRADA.
 func (h *ConsignaHandler) DispatchManual(w http.ResponseWriter, r *http.Request) {
 	// 0. Method check
 	if r.Method != http.MethodPost {
@@ -40,8 +41,7 @@ func (h *ConsignaHandler) DispatchManual(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 1. Validate Content-Type
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 
@@ -62,20 +62,20 @@ func (h *ConsignaHandler) DispatchManual(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 5. Despachar la consigna (valida rango seguro + envía al controlador físico)
+	// 5. Encolar la consigna para la Pi (valida lote/modo + rango seguro)
 	rec, err := h.service.DispatchManual(r.Context(), req)
 	if err != nil {
 		h.handleDispatchError(w, err, rec)
 		return
 	}
 
-	// 6. Respond 200 OK con el resultado del despacho
-	response.OK(w, "Consigna manual despachada al horno", rec)
+	// 6. Respond 200 OK con el resultado del encolado
+	response.OK(w, "Consigna encolada para la Pi", rec)
 }
 
 // GetHistorial maneja GET /api/v1/horno/consigna/historial?loteId=... — devuelve
-// el historial de auditoría de consignas (automáticas y manuales) de un lote,
-// para que el panel de control pueda mostrarlo.
+// el historial de auditoría de consignas de un lote, para que el panel de
+// control pueda mostrarlo.
 func (h *ConsignaHandler) GetHistorial(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
@@ -99,21 +99,31 @@ func (h *ConsignaHandler) GetHistorial(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDispatchError traduce los errores de dominio/servicio a la respuesta
-// HTTP apropiada para el despacho manual de consigna.
+// HTTP apropiada para el encolado manual de consigna.
 func (h *ConsignaHandler) handleDispatchError(w http.ResponseWriter, err error, rec *consigna.Consigna) {
 	switch {
-	case errors.Is(err, consigna.ErrHornoNoExiste):
-		response.Error(w, http.StatusNotFound, "El horno indicado no existe", nil)
+	case errors.Is(err, consigna.ErrLoteRequerido):
+		response.Error(w, http.StatusUnprocessableEntity, "El lote es requerido para enviar una consigna manual", nil)
+	case errors.Is(err, consigna.ErrLoteNoExiste):
+		response.Error(w, http.StatusNotFound, "El lote no existe", nil)
+	case errors.Is(err, consigna.ErrLoteNoAbierto):
+		response.Error(w, http.StatusConflict, "El lote no está abierto", nil)
+	case errors.Is(err, consigna.ErrLoteNoManual):
+		response.Error(w, http.StatusConflict, "El lote no está en modo MANUAL", nil)
+	case errors.Is(err, consigna.ErrSectorMismatch):
+		response.Error(w, http.StatusUnprocessableEntity, "El sector no coincide con el del lote", nil)
+	case errors.Is(err, consigna.ErrSectorRequerido):
+		response.Error(w, http.StatusUnprocessableEntity, "El lote no tiene sector asignado", nil)
 	case errors.Is(err, consigna.ErrParametrosNoExiste):
 		response.Error(w, http.StatusUnprocessableEntity, "El producto no tiene parámetros de control cargados", nil)
 	case errors.Is(err, consigna.ErrFueraDeRango):
 		response.Error(w, http.StatusUnprocessableEntity, "Los valores solicitados están fuera del rango seguro del producto", nil)
-	case errors.Is(err, consigna.ErrDispatchFallido):
-		// El intento quedó auditado igual (ver ConsignaService.dispatch); se informa el rechazo del hardware.
-		log.Printf("[AUDIT] Consigna manual rechazada por el controlador físico: horno=%v", rec)
-		response.JSON(w, http.StatusBadGateway, false, "El controlador físico del horno rechazó la consigna", rec, nil)
+	case errors.Is(err, consigna.ErrEncoladoFallido):
+		// El intento quedó auditado igual (ver ConsignaService.DispatchManual).
+		log.Printf("[AUDIT] Consigna manual no encolada para la Pi: %v", rec)
+		response.JSON(w, http.StatusBadGateway, false, "No se pudo encolar la consigna para la Pi", rec, nil)
 	default:
-		log.Printf("[ERROR] Error al despachar consigna manual: %v", err)
-		response.Error(w, http.StatusInternalServerError, "Error al despachar la consigna al horno", nil)
+		log.Printf("[ERROR] Error al encolar consigna manual: %v", err)
+		response.Error(w, http.StatusInternalServerError, "Error al encolar la consigna para la Pi", nil)
 	}
 }

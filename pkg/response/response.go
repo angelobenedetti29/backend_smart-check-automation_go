@@ -2,6 +2,7 @@ package response
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
@@ -21,6 +22,8 @@ type PaginatedResponse struct {
 	Total    int         `json:"total"`
 	Page     int         `json:"page"`
 	PageSize int         `json:"pageSize"`
+	// SiguienteCursor sólo viaja en endpoints con paginación por cursor.
+	SiguienteCursor string `json:"siguiente_cursor,omitempty"`
 }
 
 // JSON sends a structured JSON response to the client.
@@ -35,7 +38,9 @@ func JSON(w http.ResponseWriter, status int, success bool, message string, data 
 		Errors:  errs,
 	}
 
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("response: error al serializar respuesta: %v", err)
+	}
 }
 
 // OK sends a 200 OK standard success response.
@@ -45,19 +50,28 @@ func OK(w http.ResponseWriter, message string, data interface{}) {
 
 // Paginated sends a 200 OK response with pagination metadata at root level.
 func Paginated(w http.ResponseWriter, message string, data interface{}, total, page, pageSize int) {
+	PaginatedWithCursor(w, message, data, total, page, pageSize, "")
+}
+
+// PaginatedWithCursor agrega el cursor de la página siguiente (vacío = última
+// página, el campo se omite).
+func PaginatedWithCursor(w http.ResponseWriter, message string, data interface{}, total, page, pageSize int, siguienteCursor string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
 	resp := PaginatedResponse{
-		Success:  true,
-		Message:  message,
-		Data:     data,
-		Total:    total,
-		Page:     page,
-		PageSize: pageSize,
+		Success:         true,
+		Message:         message,
+		Data:            data,
+		Total:           total,
+		Page:            page,
+		PageSize:        pageSize,
+		SiguienteCursor: siguienteCursor,
 	}
 
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("response: error al serializar respuesta paginada: %v", err)
+	}
 }
 
 // Error sends an error response with custom status code and messages.

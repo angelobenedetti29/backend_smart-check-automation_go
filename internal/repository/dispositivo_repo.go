@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
@@ -22,73 +24,173 @@ func NewPostgresDispositivoRepository(db *pgxpool.Pool) *PostgresDispositivoRepo
 	return &PostgresDispositivoRepository{db: db}
 }
 
+// normalizeSectorID trata un sectorId vacío como "sin sector" (NULL).
+func normalizeSectorID(sectorID *string) *string {
+	if sectorID == nil {
+		return nil
+	}
+	if strings.TrimSpace(*sectorID) == "" {
+		return nil
+	}
+	return sectorID
+}
+
+// translateDispositivoWriteError traduce las violaciones de constraints de
+// PostgreSQL al error de dominio correspondiente: una FK rota significa que el
+// sector no existe (400) y una violación de uq_dispositivos_sector_tipo que el
+// sector ya tiene un dispositivo de ese tipo (409).
+func translateDispositivoWriteError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case pgErrCodeForeignKeyViolation:
+			return dispositivo.ErrSectorNotFound
+		case pgErrCodeUniqueViolation:
+			if pgErr.ConstraintName == "uq_dispositivos_sector_tipo" {
+				return dispositivo.ErrSectorTipoDuplicado
+			}
+		}
+	}
+	return fmt.Errorf("failed to persist dispositivo: %w", err)
+}
+
 // Create inserta un dispositivo nuevo en el catálogo. El UUID lo genera
 // PostgreSQL vía gen_random_uuid(); el método mapea id y created_at de vuelta
-// al struct. Si Ubicacion/WhepURL están vacías se inserta NULL para respetar la
-// columna nullable.
+// al struct. Si SectorID/WhepURL/Tipo están vacías se inserta NULL para
+// respetar las columnas nullable.
 func (r *PostgresDispositivoRepository) Create(ctx context.Context, d *dispositivo.Dispositivo) error {
 	const query = `
-		INSERT INTO dispositivos (nombre, ubicacion, whep_url)
-		VALUES ($1, $2, $3)
+		INSERT INTO dispositivos (nombre, sector_id, whep_url, tipo)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at`
 
-	var ubicacion *string
-	if d.Ubicacion != "" {
-		ubicacion = &d.Ubicacion
-	}
 	var whepURL *string
 	if d.WhepURL != "" {
 		whepURL = &d.WhepURL
 	}
+	var tipo *string
+	if d.Tipo != nil && *d.Tipo != "" {
+		tipo = d.Tipo
+	}
 
-	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion, whepURL).Scan(&d.ID, &d.CreatedAt)
+	err := r.db.QueryRow(ctx, query, d.Nombre, normalizeSectorID(d.SectorID), whepURL, tipo).Scan(&d.ID, &d.CreatedAt)
 	if err != nil {
-		return fmt.Errorf("failed to insert dispositivo: %w", err)
+		return translateDispositivoWriteError(err)
 	}
 	return nil
 }
 
-// Update modifica nombre, ubicación y whep_url de un dispositivo existente. El
-// método mapea id y created_at de vuelta al struct vía RETURNING. Si
-// Ubicacion/WhepURL están vacías se guarda NULL para respetar la columna
-// nullable. Devuelve dispositivo.ErrDispositivoNotFound si el dispositivo no
-// existe.
+// Update modifica nombre, sector y whep_url de un dispositivo existente. El
+// tipo es inmutable: no forma parte del SET. El método mapea id y created_at de
+// vuelta al struct vía RETURNING. Si SectorID/WhepURL están vacías se guarda
+// NULL para respetar la columna nullable. Devuelve
+// dispositivo.ErrDispositivoNotFound si el dispositivo no existe,
+// dispositivo.ErrSectorNotFound si el sector no existe y
+// dispositivo.ErrSectorTipoDuplicado si el sector ya tiene ese tipo.
 func (r *PostgresDispositivoRepository) Update(ctx context.Context, d *dispositivo.Dispositivo) error {
 	const query = `
 		UPDATE dispositivos
-		SET nombre = $1, ubicacion = $2, whep_url = $3
+		SET nombre = $1, sector_id = $2, whep_url = $3
 		WHERE id = $4
 		RETURNING id, created_at`
 
-	var ubicacion *string
-	if d.Ubicacion != "" {
-		ubicacion = &d.Ubicacion
-	}
 	var whepURL *string
 	if d.WhepURL != "" {
 		whepURL = &d.WhepURL
 	}
 
-	err := r.db.QueryRow(ctx, query, d.Nombre, ubicacion, whepURL, d.ID).Scan(&d.ID, &d.CreatedAt)
+	err := r.db.QueryRow(ctx, query, d.Nombre, normalizeSectorID(d.SectorID), whepURL, d.ID).Scan(&d.ID, &d.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return dispositivo.ErrDispositivoNotFound
 		}
-		return fmt.Errorf("failed to update dispositivo: %w", err)
+		return translateDispositivoWriteError(err)
 	}
 	return nil
 }
 
-// Delete elimina un dispositivo del catálogo. Las métricas asociadas se borran
-// por ON DELETE CASCADE de metricas_dispositivo. Devuelve
-// dispositivo.ErrDispositivoNotFound si el dispositivo no existe.
-func (r *PostgresDispositivoRepository) Delete(ctx context.Context, id string) error {
-	cmd, err := r.db.Exec(ctx, `DELETE FROM dispositivos WHERE id = $1`, id)
+// UpdateRenameURL actualiza solo la URL de renombre anunciada por el
+// dispositivo; no toca nombre, sector ni whep_url. Devuelve
+// dispositivo.ErrDispositivoNotFound si el dispositivo no existe, está revocado
+// o el id no es un UUID válido (22P02).
+func (r *PostgresDispositivoRepository) UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error {
+	const query = `
+		UPDATE dispositivos SET rename_url = $1 WHERE id = $2 AND auth_status <> 'revoked'`
+
+	tag, err := r.db.Exec(ctx, query, renameURL, deviceID)
 	if err != nil {
-		return fmt.Errorf("failed to delete dispositivo: %w", err)
+		// Un id que no es UUID válido produce 22P02; se traduce a "no encontrado".
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeInvalidTextRepresentation {
+			return dispositivo.ErrDispositivoNotFound
+		}
+		return fmt.Errorf("failed to update rename_url: %w", err)
 	}
-	if cmd.RowsAffected() == 0 {
+	if tag.RowsAffected() == 0 {
 		return dispositivo.ErrDispositivoNotFound
+	}
+	return nil
+}
+
+// Revoke da de baja lógica un dispositivo: revoca su credencial (secret_hash a
+// NULL + auth_status='revoked'), lo desasigna del sector y deja traza de
+// auditoría con el actor resuelto por email. No borra la fila para no violar las
+// FKs ON DELETE RESTRICT (auditoría, lotes, historial de consignas/eventos) ni
+// perder el historial de telemetría. Es idempotente: repetir sobre un
+// dispositivo ya revocado devuelve nil y no duplica la traza de auditoría.
+// Devuelve dispositivo.ErrDispositivoNotFound si el dispositivo no existe (o el
+// id no es un UUID válido).
+func (r *PostgresDispositivoRepository) Revoke(ctx context.Context, actorEmail, id string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("revoke dispositivo: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var oldStatus string
+	err = tx.QueryRow(ctx, `SELECT auth_status FROM dispositivos WHERE id=$1 FOR UPDATE`, id).Scan(&oldStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return dispositivo.ErrDispositivoNotFound
+	}
+	if err != nil {
+		// Un id que no es UUID válido produce 22P02; se traduce a "no encontrado".
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeInvalidTextRepresentation {
+			return dispositivo.ErrDispositivoNotFound
+		}
+		return fmt.Errorf("revoke dispositivo: load: %w", err)
+	}
+
+	// El actor debe existir y estar activo; sin traza fiable no se revoca.
+	var actorID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM usuarios WHERE email=$1 AND activo=true`, actorEmail).Scan(&actorID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("revoke dispositivo: actor not found")
+		}
+		return fmt.Errorf("revoke dispositivo: actor: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE dispositivos
+		SET auth_status = 'revoked',
+			secret_hash = NULL,
+			sector_id = NULL,
+			auth_updated_at = clock_timestamp()
+		WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("revoke dispositivo: update: %w", err)
+	}
+
+	// Idempotencia: si ya estaba revocado, se evita duplicar la traza.
+	if oldStatus != string(dispositivo.AuthRevoked) {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO device_lifecycle_audit (actor_id, action, dispositivo_id, old_status, new_status)
+			VALUES ($1, 'revoke', $2, $3, 'revoked')`, actorID, id, oldStatus); err != nil {
+			return fmt.Errorf("revoke dispositivo: audit: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("revoke dispositivo: commit: %w", err)
 	}
 	return nil
 }
@@ -126,12 +228,14 @@ func (r *PostgresDispositivoRepository) InsertMetrica(ctx context.Context, m *di
 func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx context.Context) ([]dispositivo.DispositivoConUltimaMetrica, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT ON (d.id)
-			d.id, d.nombre, d.ubicacion, d.whep_url, d.created_at,
+			d.id, d.nombre, d.sector_id, d.whep_url, d.created_at, d.tipo,
+			d.rename_url, d.rename_token,
 			m.id, m.cpu_pct, m.mem_ram_disponible_mb, m.mem_ram_total_mb,
 			m.almacenamiento_disponible_mb, m.almacenamiento_total_mb,
 			m.temp_chip, m.ai_processor_pct, m.received_at
 		FROM dispositivos d
 		LEFT JOIN metricas_dispositivo m ON m.dispositivo_id = d.id
+		WHERE d.auth_status <> 'revoked'
 		ORDER BY d.id, m.received_at DESC
 	`)
 	if err != nil {
@@ -144,6 +248,9 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 		var (
 			d                        dispositivo.Dispositivo
 			whepURL                  *string
+			tipo                     *string
+			renameURL                *string
+			renameToken              *string
 			m                        dispositivo.MetricaDispositivo
 			mID                      *string
 			cpu                      *float64
@@ -155,12 +262,15 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 			aiProc                   *float64
 			received                 *time.Time
 		)
-		if err := rows.Scan(&d.ID, &d.Nombre, &d.Ubicacion, &whepURL, &d.CreatedAt, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
+		if err := rows.Scan(&d.ID, &d.Nombre, &d.SectorID, &whepURL, &d.CreatedAt, &tipo, &renameURL, &renameToken, &mID, &cpu, &mem, &memTotal, &almacenamientoDisponible, &almacenamientoTotal, &tempChip, &aiProc, &received); err != nil {
 			return nil, fmt.Errorf("failed to scan dispositivo con ultima metrica: %w", err)
 		}
 		if whepURL != nil {
 			d.WhepURL = *whepURL
 		}
+		d.Tipo = tipo
+		d.RenameURL = renameURL
+		d.RenameToken = renameToken
 
 		item := dispositivo.DispositivoConUltimaMetrica{Dispositivo: d}
 		if mID != nil {
@@ -190,13 +300,20 @@ func (r *PostgresDispositivoRepository) GetDispositivosConUltimaMetrica(ctx cont
 func (r *PostgresDispositivoRepository) GetDispositivoByID(ctx context.Context, id string) (*dispositivo.Dispositivo, error) {
 	var d dispositivo.Dispositivo
 	var whepURL *string
+	var tipo *string
 	err := r.db.QueryRow(ctx, `
-		SELECT id, nombre, ubicacion, whep_url, created_at
+		SELECT id, nombre, sector_id, whep_url, created_at, tipo, rename_url, rename_token
 		FROM dispositivos
-		WHERE id = $1
-	`, id).Scan(&d.ID, &d.Nombre, &d.Ubicacion, &whepURL, &d.CreatedAt)
+		WHERE id = $1 AND auth_status <> 'revoked'
+	`, id).Scan(&d.ID, &d.Nombre, &d.SectorID, &whepURL, &d.CreatedAt, &tipo, &d.RenameURL, &d.RenameToken)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, dispositivo.ErrDispositivoNotFound
+		}
+		// Un id que no es UUID válido produce 22P02; se traduce a "no encontrado"
+		// en vez de escalar como 500.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeInvalidTextRepresentation {
 			return nil, dispositivo.ErrDispositivoNotFound
 		}
 		return nil, fmt.Errorf("failed to query dispositivo by id: %w", err)
@@ -204,6 +321,7 @@ func (r *PostgresDispositivoRepository) GetDispositivoByID(ctx context.Context, 
 	if whepURL != nil {
 		d.WhepURL = *whepURL
 	}
+	d.Tipo = tipo
 
 	return &d, nil
 }
@@ -266,4 +384,49 @@ func (r *PostgresDispositivoRepository) GetMetricasByDispositivo(ctx context.Con
 		Page:     page,
 		PageSize: pageSize,
 	}, nil
+}
+
+// ListDeviceReads devuelve el catálogo con el estado de registro de cada
+// dispositivo (auth_status, si tiene secret y cuándo se actualizó). El estado de
+// salud se inicializa como offline: el caché en memoria lo hidrata luego.
+func (r *PostgresDispositivoRepository) ListDeviceReads(ctx context.Context) ([]dispositivo.DeviceRead, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT d.id, d.nombre, COALESCE(d.whep_url, ''),
+			d.tipo, d.sector_id, d.auth_status, (d.secret_hash IS NOT NULL), d.auth_updated_at,
+			d.rename_url, d.rename_token
+		FROM dispositivos d
+		WHERE d.auth_status <> 'revoked'
+		ORDER BY d.nombre
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query device reads: %w", err)
+	}
+	defer rows.Close()
+
+	out := []dispositivo.DeviceRead{}
+	for rows.Next() {
+		var (
+			x           dispositivo.DeviceRead
+			tipo        *string
+			status      string
+			updated     *time.Time
+			renameURL   *string
+			renameToken *string
+		)
+		if err := rows.Scan(&x.DispositivoID, &x.Nombre, &x.WhepURL, &tipo, &x.SectorID, &status, &x.HasSecret, &updated, &renameURL, &renameToken); err != nil {
+			return nil, fmt.Errorf("failed to scan device read: %w", err)
+		}
+		x.Tipo = tipo
+		x.EstadoDispositivo.Tipo = tipo
+		x.RenameURL = renameURL
+		x.RenameToken = renameToken
+		x.AuthStatus = dispositivo.AuthStatus(status)
+		x.AuthUpdatedAt = updated
+		x.Estado = dispositivo.EstadoOffline
+		out = append(out, x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
+	}
+	return out, nil
 }

@@ -74,10 +74,10 @@ func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*user.
 
 // UpdateUserRequest payload para actualizar datos de un usuario.
 type UpdateUserRequest struct {
-	ID        string
-	Nombre    string
-	Rol       string
-	Activo    bool
+	ID         string
+	Nombre     string
+	Rol        string
+	Activo     bool
 	AdminEmail string // Email del administrador que ejecuta la acción
 }
 

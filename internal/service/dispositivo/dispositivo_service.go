@@ -1,12 +1,18 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/alerta"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
@@ -20,27 +26,71 @@ const (
 // insertMetricaTimeout limita el tiempo de una escritura de historial fire-and-forget.
 const insertMetricaTimeout = 5 * time.Second
 
+// defaultRenamePushTimeout es el tiempo máximo de un PUT a la URL de renombre
+// anunciada por una Raspberry. Una Pi local responde en milisegundos; detrás de
+// un túnel (cloudflared, ngrok) puede tardar algunos segundos. Si vence, el
+// rename desde el panel se cancela (la DB no se toca).
+const defaultRenamePushTimeout = 10 * time.Second
+
+// httpClientRenamePush es el cliente HTTP dedicado al push de renombre. Es
+// paquete-local y de larga vida: reusa conexiones TLS y deja el timeout a
+// cargo del contexto/request, no del http.Client (un cliente con Timeout
+// impuesto cancela también los reintentos de keep-alive).
+var httpClientRenamePush = &http.Client{}
+
 // DispositivoService implementa dispositivo.Service orquestando el repositorio,
 // el caché de estado en memoria y el broker SSE.
 type DispositivoService struct {
-	repo   dispositivo.Repository
-	store  dispositivo.StateStore
-	broker *sse.Broker
+	repo          dispositivo.Repository
+	store         dispositivo.StateStore
+	broker        *sse.Broker
+	renameTimeout time.Duration
+	alertas       alerta.Repository
 }
 
-// NewDispositivoService instancia el servicio inyectando repositorio, state store y broker SSE.
-func NewDispositivoService(repo dispositivo.Repository, store dispositivo.StateStore, broker *sse.Broker) *DispositivoService {
-	return &DispositivoService{repo: repo, store: store, broker: broker}
+// NewDispositivoService instancia el servicio inyectando repositorio, state
+// store, broker SSE y timeout del push de renombre. Si renameTimeout <= 0 se
+// usa defaultRenamePushTimeout.
+func NewDispositivoService(repo dispositivo.Repository, store dispositivo.StateStore, broker *sse.Broker, renameTimeout time.Duration) *DispositivoService {
+	if renameTimeout <= 0 {
+		renameTimeout = defaultRenamePushTimeout
+	}
+	return &DispositivoService{repo: repo, store: store, broker: broker, renameTimeout: renameTimeout}
+}
+
+// SetAlertas inyecta el repositorio de alertas. Nil-safe: sin repo, el reaper
+// no genera alertas de dispositivo offline.
+func (s *DispositivoService) SetAlertas(a alerta.Repository) {
+	s.alertas = a
+}
+
+// normalizeSectorID trata un sectorId vacío o en blanco como "sin sector" (nil).
+func normalizeSectorID(sectorID *string) *string {
+	if sectorID == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*sectorID)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }
 
 // Create da de alta un dispositivo nuevo: persiste en el catálogo (PostgreSQL),
 // lo registra en el caché de estado como offline para que aparezca de inmediato
 // en GET /api/v1/dispositivos, y emite el evento SSE dispositivo.state.
 func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
+	tipo, ok := dispositivo.ParseTipoDispositivo(req.Tipo)
+	if !ok {
+		return nil, &dispositivo.ValidationError{Fields: []string{"type: debe ser ENTRADA_HORNO o SALIDA_HORNO"}}
+	}
+	tipoStr := string(tipo)
+
 	d := dispositivo.Dispositivo{
-		Nombre:    strings.TrimSpace(req.Nombre),
-		Ubicacion: strings.TrimSpace(req.Ubicacion),
-		WhepURL:   req.WhepURL,
+		Nombre:   strings.TrimSpace(req.Nombre),
+		SectorID: normalizeSectorID(req.SectorID),
+		WhepURL:  req.WhepURL,
+		Tipo:     &tipoStr,
 	}
 
 	if err := s.repo.Create(ctx, &d); err != nil {
@@ -54,8 +104,9 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 		estado = &dispositivo.EstadoDispositivo{
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
-			Ubicacion:     d.Ubicacion,
+			SectorID:      d.SectorID,
 			WhepURL:       d.WhepURL,
+			Tipo:          d.Tipo,
 			Estado:        dispositivo.EstadoOffline,
 		}
 	}
@@ -64,17 +115,29 @@ func (s *DispositivoService) Create(ctx context.Context, req dispositivo.CreateD
 	return estado, nil
 }
 
-// Update modifica nombre y ubicación de un dispositivo existente: persiste en el
-// catálogo (PostgreSQL), actualiza el caché de estado preservando salud/métrica/
-// last_seen, y emite el evento SSE dispositivo.state para que el frontend en vivo
-// vea el nombre/ubicación nuevos. Propaga ErrDispositivoNotFound si no existe.
+// Update modifica el sector y el whepUrl de un dispositivo existente, preservando
+// su nombre y tipo (el nombre solo puede cambiarlo el rename autenticado del nodo).
+// Persiste en el catálogo (PostgreSQL), actualiza el caché de estado preservando
+// salud/métrica/last_seen, y emite el evento SSE dispositivo.state para que el
+// frontend en vivo vea el sector/whepUrl nuevos. Propaga ErrDispositivoNotFound si
+// no existe, ErrSectorNotFound si el sector no existe y ErrSectorTipoDuplicado si
+// el sector ya tiene un dispositivo de ese tipo.
 func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateDispositivoRequest) (*dispositivo.EstadoDispositivo, error) {
 	d := dispositivo.Dispositivo{
-		ID:        strings.TrimSpace(req.DispositivoID),
-		Nombre:    strings.TrimSpace(req.Nombre),
-		Ubicacion: strings.TrimSpace(req.Ubicacion),
-		WhepURL:   req.WhepURL,
+		ID:       strings.TrimSpace(req.DispositivoID),
+		SectorID: normalizeSectorID(req.SectorID),
+		WhepURL:  req.WhepURL,
 	}
+
+	// El tipo es inmutable: se preserva el existente y nunca se pisa con el body.
+	existing, err := s.repo.GetDispositivoByID(ctx, d.ID)
+	if err != nil {
+		return nil, err
+	}
+	d.Tipo = existing.Tipo
+	// El nombre es inmutable desde el panel: se preserva el existente. Solo el
+	// rename autenticado del nodo (Rename) puede cambiarlo.
+	d.Nombre = existing.Nombre
 
 	if err := s.repo.Update(ctx, &d); err != nil {
 		return nil, err
@@ -87,8 +150,9 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 		estado = &dispositivo.EstadoDispositivo{
 			DispositivoID: d.ID,
 			Nombre:        d.Nombre,
-			Ubicacion:     d.Ubicacion,
+			SectorID:      d.SectorID,
 			WhepURL:       d.WhepURL,
+			Tipo:          d.Tipo,
 			Estado:        dispositivo.EstadoOffline,
 		}
 	}
@@ -97,10 +161,122 @@ func (s *DispositivoService) Update(ctx context.Context, req dispositivo.UpdateD
 	return estado, nil
 }
 
-// Delete elimina un dispositivo del catálogo y de la caché de estado. Sin evento
-// SSE. Propaga ErrDispositivoNotFound si el dispositivo no existe.
-func (s *DispositivoService) Delete(ctx context.Context, id string) error {
-	if err := s.repo.Delete(ctx, id); err != nil {
+// Rename cambia solo el nombre de un dispositivo existente: carga el registro
+// para preservar sector y whepUrl, persiste, actualiza el caché de estado y
+// emite el evento SSE dispositivo.state. Propaga ErrDispositivoNotFound.
+func (s *DispositivoService) Rename(ctx context.Context, deviceID, nombre string) (*dispositivo.EstadoDispositivo, error) {
+	d, err := s.repo.GetDispositivoByID(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	d.Nombre = strings.TrimSpace(nombre)
+	if err := s.repo.Update(ctx, d); err != nil {
+		return nil, err
+	}
+	s.store.UpdateDispositivo(*d)
+	estado, ok := s.store.Get(d.ID)
+	if !ok {
+		estado = &dispositivo.EstadoDispositivo{
+			DispositivoID: d.ID,
+			Nombre:        d.Nombre,
+			SectorID:      d.SectorID,
+			WhepURL:       d.WhepURL,
+			Tipo:          d.Tipo,
+			Estado:        dispositivo.EstadoOffline,
+		}
+	}
+	s.broadcastState(*estado)
+	return estado, nil
+}
+
+// UpdateRenameURL persiste la URL de renombre anunciada por la propia Raspberry.
+// No emite SSE ni toca el caché: es una reconfiguración, no un cambio de salud.
+// Propaga ErrDispositivoNotFound.
+func (s *DispositivoService) UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error {
+	return s.repo.UpdateRenameURL(ctx, deviceID, renameURL)
+}
+
+// RenameFromPanel cambia el nombre de un dispositivo desde el panel del
+// operador. Aplica push-first para mantener consistencia estricta entre el
+// backend y la Raspberry:
+//
+//  1. Carga el dispositivo. Si no anunció rename_url/rename_token (firmware
+//     legacy), devuelve ErrRenameNotPushable sin tocar la DB — aceptar el
+//     cambio haría que la Pi lo sobrescriba en su próximo polling.
+//  2. PUT a {rename_url}/api/v1/dispositivos/{id}/nombre con Bearer
+//     <rename_token>. Si la red falla, el nodo responde no-2xx o vence el
+//     timeout, devuelve el error envuelto y NO persiste en la DB: la Pi
+//     conserva su nombre viejo y el operador ve el fallo para reintentar.
+//  3. Sólo si el push devuelve 2xx, delega en Rename (persiste en DB, refresca
+//     caché, emite SSE). La Pi ya tiene el nuevo nombre aplicado por el push,
+//     por lo que no lo va a re-empujar en su próximo polling.
+//
+// Caso degradado: si el push tiene éxito pero la DB falla, el operador verá
+// el error y podrá reintentar — el push es idempotente en la Pi (su handler
+// siempre aplica el nombre recibido), así que el reintento deja backend y Pi
+// consistentes sin intervención adicional.
+func (s *DispositivoService) RenameFromPanel(ctx context.Context, deviceID, nombre string) (*dispositivo.EstadoDispositivo, error) {
+	d, err := s.repo.GetDispositivoByID(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+
+	if d.RenameURL == nil || strings.TrimSpace(*d.RenameURL) == "" ||
+		d.RenameToken == nil || strings.TrimSpace(*d.RenameToken) == "" {
+		return nil, dispositivo.ErrRenameNotPushable
+	}
+
+	nombre = strings.TrimSpace(nombre)
+	if err := s.pushRename(ctx, *d.RenameURL, *d.RenameToken, d.ID, nombre); err != nil {
+		return nil, err
+	}
+
+	return s.Rename(ctx, deviceID, nombre)
+}
+
+// pushRename realiza el PUT del renombre a la URL local anunciada por la
+// Raspberry. Devuelve error si la red falla, si el nodo responde no-2xx o si
+// vence el timeout. El cuerpo de respuesta se descarta tras leerlo (necesario
+// para reusar la conexión).
+func (s *DispositivoService) pushRename(ctx context.Context, renameURL, renameToken, deviceID, nombre string) error {
+	pushCtx, cancel := context.WithTimeout(ctx, s.renameTimeout)
+	defer cancel()
+
+	endpoint := strings.TrimRight(renameURL, "/") + dispositivo.RenamePushPath(deviceID)
+	payload, err := json.Marshal(map[string]string{"nombre": nombre})
+	if err != nil {
+		return fmt.Errorf("no se pudo serializar el renombre: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(pushCtx, http.MethodPut, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("no se pudo armar el request de renombre a %s: %w", endpoint, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+renameToken)
+
+	resp, err := httpClientRenamePush.Do(req)
+	if err != nil {
+		return fmt.Errorf("no se pudo contactar al dispositivo para el renombre: %w", err)
+	}
+	defer resp.Body.Close()
+	// Drena y descarta el body para permitir reuse de conexión.
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("el dispositivo respondió %d al renombre (esperaba 2xx)", resp.StatusCode)
+	}
+
+	log.Printf("[DISPOSITIVO] Renombre push OK a %s para dispositivo %s", endpoint, deviceID)
+	return nil
+}
+
+// Revoke da de baja lógica un dispositivo: revoca su credencial, lo desasigna
+// del sector y lo quita del caché. Conserva la fila y el historial de
+// telemetría para no romper las FKs de auditoría/provenance. El nodo queda
+// autenticando 401 con su secret viejo.
+func (s *DispositivoService) Revoke(ctx context.Context, actorEmail, id string) error {
+	if err := s.repo.Revoke(ctx, actorEmail, id); err != nil {
 		return err
 	}
 
@@ -112,7 +288,16 @@ func (s *DispositivoService) Delete(ctx context.Context, id string) error {
 // existencia en el catálogo, persiste la métrica en el historial (fire-and-forget),
 // actualiza el estado actual a online y emite los eventos SSE correspondientes.
 func (s *DispositivoService) ProcessPing(ctx context.Context, req dispositivo.PingRequest) (*dispositivo.EstadoDispositivo, error) {
-	d, err := s.repo.GetDispositivoByID(ctx, req.DispositivoID)
+	principal, ok := deviceauth.PrincipalFromContext(ctx)
+	if !ok {
+		return nil, deviceauth.ErrInvalidToken
+	}
+	// El id del principal es la fuente de verdad; si el ping trae un id distinto,
+	// se rechaza para evitar suplantación.
+	if req.DispositivoID != "" && req.DispositivoID != principal.DeviceID {
+		return nil, deviceauth.ErrInvalidToken
+	}
+	d, err := s.repo.GetDispositivoByID(ctx, principal.DeviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +374,7 @@ func (s *DispositivoService) StartReaper(ctx context.Context, interval, umbral t
 				if estado, ok := s.store.Get(id); ok {
 					s.broadcastState(*estado)
 					log.Printf("[DISPOSITIVO] Dispositivo %s pasó a offline", id)
+					s.alertarOffline(*estado, umbral)
 				}
 			}
 
@@ -196,6 +382,29 @@ func (s *DispositivoService) StartReaper(ctx context.Context, interval, umbral t
 			log.Println("[DISPOSITIVO] Reaper detenido")
 			return
 		}
+	}
+}
+
+// alertarOffline registra una alerta WARNING cuando el reaper detecta la
+// transición online→offline. La alerta queda ACTIVA hasta que un operario la
+// reconoce (no hay auto-resolve). El índice único (dispositivo_id, tipo)
+// deduplica. Best-effort: un fallo sólo se loguea.
+func (s *DispositivoService) alertarOffline(estado dispositivo.EstadoDispositivo, umbral time.Duration) {
+	if s.alertas == nil {
+		return
+	}
+	dispositivoID := estado.DispositivoID
+	a := &alerta.Alerta{
+		DispositivoID: &dispositivoID,
+		SectorID:      estado.SectorID,
+		Tipo:          alerta.TipoDispositivoOffline,
+		Severidad:     alerta.SeveridadWarning,
+		Estado:        alerta.EstadoActiva,
+		Mensaje: fmt.Sprintf("Dispositivo %s sin reportar desde hace más de %s",
+			estado.Nombre, umbral),
+	}
+	if err := s.alertas.Save(a); err != nil {
+		log.Printf("[DISPOSITIVO] No se pudo guardar alerta offline de %s: %v", estado.DispositivoID, err)
 	}
 }
 

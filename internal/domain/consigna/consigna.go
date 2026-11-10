@@ -8,36 +8,53 @@ import (
 	"time"
 )
 
-// ErrHornoNoExiste indica que el horno referenciado no existe.
-var ErrHornoNoExiste = errors.New("consigna: el horno referenciado no existe")
+// ErrLoteRequerido indica que una consigna manual no trae lote.
+var ErrLoteRequerido = errors.New("consigna: el lote es requerido")
+
+// ErrLoteNoExiste indica que el lote referenciado no existe.
+var ErrLoteNoExiste = errors.New("consigna: el lote referenciado no existe")
+
+// ErrLoteNoAbierto indica que el lote no está ABIERTO.
+var ErrLoteNoAbierto = errors.New("consigna: el lote no está abierto")
+
+// ErrLoteNoManual indica que el lote no está en modo MANUAL.
+var ErrLoteNoManual = errors.New("consigna: el lote no está en modo MANUAL")
+
+// ErrEncoladoFallido indica que no se pudo dejar la consigna en la cola que
+// consume la Pi ENTRADA.
+var ErrEncoladoFallido = errors.New("consigna: no se pudo encolar la consigna para la Pi")
 
 // ErrParametrosNoExiste indica que el producto no tiene parámetros de control
-// cargados, o que le faltan los setpoints puntuales (temp_setpoint/velocidad_cinta_setpoint)
-// necesarios para un despacho automático.
+// cargados, necesarios para validar una consigna manual contra su rango seguro.
 var ErrParametrosNoExiste = errors.New("consigna: no hay parámetros de control (o setpoints) cargados para el producto")
 
 // ErrFueraDeRango indica que los valores solicitados en un despacho manual
 // están fuera del rango seguro definido para el producto.
 var ErrFueraDeRango = errors.New("consigna: valores fuera de rango seguro")
 
-// ErrDispatchFallido indica que el controlador físico del horno rechazó o no
-// pudo aplicar la consigna.
-var ErrDispatchFallido = errors.New("consigna: el controlador físico rechazó la consigna")
+// ErrSectorRequerido indica que el lote no tiene sector asignado.
+var ErrSectorRequerido = errors.New("consigna: el sector/horno es requerido")
 
-// ErrHornoEnControlManual indica que el horno quedó en modo CONTROL_MANUAL
-// tras un fallo de enlace previo con el controlador físico, y por lo tanto
-// rechaza nuevos despachos automáticos hasta que un operario lo reactive
-// con un envío manual exitoso (ver horno.EstadoControlManual).
-var ErrHornoEnControlManual = errors.New("consigna: el horno está en modo CONTROL_MANUAL, requiere intervención manual antes de reanudar el control automático")
+// ErrSectorMismatch indica que el sector enviado no coincide con el sector del
+// lote referenciado.
+var ErrSectorMismatch = errors.New("consigna: el sector no coincide con el del lote")
 
-// Origen indica si la consigna fue disparada automáticamente por el sistema
-// (tras la detección de IA al iniciar un lote) o manualmente por un operario
-// desde el panel de control.
+// Origen identifica el mecanismo que disparó la consigna. Sólo MANUAL se
+// escribe hoy: la consigna manual se encola para la Pi. AUTOMATICO se conserva
+// únicamente para leer filas históricas; ya no se genera.
 type Origen string
 
 const (
-	OrigenAutomatico Origen = "AUTOMATICO"
 	OrigenManual     Origen = "MANUAL"
+	OrigenAutomatico Origen = "AUTOMATICO"
+)
+
+// Estados del ciclo de vida de una consigna encolada para la Pi. La única
+// transición a APLICADA la produce el ack de la Pi.
+const (
+	EstadoConsignaPendiente = "PENDIENTE"
+	EstadoConsignaAplicada  = "APLICADA"
+	EstadoConsignaRechazada = "RECHAZADA"
 )
 
 // ValidationError agrupa todos los errores de validación de un ConsignaManualRequest.
@@ -49,57 +66,68 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("errores de validación: %s", strings.Join(e.Fields, "; "))
 }
 
-// IsValidationError informa si un error es de tipo ValidationError.
-func IsValidationError(err error) bool {
-	var ve *ValidationError
-	return errors.As(err, &ve)
-}
-
 // Consigna representa un registro histórico de auditoría: una consigna
-// térmica y de velocidad de cinta que fue (o se intentó) despachar al
-// controlador físico del horno, tal como se persiste en PostgreSQL.
+// térmica y de velocidad de cinta que fue aceptada y encolada para la Pi
+// ENTRADA, tal como se persiste en PostgreSQL.
 type Consigna struct {
-	ID                     string    `json:"id"                        db:"id"`
-	HornoID                string    `json:"hornoId"                   db:"horno_id"`
-	LoteID                 *string   `json:"loteId,omitempty"          db:"lote_id"`
-	ProductoID             *string   `json:"productoId,omitempty"      db:"producto_id"`
-	TemperaturaObjetivo    float64   `json:"temperaturaObjetivo"       db:"temperatura_objetivo"`
-	VelocidadCintaObjetivo float64   `json:"velocidadCintaObjetivo"    db:"velocidad_cinta_objetivo"`
-	Origen                 Origen    `json:"origen"                    db:"origen"`
-	Usuario                *string   `json:"usuario,omitempty"         db:"usuario"` // TODO(OAuth): reemplazar por identidad real cuando exista login de usuarios
-	Exitosa                bool      `json:"exitosa"                   db:"exitosa"`
-	MotivoError            *string   `json:"motivoError,omitempty"     db:"motivo_error"`
-	TemperaturaPrevia      *float64  `json:"temperaturaPrevia,omitempty" db:"temperatura_previa"`
-	VelocidadCintaPrevia   *float64  `json:"velocidadCintaPrevia,omitempty" db:"velocidad_cinta_previa"`
-	CreadaEn               time.Time `json:"creadaEn"                  db:"creada_en"`
+	ID                     string  `json:"id"                        db:"id"`
+	DispositivoID          *string `json:"dispositivoId,omitempty"   db:"dispositivo_id"`
+	HornoID                string  `json:"hornoId"                   db:"horno_id"`
+	LoteID                 *string `json:"loteId,omitempty"          db:"lote_id"`
+	ProductoID             *string `json:"productoId,omitempty"      db:"producto_id"`
+	TemperaturaObjetivo    float64 `json:"temperaturaObjetivo"       db:"temperatura_objetivo"`
+	VelocidadCintaObjetivo float64 `json:"velocidadCintaObjetivo"    db:"velocidad_cinta_objetivo"`
+	Origen                 Origen  `json:"origen"                    db:"origen"`
+	Usuario                *string `json:"usuario,omitempty"         db:"usuario"` // operario que envió la consigna manual (opcional)
+	// Exitosa se conserva por compatibilidad con el contrato histórico
+	// (true = aceptada y encolada). La fuente fina del ciclo de vida es Estado.
+	Exitosa bool `json:"exitosa"                   db:"exitosa"`
+	// DecisionID es la decisión de control encolada para la Pi; el ack la marca
+	// APLICADA. Null cuando no se pudo encolar.
+	DecisionID           *string   `json:"decisionId,omitempty"      db:"decision_id"`
+	Estado               string    `json:"estado"                    db:"estado"`
+	MotivoError          *string   `json:"motivoError,omitempty"     db:"motivo_error"`
+	TemperaturaPrevia    *float64  `json:"temperaturaPrevia,omitempty" db:"temperatura_previa"`
+	VelocidadCintaPrevia *float64  `json:"velocidadCintaPrevia,omitempty" db:"velocidad_cinta_previa"`
+	CreadaEn             time.Time `json:"creadaEn"                  db:"creada_en"`
 }
 
 // ConsignaManualRequest es el payload JSON entrante del panel web para el
-// envío manual de consigna térmica (SCA-320). ProductoID es obligatorio: el
-// despacho manual siempre valida contra el rango real cargado en
-// parametros_producto, sin caer a límites de seguridad hardcodeados.
+// envío manual de consigna térmica (SCA-320). LoteID es obligatorio: la
+// consigna se encola para el lote abierto en modo MANUAL y su sector.
+// ProductoID es obligatorio: se valida contra el rango real del producto.
 type ConsignaManualRequest struct {
-	HornoID                string  `json:"hornoId"`
+	// SectorID es opcional: si viene, debe coincidir con el sector del lote.
+	SectorID string `json:"sectorId,omitempty"`
+	// HornoID queda como alias legacy de SectorID.
+	HornoID                string  `json:"hornoId,omitempty"`
 	ProductoID             string  `json:"productoId"`
 	TemperaturaObjetivo    float64 `json:"temperaturaObjetivo"`
 	VelocidadCintaObjetivo float64 `json:"velocidadCintaObjetivo"`
-	Usuario                string  `json:"usuario,omitempty"` // TODO(OAuth): tomar de la sesión/JWT una vez exista auth de usuarios
-	// LoteID es opcional: permite correlacionar un ajuste manual con el lote
-	// en curso (por ejemplo, el loteId de correlación devuelto por
-	// POST /api/v1/lotes/inicio) para que aparezca en su historial de
-	// auditoría. Si se omite, la consigna manual queda auditada sin lote asociado.
+	Usuario                string  `json:"usuario,omitempty"` // nombre del operario que envía la consigna manual (opcional)
+	// LoteID identifica el lote abierto en modo MANUAL al que se asocia la
+	// consigna. Requerido.
 	LoteID *string `json:"loteId,omitempty"`
 }
 
+// OvenID resuelve el id de sector/horno enviado: prefiere sectorId y cae al
+// alias legacy hornoId. Devuelve el valor trimeado.
+func (r ConsignaManualRequest) OvenID() string {
+	if id := strings.TrimSpace(r.SectorID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(r.HornoID)
+}
+
 // Validate aplica las reglas de forma básicas del request (presencia, valores
-// positivos). El rango seguro específico por producto se valida en el
-// Service, porque depende de datos de parametros_producto, no es una regla
-// de forma pura de dominio.
+// positivos). El rango seguro específico por producto y la coincidencia de
+// sector con el lote se validan en el Service, porque dependen de datos
+// persistidos.
 func (r ConsignaManualRequest) Validate() error {
 	var errs []string
 
-	if strings.TrimSpace(r.HornoID) == "" {
-		errs = append(errs, "hornoId: es requerido")
+	if r.LoteID == nil || strings.TrimSpace(*r.LoteID) == "" {
+		errs = append(errs, "loteId: es requerido")
 	}
 	if strings.TrimSpace(r.ProductoID) == "" {
 		errs = append(errs, "productoId: es requerido")
@@ -118,26 +146,21 @@ func (r ConsignaManualRequest) Validate() error {
 }
 
 // Repository define el contrato de persistencia del historial de auditoría
-// de consignas despachadas al horno.
+// de consignas encoladas para la Pi.
 type Repository interface {
 	Save(ctx context.Context, c *Consigna) error
 	GetByLoteID(ctx context.Context, loteID string) ([]Consigna, error)
-	GetByHornoID(ctx context.Context, hornoID string, limit int) ([]Consigna, error)
+	// MarcarAplicadaPorDecision cierra como APLICADA la consigna encolada con
+	// ese decision_id. Idempotente: 0 filas no es error. El ack de la Pi es la
+	// única transición a APLICADA.
+	MarcarAplicadaPorDecision(ctx context.Context, decisionID string) error
 }
 
-// Service orquesta la resolución de la consigna, el despacho al controlador
-// físico simulado, la actualización del estado activo del horno y el
-// registro de auditoría. Es el mecanismo compartido por el envío automático
-// (SCA-142) y el envío manual (SCA-320).
+// Service encola una consigna manual para que la Pi ENTRADA la levante por
+// lote y audita el intento en historial_consignas.
 type Service interface {
-	// DispatchAutomatico resuelve el setpoint puntual cargado en
-	// parametros_producto para productoID y lo despacha automáticamente.
-	// loteID es un identificador de correlación (puede no corresponder aún a
-	// una fila persistida en lotes_productivos).
-	DispatchAutomatico(ctx context.Context, hornoID, loteID, productoID string) (*Consigna, error)
-
 	// DispatchManual valida el request contra el rango seguro del producto y,
-	// si es válido, despacha la consigna solicitada por el operario.
+	// si es válido, encola la consigna para la Pi (SCA-320).
 	DispatchManual(ctx context.Context, req ConsignaManualRequest) (*Consigna, error)
 
 	// GetHistorialByLote devuelve el historial de auditoría de consignas de un lote.

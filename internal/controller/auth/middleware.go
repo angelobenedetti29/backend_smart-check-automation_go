@@ -7,6 +7,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	userDomain "github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
+	"github.com/angelobenedetti29/smart-check-automation/internal/guard"
 	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
@@ -40,7 +42,7 @@ func JWTMiddleware(jwtSecret []byte, next http.HandlerFunc) http.HandlerFunc {
 		token, err := jwt.ParseWithClaims(cookie.Value, claims, func(t *jwt.Token) (interface{}, error) {
 			// Verificar que el algoritmo sea exactamente HMAC (HS256).
 			// Esto previene el ataque de confusión de algoritmo ("alg=none" o RS256 con clave pública).
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			if t.Method != jwt.SigningMethodHS256 {
 				return nil, jwt.ErrSignatureInvalid
 			}
 			return jwtSecret, nil
@@ -93,5 +95,61 @@ func RequireRole(allowedRoles []string, next http.HandlerFunc) http.HandlerFunc 
 		}
 
 		next(w, r)
+	}
+}
+
+// RequireRoleFromDB refreshes the trusted role from the active user row. A
+// signed cookie is not sufficient authorization because a role may have been
+// changed or the account disabled after the cookie was issued.
+func RequireRoleFromDB(repo userDomain.Repository, allowedRoles []string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := GetClaimsFromContext(r.Context())
+		if claims == nil {
+			response.Error(w, http.StatusUnauthorized, "Sesión requerida", nil)
+			return
+		}
+		u, err := repo.FindByEmail(r.Context(), claims.Email)
+		if err != nil || !u.Activo {
+			response.Error(w, http.StatusUnauthorized, "Sesión inválida o expirada", nil)
+			return
+		}
+		claims.Role = u.Rol
+		claims.Name = u.Nombre
+		RequireRole(allowedRoles, next)(w, r)
+	}
+}
+
+// RateLimitByUser applies a post-authentication quota keyed by the database
+// user UUID, preventing one peer from exhausting every operator's allowance.
+// Only state-changing methods consume a token: authenticated reads (GET/HEAD/
+// OPTIONS) must not exhaust the management mutation allowance.
+func RateLimitByUser(repo userDomain.Repository, limiter *guard.Limiter, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := GetClaimsFromContext(r.Context())
+		if claims == nil {
+			response.Error(w, http.StatusUnauthorized, "Sesión requerida", nil)
+			return
+		}
+		u, err := repo.FindByEmail(r.Context(), claims.Email)
+		if err != nil || !u.Activo {
+			response.Error(w, http.StatusUnauthorized, "Sesión inválida o expirada", nil)
+			return
+		}
+		if isMutationMethod(r.Method) && !limiter.Allow("management-user", u.ID) {
+			guard.RateLimited(w)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// isMutationMethod reports whether an HTTP method changes state and therefore
+// must consume the management mutation quota.
+func isMutationMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
 	}
 }

@@ -11,15 +11,40 @@ services:
     autoDeploy: false
     envVars:
       - key: DATABASE_URL
-        # Session pooler de Supabase — puerto 5432, NO el transaction pooler (6543).
-        # Ver DEPLOYMENT.md § "Connection string de Supabase".
-        sync: false
-      - key: API_KEY_SECRET
+        # Supabase PostgreSQL 16 (puerto 5432). No usar un pooler de transacciones.
+        # Ver DEPLOY.md.
         sync: false
       - key: JWT_SECRET
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
+      - key: FRONTEND_ORIGINS
+        # Orígenes explícitos del panel (CORS), separados por coma.
+        sync: false
+      - key: PREDICTOR_URL
+        sync: false
+      - key: PREDICTOR_AUTH_TOKEN
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: NOTIFICACIONES_EMAIL_FROM
+        sync: false
+      - key: NOTIFICACIONES_EMAIL_PROVIDER
+        sync: false
+      - key: GMAIL_CLIENT_ID
+        sync: false
+      - key: GMAIL_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: NOTIFICACIONES_PANEL_URL
+        sync: false
+      - key: TELEMETRIA_MONITOR_INTERVALO
+        value: 15s
+      - key: TELEMETRIA_DESACTUALIZADA_SEGUNDOS
+        value: 30s
       - key: PORT
         value: "8080"
 
@@ -33,12 +58,38 @@ services:
     autoDeploy: false
     envVars:
       - key: DATABASE_URL
-        sync: false
-      - key: API_KEY_SECRET
+        # Supabase PostgreSQL 16 (puerto 5432).
         sync: false
       - key: JWT_SECRET
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
+      - key: FRONTEND_ORIGINS
+        # Orígenes explícitos del panel (CORS), separados por coma.
+        sync: false
+      - key: PREDICTOR_URL
+        sync: false
+      - key: PREDICTOR_AUTH_TOKEN
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: NOTIFICACIONES_EMAIL_FROM
+        sync: false
+      - key: NOTIFICACIONES_EMAIL_PROVIDER
+        sync: false
+      - key: GMAIL_CLIENT_ID
+        sync: false
+      - key: GMAIL_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: NOTIFICACIONES_PANEL_URL
+        sync: false
+      - key: TELEMETRIA_MONITOR_INTERVALO
+        value: 15s
+      - key: TELEMETRIA_DESACTUALIZADA_SEGUNDOS
+        value: 30s
       - key: PORT
         value: "8080"

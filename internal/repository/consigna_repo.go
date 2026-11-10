@@ -25,27 +25,32 @@ func NewConsignaPostgresRepository(db *pgxpool.Pool) *ConsignaPostgresRepository
 }
 
 const selectHistorialConsignasColumns = `
-	id, horno_id, lote_id, producto_id,
+	id, dispositivo_id, horno_id, lote_id, producto_id,
 	temperatura_objetivo, velocidad_cinta_objetivo,
-	origen, usuario, exitosa, motivo_error,
-	temperatura_previa, velocidad_cinta_previa, creada_en`
+	origen, usuario, exitosa, motivo_error, decision_id, estado,
+	temperatura_previa, velocidad_cinta_previa,
+	creada_en`
 
 // Save inserta un nuevo registro de auditoría en historial_consignas.
 // Devuelve consigna.ErrParametrosNoExiste si producto_id no existe en el catálogo
 // (violación de FK), aunque en la práctica el Service ya valida su existencia antes.
 func (r *ConsignaPostgresRepository) Save(ctx context.Context, c *consigna.Consigna) error {
+	if c.Estado == "" {
+		c.Estado = consigna.EstadoConsignaPendiente
+	}
 	const query = `
 		INSERT INTO historial_consignas (
-			horno_id, lote_id, producto_id,
+			dispositivo_id, horno_id, lote_id, producto_id,
 			temperatura_objetivo, velocidad_cinta_objetivo,
-			origen, usuario, exitosa, motivo_error,
+			origen, usuario, exitosa, motivo_error, decision_id, estado,
 			temperatura_previa, velocidad_cinta_previa
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 		)
 		RETURNING id, creada_en`
 
 	err := r.db.QueryRow(ctx, query,
+		c.DispositivoID,
 		c.HornoID,
 		c.LoteID,
 		c.ProductoID,
@@ -55,6 +60,8 @@ func (r *ConsignaPostgresRepository) Save(ctx context.Context, c *consigna.Consi
 		c.Usuario,
 		c.Exitosa,
 		c.MotivoError,
+		c.DecisionID,
+		c.Estado,
 		c.TemperaturaPrevia,
 		c.VelocidadCintaPrevia,
 	).Scan(&c.ID, &c.CreadaEn)
@@ -84,37 +91,18 @@ func (r *ConsignaPostgresRepository) GetByLoteID(ctx context.Context, loteID str
 	return scanHistorialConsignas(rows)
 }
 
-// GetByHornoID devuelve el historial de consignas de un horno, ordenado del más reciente al más antiguo, hasta limit filas.
-func (r *ConsignaPostgresRepository) GetByHornoID(ctx context.Context, hornoID string, limit int) ([]consigna.Consigna, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-
-	rows, err := r.db.Query(ctx, `
-		SELECT `+selectHistorialConsignasColumns+`
-		FROM historial_consignas
-		WHERE horno_id = $1
-		ORDER BY creada_en DESC
-		LIMIT $2
-	`, hornoID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query historial_consignas by horno_id: %w", err)
-	}
-	defer rows.Close()
-
-	return scanHistorialConsignas(rows)
-}
-
 // scanHistorialConsignas escanea las filas resultantes de una consulta sobre historial_consignas.
 func scanHistorialConsignas(rows pgx.Rows) ([]consigna.Consigna, error) {
 	items := []consigna.Consigna{}
 	for rows.Next() {
 		var c consigna.Consigna
 		if err := rows.Scan(
-			&c.ID, &c.HornoID, &c.LoteID, &c.ProductoID,
+			&c.ID, &c.DispositivoID, &c.HornoID, &c.LoteID, &c.ProductoID,
 			&c.TemperaturaObjetivo, &c.VelocidadCintaObjetivo,
 			&c.Origen, &c.Usuario, &c.Exitosa, &c.MotivoError,
-			&c.TemperaturaPrevia, &c.VelocidadCintaPrevia, &c.CreadaEn,
+			&c.DecisionID, &c.Estado,
+			&c.TemperaturaPrevia, &c.VelocidadCintaPrevia,
+			&c.CreadaEn,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan historial_consignas: %w", err)
 		}
@@ -124,4 +112,18 @@ func scanHistorialConsignas(rows pgx.Rows) ([]consigna.Consigna, error) {
 		return nil, fmt.Errorf("rows iteration error: %w", err)
 	}
 	return items, nil
+}
+
+// MarcarAplicadaPorDecision marca como APLICADA la consigna encolada con ese
+// decision_id. Sólo transiciona desde PENDIENTE, así que un ack reenviado (o un
+// decision_id sin fila) afecta 0 filas sin devolver error.
+func (r *ConsignaPostgresRepository) MarcarAplicadaPorDecision(ctx context.Context, decisionID string) error {
+	const query = `
+		UPDATE historial_consignas
+		SET estado='APLICADA', exitosa=true, motivo_error=NULL
+		WHERE decision_id=$1 AND estado='PENDIENTE'`
+	if _, err := r.db.Exec(ctx, query, decisionID); err != nil {
+		return fmt.Errorf("failed to mark historial_consignas aplicada: %w", err)
+	}
+	return nil
 }

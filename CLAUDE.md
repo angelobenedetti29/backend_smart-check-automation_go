@@ -1,4 +1,4 @@
-# Smart-Check Automation — Backend (Go)
+# SmartCheck Automation — Backend (Go)
 
 ## Contexto del proyecto
 Sistema de supervisión inteligente para hornos túnel (Fermar S.A.).
@@ -7,11 +7,12 @@ Los datos son enviados por nodos Raspberry Pi via HTTP.
 
 ## Stack
 - Lenguaje: Go 1.25
-- Base de datos: PostgreSQL 16 (Aiven Cloud)
-- Infraestructura: Docker + Docker Compose
+- Base de datos: PostgreSQL 16 (Supabase)
+- Infraestructura: Docker + Docker Compose (`db`, `app`, `predictor-svc`)
+- Predictor: sidecar Python/FastAPI + XGBoost (`cmd/predictor_svc`, puerto `8090`)
 - Frontend: Next.js (React) — consumidor de esta API
 - Autenticación (usuarios): Google OAuth 2.0 + credenciales locales (bcrypt) → JWT HttpOnly cookie
-- Autenticación (Raspberry Pi → API): API Key via header `X-API-Key`
+- Autenticación (Raspberry Pi → API): secret por nodo vía header `Authorization: Bearer <secret>`; el nodo pide el alta, un Supervisor/Admin la aprueba y el backend guarda solo `SHA-256(secret)` (`secret_hash`). Ver `docs/device-registration-contract.md`
 
 ## Convenciones del equipo
 - Nombres de structs: PascalCase
@@ -60,48 +61,68 @@ Nombrado: `feature/SCA-042-clasificacion-imagenes`, `bugfix/SCA-067-validacion-j
 ```
 backend_smart-check-automation_go/
 ├── cmd/server/main.go                               # Entry point: wiring de dependencias y setup de rutas
+├── cmd/predictor_svc/                               # Sidecar FastAPI: predictor XGBoost + entrenamiento
 ├── internal/
 │   ├── controller/
 │   │   ├── auth/                                    # POST /api/v1/auth/login|google|logout
 │   │   ├── consigna/                                # POST /api/v1/horno/consigna, GET /api/v1/horno/consigna/historial
-│   │   ├── dispositivo/                             # POST /api/v1/dispositivos/ping, GET|POST /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
-│   │   ├── horno/                                   # GET /api/v1/horno, POST /api/v1/horno/temperatura
-│   │   ├── lote/                                    # POST /api/v1/lotes, POST /api/v1/lotes/inicio
-│   │   ├── lote_productivo/                         # GET /api/v1/lotes-productivos
-│   │   ├── parametros_producto/                     # Handler GET/POST/PUT /api/v1/parametros-producto
+│   │   ├── control/                                 # Start/stop/tuning/modo, consigna-propuesta, aplicar-consigna, ack, estado, SSE control.propuesta
+│   │   ├── decisiones_control/                      # GET /api/v1/lotes/{id}/decisiones
+│   │   ├── dispositivo/                             # POST /api/v1/dispositivos/ping, GET|PUT /api/v1/dispositivos, GET /api/v1/dispositivos/metricas
+│   │   ├── devicetoken/                             # Middleware BeforeMux: auth Bearer de nodos Raspberry Pi
+│   │   ├── dualauth/                                # Auth dual (Bearer de dispositivo o cookie JWT)
+│   │   ├── horno/                                   # GET /api/v1/horno (proyección de telemetría)
+│   │   ├── lote_sector/                             # GET /api/v1/dispositivos/sector, POST /api/v1/lotes/inicio|{id}/eventos|{id}/cierre, GET /api/v1/lotes|/lotes/abierto
+│   │   ├── metricashorno/                           # POST|GET /api/v1/lotes/{id}/metricas-horno
+│   │   ├── notificacion/                            # GET|PATCH /api/v1/admin/notificaciones, POST .../test
+│   │   ├── producto/                                # GET/POST /api/v1/productos, PUT|DELETE /api/v1/productos/{id}
+│   │   ├── registro/                                # POST|GET /api/v1/registration-requests (+ approve/reject)
+│   │   ├── sector/                                  # POST /api/v1/sectores, PUT|DELETE /api/v1/sectores/{id}
 │   │   ├── sse/                                     # Handler SSE genérico
 │   │   └── user/                                    # GET|POST /api/v1/admin/usuarios, PATCH .../usuarios/{id}
 │   ├── domain/
 │   │   ├── alerta/                                  # Modelo Alerta
 │   │   ├── consigna/                                # Modelo Consigna (auditoría) + ConsignaManualRequest
-│   │   ├── dispositivo/                             # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo
-│   │   ├── horno/                                   # Modelo Horno
-│   │   ├── lote/                                    # Modelo Lote + interfaces Repository/Service
-│   │   ├── lote_productivo/                         # Modelo LoteProductivo + PaginatedResult
-│   │   ├── parametros_producto/                     # Modelo ParametroProducto
+│   │   ├── decisiones_control/                      # Audit del MPC (decisiones, predicción, aprobación)
+│   │   ├── dispositivo/                             # Modelo Dispositivo + MetricaDispositivo + EstadoDispositivo + DeviceRead
+│   │   ├── lote_sector/                             # Modelo Lote + Evento + modo/ventanas + interfaces Repository/Service
+│   │   ├── metricashorno/                           # Telemetría cruda del horno (metricas_horno)
+│   │   ├── notificacion/                            # Preferencias, destinatarios y outbox de notificaciones
+│   │   ├── producto/                                # Modelo Producto (catálogo maestro + parámetros de control)
+│   │   ├── registro/                                # Modelo de solicitudes de enrolamiento
+│   │   ├── sector/                                  # Modelo Sector + contrato Repository
 │   │   └── user/                                    # Entidad User, constantes de roles, errores centinela
 │   ├── provider/
-│   │   ├── database/                                # NewPostgresPool, repos en memoria, StateStore
+│   │   ├── database/                                # NewPostgresPool, StateStore en memoria
 │   │   ├── google/                                  # Implementa user.GoogleVerifier vía google/api/idtoken
-│   │   ├── oven_controller/                         # Cliente simulado del controlador del horno (PLC)
-│   │   └── yolo_client/                             # Cliente HTTP para servicio YOLO de inspección visual
 │   ├── repository/
-│   │   ├── postgres_repo.go                         # PostgreSQL — CREATE lote
-│   │   ├── lote_productivo_repo.go                  # PostgreSQL — GET lotes (JOIN productos)
-│   │   ├── parametros_producto_repo.go              # PostgreSQL — GET/CREATE/UPDATE parametros_producto
+│   │   ├── lote_sector_repo.go                      # PostgreSQL — ciclo de lote por sector
+│   │   ├── sector_repo.go                           # PostgreSQL — sectores y relación con dispositivos
+│   │   ├── producto_repo.go                         # PostgreSQL — catálogo de productos y sus parámetros de control
 │   │   ├── dispositivo_repo.go                      # PostgreSQL — Dispositivos y métricas
+│   │   ├── device_auth_repo.go                      # PostgreSQL — credenciales de nodos (secret_hash)
+│   │   ├── registro_repo.go                         # PostgreSQL — solicitudes de enrolamiento
 │   │   ├── consigna_repo.go                         # PostgreSQL — Historial de consignas
+│   │   ├── decisiones_control_repo.go               # PostgreSQL — audit del MPC
+│   │   ├── metricas_horno_repo.go                   # PostgreSQL — telemetría cruda del horno
+│   │   ├── notificacion_repo.go                     # PostgreSQL — preferencias y outbox de notificaciones
 │   │   └── user_postgres_repository.go              # PostgreSQL — CRUD usuarios
 │   └── service/
 │       ├── auth/                                    # LoginWithGoogle, LoginWithCredentials, generateJWT
-│       ├── consigna/                                # Despacho automático/manual de consigna
+│       ├── consigna/                                # Despacho de consigna (manual SCA-320 y MPC SCA-400)
+│       ├── control/                                 # Loop MPC por lote: precalentamiento, propuesta, aprobación, ack
 │       ├── dispositivo/                             # Lógica de ping, reaper y SSE
 │       ├── horno/                                   # Lógica de umbrales térmicos y alertas
-│       ├── lote_productivo/                         # Lógica de paginación
-│       ├── parametros_producto/                     # Alta/consulta/actualización de parámetros
+│       ├── lote_sector/                             # Ciclo de lote por sector (apertura, eventos, cierre, historial)
+│       ├── notificacion/                            # Encolado de alertas, worker de outbox, Resend/Gmail y Telegram
+│       ├── optimizador/                             # MPC horizonte 1: grilla, Z, límites y pesos
+│       ├── predictor/                               # Cliente HTTP al sidecar XGBoost
+│       ├── producto/                                # Catálogo de productos y sus parámetros de control
+│       ├── registro/                                # Enrolamiento de dispositivos
+│       ├── sector/                                  # CRUD de sectores (slug de id, borrado bloqueado con lotes)
 │       └── user/                                    # ListUsers, CreateUser, UpdateUser
 ├── pkg/response/response.go                         # Envelope JSON estándar {success, message, data, errors}
-├── database/schema.sql                              # DDL: productos + lotes_productivos + parametros_producto + dispositivos + metricas_dispositivo + historial_consignas + usuarios
+├── database/schema.sql                              # DDL idempotente: productos, lotes, sectores, dispositivos, métricas, consignas, decisiones_control, alertas, usuarios, registro
 ├── Dockerfile                                       # Multi-stage build: golang:1.25-alpine → alpine
 ├── docker-compose.yml
 ├── .env.example                                     # Plantilla de variables
@@ -110,12 +131,20 @@ backend_smart-check-automation_go/
 
 ## Schema de base de datos (fuente de verdad: database/schema.sql)
 
-- **productos**: Catálogo maestro.
-- **lotes_productivos**: Registros transaccionales de horneadas.
-- **parametros_producto**: Umbrales ideales y setpoints de cocción.
+- **Migraciones:** `database/migrations/NNNN_descripcion.sql` se aplican en orden al arrancar (`database/migrate.go`) y quedan registradas en `schema_migrations`. `schema.sql` es la instalación limpia; para bases existentes, agregá una migración, no edites el `CREATE TABLE`.
+
+- **productos**: Catálogo maestro **y** parámetros de control embebidos (peso, dimensión, temperatura, velocidad de cinta, setpoints opcionales y Δmáx del MPC). La antigua tabla `parametros_producto` fue unificada y eliminada; `temp_setpoint`/`velocidad_cinta_setpoint` son nullable y el loop del MPC (SCA-400) los usa como receta de arranque cuando el lote no tiene setpoints propios.
+- **lotes_productivos**: Registros transaccionales de horneadas (con `sector_id`, `estado`, `modo`, ventanas de control, tolerancias, umbrales, pesos objetivo y setpoints aplicados).
+- **sectores**: Sectores de producción (`id` legible tipo slug, `nombre`). Un dispositivo pertenece a un sector (`dispositivos.sector_id`, nullable); la columna legacy `dispositivos.ubicacion` se migra a sectores con `database/migrations/0002_legacy_ubicacion.sql` (idempotente; si dos dispositivos del mismo tipo comparten ubicación solo el primero queda asignado, y nunca viola `uq_dispositivos_sector_tipo`). El `DROP COLUMN` es irreversible: un rollback al binario anterior requiere restaurar la columna. El deploy de frontend y backend debe ser coordinado (el decoder es estricto: `ubicacion` vs `sectorId`).
 - **dispositivos** & **metricas_dispositivo**: Nodos Raspberry Pi y telemetría (CPU/RAM/Temp).
-- **historial_consignas**: Auditoría de consignas enviadas al horno (automáticas/manuales).
+- **metricas_horno**: Telemetría cruda del horno reportada por la Pi ENTRADA (T1, combustión, humedad, ambiente, velocidad y setpoints observados). Es la fuente de la ventana de evaluación del MPC.
+- **decisiones_control**: Audit del MPC. Cada fila registra la observación, la predicción XGBoost, la propuesta, el resultado (`aplicado_por`), el motivo de skip y la aprobación (`aprobada_por`/`aprobada_at`) cuando el modo es SUPERVISION.
+- **historial_consignas**: Auditoría de las consignas manuales encoladas para la Pi (`origen='MANUAL'`, SCA-320); `origen='AUTOMATICO'` sólo queda en filas históricas (SCA-142/SCA-400). El MPC ya no escribe esta tabla: sus propuestas/aplicaciones viven en `decisiones_control`. `decision_id` guarda la decisión encolada para la Pi (sin FK a `decisiones_control`) y `estado` el ciclo de vida: `PENDIENTE` (encolada), `APLICADA` (ack de la Pi) o `RECHAZADA` (no se pudo encolar). `exitosa` queda por compatibilidad. El trigger automático de SCA-142 desde `/lotes/inicio` ya no existe.
+- **registration_requests**: Solicitudes de enrolamiento de nodos (`PENDING`/`APPROVED`/`REJECTED`/`EXPIRED`) con `request_id` y secret de un solo uso.
+- **eventos_lote**: Detecciones individuales reportadas por los nodos, deduplicadas por `evento_id`, que alimentan los conteos del lote.
+- **device_lifecycle_audit**: Traza de auditoría del ciclo de vida de dispositivos (approve/reject del alta, baja lógica) con actor y estados anterior/nuevo.
 - **usuarios**: Autenticación corporativa (Email, Rol, Password Hash).
+- **usuarios_notificaciones** & **notificaciones_outbox**: preferencias por usuario y outbox de notificaciones. Las alertas WARNING/CRITICAL se encolan una vez por usuario activo y canal habilitado (email Resend o Gmail API según `NOTIFICACIONES_EMAIL_PROVIDER`, Telegram Bot API); un worker reintenta con backoff hasta `NOTIFICACIONES_MAX_INTENTOS`. Sin fila de preferencias, ambos canales quedan habilitados. El encolado no es atómico con el INSERT de la alerta (best-effort; ver comentario en `alerta_repo.go`).
 
 Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario@fermar.com.ar`. Contraseña seed: `password123`.
 
@@ -124,45 +153,114 @@ Seed de desarrollo: `admin@fermar.com.ar`, `supervisor@fermar.com.ar`, `operario
 | Método | Ruta | Auth | Rol mínimo |
 |---|---|---|---|
 | GET | /health | — | — |
+| GET | /healthz | — | — |
 | POST | /api/v1/auth/login | — | — |
 | POST | /api/v1/auth/google | — | — |
 | POST | /api/v1/auth/logout | — | — |
 | GET | /api/v1/admin/usuarios | JWT cookie | Administrador |
 | POST | /api/v1/admin/usuarios | JWT cookie | Administrador |
 | PATCH | /api/v1/admin/usuarios/{id} | JWT cookie | Administrador |
+| GET | /api/v1/admin/notificaciones | JWT cookie | Administrador |
+| PATCH | /api/v1/admin/notificaciones/{usuarioID} | JWT cookie | Administrador |
+| POST | /api/v1/admin/notificaciones/test | JWT cookie | Administrador |
 | GET | /api/v1/horno | JWT cookie | cualquier rol |
-| POST | /api/v1/horno/temperatura | JWT cookie | Supervisor, Admin |
-| POST | /api/v1/lotes | X-API-Key | — |
-| POST | /api/v1/lotes/inicio | X-API-Key | — |
-| GET | /api/v1/lotes-productivos | JWT cookie | cualquier rol |
-| GET/POST/PUT | /api/v1/parametros-producto | JWT cookie | Supervisor, Admin |
-| POST | /api/v1/dispositivos/ping | X-API-Key | — |
+| GET | /api/v1/productos | Bearer dispositivo o JWT cookie | — |
+| POST | /api/v1/productos | JWT cookie | Supervisor, Admin |
+| PUT | /api/v1/productos/{id} | JWT cookie | Supervisor, Admin |
+| DELETE | /api/v1/productos/{id} | JWT cookie | Supervisor, Admin |
+| GET | /api/v1/dispositivos/sector | Bearer dispositivo | — |
+| GET | /api/v1/sectores | JWT cookie | cualquier rol |
+| POST | /api/v1/sectores | JWT cookie | Supervisor, Admin |
+| PUT | /api/v1/sectores/{id} | JWT cookie | Supervisor, Admin |
+| DELETE | /api/v1/sectores/{id} | JWT cookie | Supervisor, Admin |
+| POST | /api/v1/lotes/inicio | Bearer dispositivo | — |
+| GET | /api/v1/lotes/abierto | Bearer dispositivo o JWT cookie | — |
+| POST | /api/v1/lotes/{id}/eventos | Bearer dispositivo | — |
+| POST | /api/v1/lotes/{id}/cierre | Bearer dispositivo | — |
+| GET | /api/v1/lotes | Bearer dispositivo o JWT cookie | — |
+| GET | /api/v1/lotes/events | JWT cookie | cualquier rol |
+| POST | /api/v1/dispositivos/ping | Bearer dispositivo | — |
 | GET | /api/v1/dispositivos | JWT cookie | cualquier rol |
-| POST | /api/v1/dispositivos | JWT cookie | Operario, Supervisor, Admin |
+| PUT | /api/v1/dispositivos | JWT cookie | Supervisor, Admin |
+| DELETE | /api/v1/dispositivos | JWT cookie | Supervisor, Admin |
+| PUT | /api/v1/dispositivos/nombre | Bearer dispositivo | — |
+| PUT | /api/v1/dispositivos/{id}/nombre | JWT cookie | Supervisor, Admin |
 | GET | /api/v1/dispositivos/metricas | JWT cookie | cualquier rol |
 | GET | /api/v1/dispositivos/events | JWT cookie | cualquier rol |
 | POST | /api/v1/horno/consigna | JWT cookie | Operario, Supervisor, Admin |
 | GET | /api/v1/horno/consigna/historial | JWT cookie | cualquier rol |
 | GET | /api/v1/horno/events | JWT cookie | cualquier rol |
+| GET | /api/v1/lotes/{id}/control/estado | JWT cookie | cualquier rol |
+| PATCH | /api/v1/lotes/{id}/modo | JWT cookie | Supervisor, Admin |
+| PUT | /api/v1/lotes/{id}/modo | Bearer dispositivo (o JWT) | — (dispositivo de su sector) |
+| POST | /api/v1/lotes/{id}/control/start | JWT cookie | Supervisor, Admin |
+| POST | /api/v1/lotes/{id}/control/stop | JWT cookie | Supervisor, Admin |
+| PATCH | /api/v1/lotes/{id}/control/parametros | JWT cookie | Supervisor, Admin |
+| GET | /api/v1/lotes/{id}/consigna-propuesta | Bearer dispositivo o JWT cookie | — |
+| POST | /api/v1/lotes/{id}/aplicar-consigna | Bearer dispositivo o JWT cookie | Operario, Supervisor, Admin |
+| POST | /api/v1/lotes/{id}/aprobar-consigna | Bearer dispositivo o JWT cookie | Operario, Supervisor, Admin |
+| POST | /api/v1/lotes/{id}/consigna/ack | Bearer dispositivo | — |
+| GET | /api/v1/lotes/{id}/decisiones | JWT cookie | cualquier rol |
+| GET | /api/v1/lotes/{id}/confianza-clases | JWT cookie | cualquier rol |
+| POST | /api/v1/lotes/{id}/metricas-horno | Bearer dispositivo | — |
+| GET | /api/v1/lotes/{id}/metricas-horno | Bearer dispositivo o JWT cookie | — |
+| POST | /api/v1/lotes/{id}/alertas-calidad | Bearer dispositivo | — (lote de su sector, ABIERTO) |
+| GET | /api/v1/lotes/{id}/control/events | JWT cookie | cualquier rol |
+| POST/GET | /api/v1/registration-requests | — (POST/GET por id) · JWT Supervisor/Admin (listado y approve/reject) | — |
+
+Nota: `POST /api/v1/lotes/inicio` ya **no dispara la consigna automática de SCA-142**;
+solo abre/persiste el lote abierto del sector. Si el lote nace en modo no manual,
+arranca el loop del MPC (SCA-400), que es quien propone/aplica consignas.
 
 ## Decisiones de arquitectura tomadas
 
 - **JWT en cookie HttpOnly**: `session_token` — HttpOnly+Secure+SameSite=Strict.
-- **RBAC en middleware**: `RequireRole([]string{...})` se encadena después de `JWTMiddleware`. Roles: `Administrador > Supervisor > Operario`.
+- **RBAC en middleware**: `RequireRoleFromDB(...)` se encadena después de `JWTMiddleware` y re-lee rol/activo desde la DB en cada request. Roles: `Administrador > Supervisor > Operario`.
 - **Bcrypt para contraseñas locales**: `DefaultCost`. Usuarios Google-only tienen `password_hash = NULL`.
 - **Estado de dispositivos en caché en memoria + historial en PostgreSQL**: `MemoryDispositivoStateStore` para lecturas rápidas; historial append-only en `metricas_dispositivo`.
-- **Detección de offline con reaper en background**: `StartReaper` corre cada `DISPOSITIVO_REAPER_INTERVAL`.
-- **Mecanismo de consigna compartido**: `ConsignaService` gestiona tanto consignas automáticas (SCA-142) como manuales (SCA-320).
+- **Detección de offline con reaper en background**: `StartReaper` corre cada `DISPOSITIVO_REAPER_INTERVAL`; al detectar la transición online→offline emite `dispositivo.state` y crea una alerta `DISPOSITIVO_OFFLINE` (WARNING) con `dispositivo_id`/`sector_id`.
+- **Consigna manual y MPC**: `ConsignaService.DispatchManual` (SCA-320) es el único camino manual: valida lote ABIERTO/MANUAL y el rango del producto, y encola el override para la Pi. El loop del MPC (SCA-400) sólo publica propuestas (`decisiones_control` + SSE); el backend nunca aplica. El trigger automático de SCA-142 desde `/lotes/inicio` fue retirado y `origen=AUTOMATICO` en `historial_consignas` sólo queda como histórico.
+- **Modos de operación por lote**: `MANUAL` no corre loop; `SUPERVISION` publica propuestas que requieren aprobación; `AUTOMATICO` publica propuestas ya autorizadas. El modo se persiste en `lotes_productivos.modo` y se cambia con `PATCH` (panel) o `PUT` (Pi) `/api/v1/lotes/{id}/modo`.
+- **Actuador único**: la Pi ENTRADA es la única actuadora. Hace pull de `/consigna-propuesta` y confirma con `/consigna/ack`. No existe `CONTROL_ACTUADOR` ni despacho desde el backend.
+- **PLC del horno**: el backend no abre conexiones Modbus ni escribe ningún PLC. La Pi ENTRADA es la única escritora del PLC real, con su propio `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`).
+- **Estado del horno**: `GET /api/v1/horno` es una proyección de solo lectura de `metricas_horno` (último sample del lote abierto) + lote + alertas. Estados: `SIN_LOTE`, `SIN_TELEMETRIA`, `SIN_DATOS`, `ACTIVO` y `DESACTUALIZADO` (>30 s). Sin telemetría los campos van `null`. No hay horno en memoria ni endpoint de actualización de temperatura.
+- **Alertas de calidad del lote**: el loop MPC compara los % de crudos/quemados de la ventana (`ventana_evaluacion_segundos`) contra `umbral_aceptacion_crudo`/`umbral_aceptacion_quemado` (default 5.0). Al superarlos emite `PORCENTAJE_CRUDOS_ALTO`/`PORCENTAJE_QUEMADOS_ALTO` con severidad `WARNING`, una sola vez por condición continua y lote; se rearma cuando el porcentaje se normaliza. Son alertas de lote (`horno_id` vacío), no de horno.
+- **Alertas de temperatura y telemetría**: en ADAPTANDO el loop MPC promedia las últimas 3 muestras de T1 y emite `TEMPERATURA_HORNO` (WARNING) si se aleja del objetivo de receta más allá de `tolerancia_temp_c` (default 2 °C). Un worker en `ControlHandler` (`StartTelemetriaMonitor`, `TELEMETRIA_MONITOR_INTERVALO` default 15 s) alerta `TELEMETRIA_DESACTUALIZADA` cuando el lote abierto lleva más de `TELEMETRIA_DESACTUALIZADA_SEGUNDOS` (default 30 s) sin muestra y evalúa la misma regla de temperatura para lotes `MANUAL`. Todas usan latch por lote/tipo, quedan `ACTIVA` hasta el ACK y no tienen auto-resolve.
+- **Override manual encolado**: `POST /api/v1/horno/consigna` exige `loteId` de un lote abierto en modo `MANUAL`; `sectorId` es opcional y debe coincidir. Deja una decisión ya aprobada con `muestras=0`; la Pi la obtiene por `consigna-propuesta` con `manual_override=true` y la aplica sin el clamp de Δ por ciclo. La consigna queda `estado=PENDIENTE`/`exitosa=true` (encolada); el ack de la Pi la cierra como `APLICADA`, y un fallo de encolado deja `estado=RECHAZADA`/`exitosa=false` con `motivoError`.
+- **SSE de control**: el loop emite `control.propuesta` con `autorizada` (true en AUTOMATICO, false en SUPERVISION hasta la aprobación). La `Propuesta` serializa `temp1`, `velocidad`, `z` y `prediccion`.
+- **Predictor sidecar**: cliente HTTP con timeout de 2s; si el sidecar falla, el optimizador no propone y la decisión se audita como `skipped`. Los artefactos entrenados son JSON (`save_raw(raw_format="json")`) por producto en `models_xgb/`.
+- **Aprobación y ACK**: en SUPERVISION la aprobación se persiste en `decisiones_control.aprobada_por`; el ACK de la Pi marca `aplicado_por` y los setpoints efectivamente aplicados.
 
 ## Variables de entorno
 
+> Detalle, defaults y despliegue en [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md) §3.
+
 | Variable | Descripción |
 |---|---|
-| `DATABASE_URL` | Conexión a PostgreSQL (Aiven o Docker local) |
+| `DATABASE_URL` | Conexión a PostgreSQL (Supabase PostgreSQL 16 o Docker local) |
+| `FRONTEND_ORIGINS` | Orígenes permitidos por CORS para el panel, separados por coma (default `http://localhost:3000,http://127.0.0.1:3000`) |
 | `JWT_SECRET` | Clave de firma del JWT. Mínimo 32 chars. |
 | `GOOGLE_CLIENT_ID` | Client ID de Google Cloud Console |
-| `API_KEY_SECRET` | Clave para Raspberry Pi (`X-API-Key` header) |
+| `LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS` | Inactividad mínima (segundos) para aceptar un cierre de lote (default 0 = no enforce) |
 | `PORT` | Puerto HTTP (default 8080) |
 | `DISPOSITIVO_REAPER_INTERVAL` | Intervalo del reaper (default 5s) |
-| `DISPOSITIVO_OFFLINE_THRESHOLD` | Umbral de inactividad (default 25s) |
+| `DISPOSITIVO_OFFLINE_THRESHOLD` | Umbral de inactividad (default 90s) |
+| `TELEMETRIA_MONITOR_INTERVALO` | Cadencia del monitor de telemetría (default 15s) |
+| `TELEMETRIA_DESACTUALIZADA_SEGUNDOS` | Antigüedad máxima de la última muestra (default 30s) |
+| `PREDICTOR_URL` | URL base del sidecar predictor (default `http://localhost:8090`) |
+| `PREDICTOR_AUTH_TOKEN` | Opcional — Bearer para autenticar contra el sidecar |
+| `MPC_CONFIANZA_MIN` | Confianza mínima promedio para proponer (default `0.5`) |
+| `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS` | Timeout de precalentamiento (default `1800`) |
+| `MPC_PREHEAT_POLL_SEGUNDOS` | Cadencia durante precalentamiento (default `15`) |
+| `MPC_PERMITIR_PLACEHOLDER` | Permite AUTOMATICO con placeholder (default `false`) |
+| `NOTIFICACIONES_EMAIL_PROVIDER` | Proveedor de email: `resend` (default) o `gmail`/`gmail_api` |
+| `RESEND_API_KEY` | Opcional — API key de Resend; vacío deshabilita el email |
+| `GMAIL_CLIENT_ID` | Opcional — OAuth Client ID para Gmail API |
+| `GMAIL_CLIENT_SECRET` | Opcional — OAuth Client Secret para Gmail API |
+| `GMAIL_REFRESH_TOKEN` | Opcional — refresh token con scope `gmail.send` |
+| `NOTIFICACIONES_EMAIL_FROM` | Remitente; con Gmail debe ser la cuenta autenticada |
+| `TELEGRAM_BOT_TOKEN` | Opcional — token del bot de Telegram; vacío deshabilita el canal |
+| `NOTIFICACIONES_PANEL_URL` | Opcional — base del panel para enlazar `/alertas` en el mensaje |
+| `NOTIFICACIONES_INTERVALO` | Cadencia del worker de outbox (default `15s`) |
+| `NOTIFICACIONES_MAX_INTENTOS` | Máximo de intentos por notificación (default `5`) |
 | `TEST_DATABASE_URL` | Opcional — activa tests de integración con DB real |

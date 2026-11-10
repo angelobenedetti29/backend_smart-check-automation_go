@@ -1,6 +1,5 @@
-// Package schema embebe el DDL idempotente de la base de datos y lo aplica
-// al arrancar el backend, de modo que los cambios de esquema se propaguen a
-// bases existentes sin recrear volúmenes ni ejecutar ALTERs a mano.
+// Package schema embebe el esquema canónico de instalación limpia y las
+// migraciones incrementales, y los aplica al arrancar el backend.
 package schema
 
 import (
@@ -14,13 +13,23 @@ import (
 //go:embed schema.sql
 var SQL []byte
 
-// Apply ejecuta el schema completo contra la base de datos. schema.sql es
-// idempotente (CREATE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS, seeds con
-// ON CONFLICT DO NOTHING, constraints con guards), por lo que es seguro
-// ejecutarlo en cada arranque del servidor.
+//go:embed legacy_upgrade.sql
+var legacyUpgradeSQL []byte
+
+// Apply ejecuta legacy_upgrade.sql (puente para bases viejas, no-op en bases
+// nuevas), schema.sql (instalación limpia e idempotente) y luego aplica las
+// migraciones pendientes de database/migrations. Es seguro ejecutarlo en cada
+// arranque: schema.sql sólo crea objetos faltantes y Migrate registra las
+// versiones ya aplicadas en schema_migrations.
 func Apply(ctx context.Context, pool *pgxpool.Pool) error {
+	if _, err := pool.Exec(ctx, string(legacyUpgradeSQL)); err != nil {
+		return fmt.Errorf("legacy upgrade failed: %w", err)
+	}
 	if _, err := pool.Exec(ctx, string(SQL)); err != nil {
 		return fmt.Errorf("schema apply failed: %w", err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		return fmt.Errorf("schema migrate failed: %w", err)
 	}
 	return nil
 }

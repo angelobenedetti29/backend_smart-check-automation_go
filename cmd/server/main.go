@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,35 +16,55 @@ import (
 	"github.com/joho/godotenv"
 
 	schema "github.com/angelobenedetti29/smart-check-automation/database"
+	alertaController "github.com/angelobenedetti29/smart-check-automation/internal/controller/alerta"
 	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
 	consignaController "github.com/angelobenedetti29/smart-check-automation/internal/controller/consigna"
+	controlController "github.com/angelobenedetti29/smart-check-automation/internal/controller/control"
+	decisionesController "github.com/angelobenedetti29/smart-check-automation/internal/controller/decisiones_control"
+	deviceTokenController "github.com/angelobenedetti29/smart-check-automation/internal/controller/devicetoken"
 	dispositivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/dispositivo"
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/dualauth"
 	hornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/horno"
-	loteController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote"
-	loteProductivoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_productivo"
-	parametrosProductoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/parametros_producto"
+	loteSectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/lote_sector"
+	metricashornoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/metricashorno"
+	notificacionController "github.com/angelobenedetti29/smart-check-automation/internal/controller/notificacion"
+	oeeController "github.com/angelobenedetti29/smart-check-automation/internal/controller/oee"
+	planificacionController "github.com/angelobenedetti29/smart-check-automation/internal/controller/planificacion"
+	productoController "github.com/angelobenedetti29/smart-check-automation/internal/controller/producto"
+	registroController "github.com/angelobenedetti29/smart-check-automation/internal/controller/registro"
+	reportesController "github.com/angelobenedetti29/smart-check-automation/internal/controller/reportes"
+	sectorController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sector"
 	sseController "github.com/angelobenedetti29/smart-check-automation/internal/controller/sse"
 	userController "github.com/angelobenedetti29/smart-check-automation/internal/controller/user"
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
+	domainnotificacion "github.com/angelobenedetti29/smart-check-automation/internal/domain/notificacion"
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/user"
+	"github.com/angelobenedetti29/smart-check-automation/internal/guard"
 	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
 	googleProvider "github.com/angelobenedetti29/smart-check-automation/internal/provider/google"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/yolo_client"
 	"github.com/angelobenedetti29/smart-check-automation/internal/repository"
 	authService "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 	consignaService "github.com/angelobenedetti29/smart-check-automation/internal/service/consigna"
 	dispositivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/dispositivo"
-	hornoService "github.com/angelobenedetti29/smart-check-automation/internal/service/horno"
-	loteProductivoService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_productivo"
-	parametrosProductoService "github.com/angelobenedetti29/smart-check-automation/internal/service/parametros_producto"
+	loteSectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/lote_sector"
+	notificacionService "github.com/angelobenedetti29/smart-check-automation/internal/service/notificacion"
+	oeeService "github.com/angelobenedetti29/smart-check-automation/internal/service/oee"
+	optimizador "github.com/angelobenedetti29/smart-check-automation/internal/service/optimizador"
+	planificacionService "github.com/angelobenedetti29/smart-check-automation/internal/service/planificacion"
+	"github.com/angelobenedetti29/smart-check-automation/internal/service/predictor"
+	productoService "github.com/angelobenedetti29/smart-check-automation/internal/service/producto"
+	registroService "github.com/angelobenedetti29/smart-check-automation/internal/service/registro"
+	reportesService "github.com/angelobenedetti29/smart-check-automation/internal/service/reportes"
+	sectorService "github.com/angelobenedetti29/smart-check-automation/internal/service/sector"
 	userService "github.com/angelobenedetti29/smart-check-automation/internal/service/user"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
+	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	log.Println("Initializing Smart-Check Automation Backend...")
+	log.Println("Initializing SmartCheck Automation Backend...")
 
 	// 0. Load environment variables from .env file
 	if err := godotenv.Load(); err != nil {
@@ -78,43 +100,108 @@ func main() {
 	log.Println("Schema de base de datos aplicado/verificado correctamente.")
 
 	// 2. Instantiate Infrastructure Adapters (Providers Layer)
-	dbRepo := database.NewPostgresRepository()
-	yolo := yolo_client.NewYOLOClient("http://localhost:8500/yolo/conveyor")
-	ovenController := oven_controller.NewOvenControllerClient("http://localhost:8600/plc/horno")
-
 	// Real PostgreSQL repositories
-	loteCreateRepo := repository.NewPostgresRepository(pgPool)
-	loteGetRepo := repository.NewLoteProductivoPostgresRepository(pgPool)
-	parametrosProductoRepo := repository.NewParametrosProductoPostgresRepository(pgPool)
 	dispositivoRepo := repository.NewPostgresDispositivoRepository(pgPool)
 	consignaRepo := repository.NewConsignaPostgresRepository(pgPool)
 	userRepo := repository.NewUserPostgresRepository(pgPool)
+	deviceAuthRepo := repository.NewDeviceAuthRepository(pgPool)
+	registrationRepo := repository.NewRegistrationRepository(pgPool)
+	productoRepo := repository.NewProductoPostgresRepository(pgPool)
+	sectorRepo := repository.NewSectorPostgresRepository(pgPool)
+	loteSectorRepo := repository.NewLoteSectorPostgresRepository(pgPool)
+	metricasHornoRepo := repository.NewMetricasHornoPostgresRepository(pgPool)
+	decisionesRepo := repository.NewDecisionesControlPostgresRepository(pgPool)
+	alertaRepo := repository.NewAlertaPostgresRepository(pgPool)
+	reportesRepo := repository.NewReportesPostgresRepository(pgPool)
+	planificacionRepo := repository.NewPlanificacionPostgresRepository(pgPool)
+	oeeRepo := repository.NewOEERepository(pgPool)
+	notifRepo := repository.NewNotificacionPostgresRepository(pgPool)
+
+	// Notificaciones: cada canal se habilita sólo si su configuración está
+	// completa. Sin proveedor, el canal queda deshabilitado (nunca fatal).
+	notifEmailFrom := os.Getenv("NOTIFICACIONES_EMAIL_FROM")
+	var enviadorEmail domainnotificacion.EnviadorEmail
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NOTIFICACIONES_EMAIL_PROVIDER"))) {
+	case "gmail", "gmail_api":
+		gmailCliente := notificacionService.NewGmail(
+			os.Getenv("GMAIL_CLIENT_ID"),
+			os.Getenv("GMAIL_CLIENT_SECRET"),
+			os.Getenv("GMAIL_REFRESH_TOKEN"),
+			notifEmailFrom,
+		)
+		if gmailCliente != nil {
+			enviadorEmail = gmailCliente
+		} else {
+			log.Println("[NOTIFICACIONES] Canal EMAIL deshabilitado: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN o NOTIFICACIONES_EMAIL_FROM vacíos")
+		}
+	default:
+		resendCliente := notificacionService.NewResend(os.Getenv("RESEND_API_KEY"), notifEmailFrom)
+		if resendCliente != nil {
+			enviadorEmail = resendCliente
+		} else {
+			log.Println("[NOTIFICACIONES] Canal EMAIL deshabilitado: RESEND_API_KEY o NOTIFICACIONES_EMAIL_FROM vacíos")
+		}
+	}
+	telegramCliente := notificacionService.NewTelegram(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	var enviadorTelegram domainnotificacion.EnviadorTelegram
+	if telegramCliente != nil {
+		enviadorTelegram = telegramCliente
+	} else {
+		log.Println("[NOTIFICACIONES] Canal TELEGRAM deshabilitado: TELEGRAM_BOT_TOKEN vacío")
+	}
+	notifSvc := notificacionService.NewService(notifRepo, enviadorEmail, enviadorTelegram,
+		os.Getenv("NOTIFICACIONES_PANEL_URL"), notifEmailFrom)
+	// Encolar sólo después de un INSERT real de alerta (la deduplicación no encola).
+	alertaRepo.SetEncolador(notifSvc)
+	notifSvc.SetAlertas(alertaRepo)
 
 	// Auth provider (Google)
 	googleOAuthProvider := googleProvider.NewOAuthProvider(googleClientID)
 
 	// SSE broker for real-time event streaming
-	sseBroker := sse.NewBroker()
-
 	// Dedicated SSE broker for dispositivo telemetry events (no cross-noise with lotes)
 	dispositivoSSEBroker := sse.NewBroker()
 
 	// Dedicated SSE broker for horno/consigna events (no cross-noise con lotes/dispositivos)
 	hornoSSEBroker := sse.NewBroker()
 
+	// Dedicated SSE broker for the sector/lotes stream (GET /api/v1/lotes/events).
+	loteSectorSSEBroker := sse.NewBroker()
+
+	// Dedicated SSE broker for control.propuesta events emitted by the MPC
+	// loop. Aislado del broker de horno/consigna para que el dashboard pueda
+	// suscribirse sólo a lo que le interesa.
+	controlSSEBroker := sse.NewBroker()
+
 	// 3. Instantiate Business Layer
-	hornoSvc := hornoService.NewHornoService(dbRepo, dbRepo, yolo)
-	loteProdSvc := loteProductivoService.NewLoteProductivoService(loteGetRepo)
-	parametrosProductoSvc := parametrosProductoService.NewParametrosProductoService(parametrosProductoRepo)
 	dispositivoStore := database.NewMemoryDispositivoStateStore()
-	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker)
-	consignaSvc := consignaService.NewConsignaService(consignaRepo, dbRepo, parametrosProductoRepo, ovenController, hornoSSEBroker, dbRepo)
+	renamePushTimeout := getEnvDuration("DISPOSITIVO_RENAME_PUSH_TIMEOUT", 10*time.Second)
+	dispositivoSvc := dispositivoService.NewDispositivoService(dispositivoRepo, dispositivoStore, dispositivoSSEBroker, renamePushTimeout)
+	dispositivoSvc.SetAlertas(alertaRepo)
+	// Autenticación de nodos: Bearer <secret> resuelto por hash contra dispositivos activos.
+	deviceVerifier := &deviceauth.Verifier{Store: deviceAuthRepo}
+	registroSvc := registroService.NewService(registrationRepo)
+	consignaSvc := consignaService.NewConsignaService(consignaRepo, productoRepo, hornoSSEBroker,
+		decisionesRepo, loteSectorRepo, metricasHornoRepo)
 
 	authSvc := authService.NewAuthService(googleOAuthProvider, userRepo, jwtSecret)
 	userSvc := userService.NewService(userRepo)
+	reportesSvc := reportesService.NewService(reportesRepo)
+	oeeSvc := oeeService.NewService(oeeRepo)
+
+	// Catálogo de productos y ciclo de lote por sector (contrato lotes-sector).
+	productoSvc := productoService.NewService(productoRepo)
+	planificacionSvc := planificacionService.NewService(planificacionRepo)
+	// CRUD de sectores (alta/edición/baja) para el panel.
+	sectorSvc := sectorService.NewService(sectorRepo)
+	// LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS en segundos float; 0 = no enforce.
+	loteCierreMinInactividad := getEnvFloatSeconds("LOTE_CIERRE_MIN_INACTIVIDAD_SEGUNDOS", 0)
+	loteSectorSvc := loteSectorService.NewService(loteSectorRepo, sectorRepo, productoRepo, loteSectorSSEBroker, loteCierreMinInactividad)
 
 	reaperInterval := getEnvDuration("DISPOSITIVO_REAPER_INTERVAL", 5*time.Second)
-	offlineThreshold := getEnvDuration("DISPOSITIVO_OFFLINE_THRESHOLD", 25*time.Second)
+	offlineThreshold := getEnvDuration("DISPOSITIVO_OFFLINE_THRESHOLD", 90*time.Second)
+	telemetriaIntervalo := getEnvDuration("TELEMETRIA_MONITOR_INTERVALO", 15*time.Second)
+	telemetriaUmbral := getEnvDuration("TELEMETRIA_DESACTUALIZADA_SEGUNDOS", 30*time.Second)
 
 	// Preload device catalog + latest metric into the in-memory state store
 	if dispositivos, err := dispositivoRepo.GetDispositivosConUltimaMetrica(context.Background()); err != nil {
@@ -124,19 +211,78 @@ func main() {
 	}
 
 	// 4. Instantiate Presentation HTTP Handlers
-	hornoHandler := hornoController.NewHornoHandler(hornoSvc, dbRepo)
-	loteHandler := loteController.NewLoteHandler(loteCreateRepo, sseBroker, loteGetRepo, consignaSvc)
-	loteProductivoHandler := loteProductivoController.NewLoteProductivoHandler(loteProdSvc)
-	parametrosProductoHandler := parametrosProductoController.NewParametrosProductoHandler(parametrosProductoSvc)
-	sseHandler := sseController.NewSSEHandler(sseBroker)
-	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc)
+	hornoHandler := hornoController.NewHornoHandler(alertaRepo, sectorRepo, loteSectorRepo, metricasHornoRepo)
+	loteSectorSSEHandler := sseController.NewSSEHandler(loteSectorSSEBroker)
+	dispositivoHandler := dispositivoController.NewDispositivoHandler(dispositivoSvc, dispositivoRepo)
+	registroHandler := registroController.NewHandler(registroSvc)
 	dispositivoSSEHandler := sseController.NewSSEHandler(dispositivoSSEBroker)
 	consignaHandler := consignaController.NewConsignaHandler(consignaSvc)
 	hornoSSEHandler := sseController.NewSSEHandler(hornoSSEBroker)
+	productoHandler := productoController.NewProductoHandler(productoSvc)
+	planificacionHandler := planificacionController.NewHandler(planificacionSvc)
+	loteSectorHandler := loteSectorController.NewLoteSectorHandler(loteSectorSvc)
+	metricasHornoHandler := metricashornoController.NewMetricasHornoHandler(metricasHornoRepo, loteSectorSvc)
+	alertaCalidadHandler := alertaController.NewAlertaCalidadHandler(alertaRepo, loteSectorSvc)
+	sectorHandler := sectorController.NewSectorHandler(sectorSvc)
+	notificacionHandler := notificacionController.NewHandler(notifSvc)
+
+	// Sidecar predictor XGBoost (SCA-400). PREDICTOR_URL default localhost:8090;
+	// PREDICTOR_AUTH_TOKEN (opcional, F-B7) agrega Authorization Bearer en
+	// /predict y /health. Si el sidecar no responde, el optimizador entra en
+	// modo degradado (error → decisión skipped en el audit del MPC).
+	predictorURL := os.Getenv("PREDICTOR_URL")
+	if predictorURL == "" {
+		predictorURL = "http://localhost:8090"
+	}
+	predictorToken := os.Getenv("PREDICTOR_AUTH_TOKEN")
+	var predictorCliente *predictor.ClientePredictor
+	if predictorToken != "" {
+		predictorCliente = predictor.NewClientePredictorWithAuth(predictorURL, predictorToken)
+	} else {
+		predictorCliente = predictor.NewClientePredictor(predictorURL)
+	}
+	optimizer := optimizador.NewOptimizer(predictorCliente)
+
+	// rootCtx es el ciclo de vida de las goroutines de fondo (reaper, reanudación
+	// del control tras un reinicio). Se crea antes del wiring para pasárselo.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	// Registry de loops activos por lote y handlers de control.
+	loopRegistry := controlController.NewLoopRegistry()
+	controlDeps := controlController.ControlDeps{
+		LoteLookup:     loteSectorSvc,
+		ProductoRepo:   productoRepo,
+		Optimizer:      optimizer,
+		LoopCancels:    loopRegistry,
+		MetricasRepo:   metricasHornoRepo,
+		EventosRepo:    loteSectorRepo,
+		ConfianzaRepo:  loteSectorRepo,
+		DecisionesRepo: decisionesRepo,
+		Broker:         controlSSEBroker,
+		LoteRepo:       loteSectorRepo,
+		DeviceSector:   loteSectorSvc,
+		Modelos:        predictorCliente,
+		Alertas:        alertaRepo,
+		ConsignaRepo:   consignaRepo,
+	}
+	controlHandler := controlController.NewControlHandler(controlDeps)
+	// Al abrir un lote en modo no manual, arrancar su loop de control.
+	loteSectorHandler.SetOnAbierto(controlHandler.EnsureLoopForLote)
+	// Reanudar los lotes que quedaron ABIERTO si el backend se reinició.
+	go controlHandler.ResumeLotesAbiertos(rootCtx)
+	// Vigilar telemetría desactualizada y T1 de lotes MANUAL.
+	go controlHandler.StartTelemetriaMonitor(rootCtx, telemetriaIntervalo, telemetriaUmbral)
+	decisionesHandler := decisionesController.NewDecisionesHandler(decisionesRepo)
+	controlSSEHandler := controlController.NewControlSSEHandler(controlSSEBroker)
 
 	authHandler := authController.NewAuthHandler(authSvc)
 	userHandler := userController.NewUserHandler(userSvc)
 	jwtSecretBytes := []byte(jwtSecret)
+	managementLimiter := guard.NewLimiter(0.5, 10)
+	management := func(next http.HandlerFunc) http.HandlerFunc {
+		return authController.RateLimitByUser(userRepo, managementLimiter, next)
+	}
 
 	// 5. Setup routes
 	mux := http.NewServeMux()
@@ -151,40 +297,232 @@ func main() {
 	mux.HandleFunc("/api/v1/auth/logout", loggingMiddleware(authHandler.Logout))
 
 	// Rutas de Administración de Usuarios (Solo Administrador)
-	mux.HandleFunc("/api/v1/admin/usuarios", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleAdmin}, userHandler.HandleUsers))))
-	mux.HandleFunc("/api/v1/admin/usuarios/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleAdmin}, userHandler.HandleUserByID))))
+	mux.HandleFunc("/api/v1/admin/usuarios", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleAdmin}, management(userHandler.HandleUsers)))))
+	mux.HandleFunc("/api/v1/admin/usuarios/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleAdmin}, management(userHandler.HandleUserByID)))))
+
+	// Configuración admin de notificaciones (sólo Administrador).
+	notifAdmin := func(next http.HandlerFunc) http.HandlerFunc {
+		return loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes,
+			authController.RequireRoleFromDB(userRepo, []string{user.RoleAdmin}, management(next))))
+	}
+	mux.HandleFunc("/api/v1/admin/notificaciones", notifAdmin(notificacionHandler.HandleColeccion))
+	mux.HandleFunc("/api/v1/admin/notificaciones/test", notifAdmin(notificacionHandler.HandleTest))
+	mux.HandleFunc("/api/v1/admin/notificaciones/", notifAdmin(notificacionHandler.HandleUsuario))
 
 	// Rutas del dominio industrial
 	mux.HandleFunc("/api/v1/horno", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoHandler.GetHornoStatus)))
-	mux.HandleFunc("/api/v1/horno/temperatura", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRole([]string{user.RoleSupervisor, user.RoleAdmin}, hornoHandler.UpdateTemperature))))
-	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(loteHandler.HandleCreateLote))
-	mux.HandleFunc("/api/v1/lotes/inicio", loggingMiddleware(loteHandler.HandleIniciarLote))
-	mux.HandleFunc("/api/v1/lotes-productivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteProductivoHandler.GetAll)))
-	parametrosRoleAware := func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost || r.Method == http.MethodPut {
-			authController.RequireRole([]string{user.RoleSupervisor, user.RoleAdmin}, parametrosProductoHandler.Handle)(w, r)
+	mux.HandleFunc("/api/v1/lotes", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, loteSectorHandler.HandleHistorial)(w, r)
+		default:
+			// POST /api/v1/lotes (alta legada de lote ya finalizado) fue removido:
+			// el ciclo de lote ahora se inicia con POST /api/v1/lotes/inicio.
+			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		}
+	}))
+	mux.HandleFunc("/api/v1/lotes/inicio", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// Reemplaza al inicio legado que disparaba consigna (SCA-142): ahora
+		// abre/persiste el lote abierto del sector y NO dispara consigna.
+		loteSectorHandler.HandleInicio(w, r)
+	}))
+	mux.HandleFunc("/api/v1/lotes/abierto", loggingMiddleware(dualauth.DualAuth(deviceVerifier, jwtSecretBytes, loteSectorHandler.HandleAbierto)))
+	mux.HandleFunc("/api/v1/lotes/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, loteSectorSSEHandler.HandleSSE)))
+	mux.HandleFunc("/api/v1/lotes/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// El subtree `/api/v1/lotes/` mezcla endpoints device-only (Bearer
+		// del nodo, autenticados por el `deviceTokenController.BeforeMux`
+		// global) y endpoints del panel (JWT cookie). Antes todos pasaban
+		// sin JWT y los handlers que validaban rol interno (control/*
+		// decisiones) devolvían 403 permanente. Ahora aplicamos el
+		// middleware JWT sólo a las rutas que lo requieren.
+		jwtWrap := func(h http.HandlerFunc) http.HandlerFunc {
+			return authController.JWTMiddleware(jwtSecretBytes, h)
+		}
+		switch {
+		// --- device-only (Bearer, ya cubierto por BeforeMux) ---
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/eventos"):
+			loteSectorHandler.HandleEventos(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/cierre"):
+			loteSectorHandler.HandleCierre(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
+			metricasHornoHandler.Handle(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/alertas-calidad"):
+			alertaCalidadHandler.Handle(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/metricas-horno"):
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, metricasHornoHandler.HandleUltimas)(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/consigna/ack"):
+			controlHandler.HandleConsignaAck()(w, r)
+
+		// --- panel (JWT cookie) ---
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/start"):
+			jwtWrap(controlHandler.HandleControlStart())(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/control/stop"):
+			jwtWrap(controlHandler.HandleControlStop())(w, r)
+		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/control/parametros"):
+			jwtWrap(controlHandler.HandleTuning)(w, r)
+		case (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.HasSuffix(r.URL.Path, "/modo"):
+			// PATCH = panel (cookie JWT), PUT = Pi (Bearer). DualAuth elige la
+			// credencial correcta y el handler valida rol o sector según sea.
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, controlHandler.HandleModeChange)(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/consigna-propuesta"):
+			// Bearer de la Pi o cookie del panel (contrato documentado del handler).
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, controlHandler.HandleConsignaPropuesta)(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/events"):
+			jwtWrap(controlSSEHandler.HandleControlEvents)(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/control/estado"):
+			jwtWrap(controlHandler.HandleControlEstado)(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/confianza-clases"):
+			jwtWrap(controlHandler.HandleConfianzaClases)(w, r)
+		case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/aplicar-consigna") || strings.HasSuffix(r.URL.Path, "/aprobar-consigna")):
+			// Aprueba el operario (cookie) o la propia Pi (Bearer).
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, controlHandler.HandleAplicarConsigna())(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/decisiones"):
+			jwtWrap(decisionesHandler.Handle)(w, r)
+
+		default:
+			response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
+		}
+	}))
+	// Catálogo de productos: GET mantiene el auth dual (Bearer de dispositivo o
+	// cookie JWT) para que la Raspberry resuelva el catálogo; POST/PUT/DELETE son
+	// escrituras del panel con JWT y rol Supervisor/Administrador.
+	productoWrite := authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(productoHandler.Handle)))
+	productoRoleAware := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			dualauth.DualAuth(deviceVerifier, jwtSecretBytes, productoHandler.Handle)(w, r)
 			return
 		}
-		parametrosProductoHandler.Handle(w, r)
+		productoWrite(w, r)
 	}
-	mux.HandleFunc("/api/v1/parametros-producto", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, parametrosRoleAware)))
-	mux.HandleFunc("/api/v1/lotes-productivos/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, sseHandler.HandleSSE)))
-	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(dispositivoHandler.HandlePing))
-	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, dispositivoHandler.Handle)))
+	mux.HandleFunc("/api/v1/productos", loggingMiddleware(productoRoleAware))
+	mux.HandleFunc("/api/v1/productos/", loggingMiddleware(productoRoleAware))
+	// Importación CSV de planificación (fase 1 OEE): sólo Supervisor/Admin.
+	planificacionImport := func(h http.HandlerFunc) http.HandlerFunc {
+		return loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes,
+			authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(h))))
+	}
+	mux.HandleFunc("/api/v1/planificacion/plan/import", planificacionImport(planificacionHandler.HandlePlanImport))
+	mux.HandleFunc("/api/v1/planificacion/paradas/import", planificacionImport(planificacionHandler.HandleParadasImport))
+	// Listado y borrado de lo importado: mismas rutas exactas de arriba ganan
+	// para POST /import; el subtree atiende GET y DELETE.
+	mux.HandleFunc("/api/v1/planificacion/", planificacionImport(planificacionHandler.HandleSubtree))
+	mux.HandleFunc("/api/v1/dispositivos/sector", loggingMiddleware(loteSectorHandler.HandleSector))
+	// Sectores: GET para cualquier rol autenticado; alta/edición/baja para
+	// Supervisor/Administrador, con rate limit por usuario (management) aplicado
+	// después del JWT que valida la cookie.
+	sectorRoleAware := func(next http.HandlerFunc) http.HandlerFunc {
+		write := management(authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, next))
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				authController.JWTMiddleware(jwtSecretBytes, next)(w, r)
+				return
+			}
+			authController.JWTMiddleware(jwtSecretBytes, write)(w, r)
+		}
+	}
+	mux.HandleFunc("/api/v1/sectores", loggingMiddleware(sectorRoleAware(sectorHandler.HandleSectores)))
+	mux.HandleFunc("/api/v1/sectores/", loggingMiddleware(sectorRoleAware(sectorHandler.HandleSectorByID)))
+	mux.HandleFunc("/api/v1/dispositivos/ping", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		dispositivoHandler.HandlePing(w, r)
+	}))
+	mux.HandleFunc("/api/v1/dispositivos", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, management(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+			return
+		}
+		// PUT y DELETE modifican el catálogo: sólo Supervisor/Administrador.
+		if r.Method == http.MethodPut || r.Method == http.MethodDelete {
+			authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, dispositivoHandler.Handle)(w, r)
+			return
+		}
+		dispositivoHandler.Handle(w, r)
+	}))))
+	// Rename emitido por la propia Raspberry con su secret Bearer; sin JWT.
+	mux.HandleFunc("/api/v1/dispositivos/nombre", loggingMiddleware(dispositivoHandler.HandleRename))
+	// Reanuncio de la rename_url emitido por la propia Raspberry con su secret
+	// Bearer; sin JWT, igual que /nombre.
+	mux.HandleFunc("/api/v1/dispositivos/rename-url", loggingMiddleware(dispositivoHandler.HandleRenameURL))
+	// Rename emitido por el panel del operador (Supervisor/Admin) sobre un
+	// dispositivo del catálogo, identificado por {id} en el path. La Raspberry
+	// sigue usando /api/v1/dispositivos/nombre (sin id) porque solo conoce su
+	// principal autenticado.
+	mux.HandleFunc("/api/v1/dispositivos/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/nombre") && r.Method == http.MethodPut {
+			dispositivoHandler.HandleRenameByID(w, r)
+			return
+		}
+		response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
+	})))))
+
+	// Registro de dispositivos bajo /api/v1, alineado con el resto de la API. El
+	// cliente Raspberry debe apuntar api.registration_requests_endpoint a
+	// /api/v1/registration-requests.
+	// POST (alta del nodo) y GET por id (pickup) son públicos y JSON plano; GET
+	// del listado y las acciones approve/reject son del panel (JWT Supervisor/Admin).
+	mux.HandleFunc("/api/v1/registration-requests", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			registroHandler.HandleCreate(w, r)
+		case http.MethodGet:
+			authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(registroHandler.HandleList)))(w, r)
+		default:
+			response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		}
+	}))
+	mux.HandleFunc("/api/v1/registration-requests/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && !strings.HasSuffix(r.URL.Path, "/approve") && !strings.HasSuffix(r.URL.Path, "/reject"):
+			registroHandler.HandlePickup(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/approve"):
+			authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(registroHandler.HandleApprove)))(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reject"):
+			authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, management(registroHandler.HandleReject)))(w, r)
+		default:
+			response.Error(w, http.StatusNotFound, "Recurso no encontrado", nil)
+		}
+	}))
 	mux.HandleFunc("/api/v1/dispositivos/metricas", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, dispositivoHandler.HandleMetricas)))
 	mux.HandleFunc("/api/v1/dispositivos/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, dispositivoSSEHandler.HandleSSE)))
-	mux.HandleFunc("/api/v1/horno/consigna", loggingMiddleware(consignaHandler.DispatchManual))
-	mux.HandleFunc("/api/v1/horno/consigna/historial", loggingMiddleware(consignaHandler.GetHistorial))
+	mux.HandleFunc("/api/v1/horno/consigna", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleOperario, user.RoleSupervisor, user.RoleAdmin}, management(consignaHandler.DispatchManual)))))
+	mux.HandleFunc("/api/v1/horno/consigna/historial", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, consignaHandler.GetHistorial)))
 	mux.HandleFunc("/api/v1/horno/events", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, hornoSSEHandler.HandleSSE)))
 
-	// 6. Wrap mux with CORS middleware
-	handler := corsMiddleware(mux)
+	// Alertas: listado para cualquier rol autenticado; el ACK es del panel
+	// (Supervisor/Administrador).
+	mux.HandleFunc("/api/v1/alertas", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, alertaController.HandleListar(alertaController.AlertaDeps{Repo: alertaRepo}))))
+	mux.HandleFunc("/api/v1/alertas/", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, authController.RequireRoleFromDB(userRepo, []string{user.RoleSupervisor, user.RoleAdmin}, alertaController.HandleAck(alertaController.AlertaDeps{Repo: alertaRepo})))))
+
+	// Reportes: resumen agregado y detalle paginado del período para cualquier
+	// rol autenticado.
+	mux.HandleFunc("/api/v1/reportes/resumen", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleResumen(reportesController.ReportesDeps{Service: reportesSvc}))))
+	mux.HandleFunc("/api/v1/reportes/lotes", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleLotes(reportesController.ReportesDeps{Service: reportesSvc}))))
+	mux.HandleFunc("/api/v1/reportes/trazabilidad", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleTrazabilidad(reportesController.ReportesDeps{Service: reportesSvc}))))
+	mux.HandleFunc("/api/v1/reportes/alertas", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, reportesController.HandleAlertas(reportesController.ReportesDeps{Service: reportesSvc}))))
+	mux.HandleFunc("/api/v1/reportes/oee", loggingMiddleware(authController.JWTMiddleware(jwtSecretBytes, oeeController.HandleOEE(oeeController.OEEDeps{Service: oeeSvc}))))
+
+	// 6. Autenticación de dispositivo antes del ServeMux, luego cuotas por peer/usuario.
+	limiter := guard.NewLimiter(0.5, 10)     // 30/minute, burst 10 para endpoints públicos de registro
+	deviceLimiter := guard.NewLimiter(2, 30) // 120/minute, burst 30 tras autenticar por UUID
+	handler := deviceTokenController.BeforeMux(deviceVerifier, deviceLimiter, corsMiddleware(mux))
+	handler = limiter.Middleware(func(r *http.Request) string {
+		// Endpoints públicos del registro: alta del nodo (POST) y pickup (GET).
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/registration-requests" {
+			return "registration-public"
+		}
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/registration-requests/") &&
+			!strings.HasSuffix(r.URL.Path, "/approve") && !strings.HasSuffix(r.URL.Path, "/reject") {
+			return "registration-public"
+		}
+		return ""
+	}, handler)
 
 	// 7. Launch reaper goroutine: detects offline devices and emits SSE events
-	rootCtx, rootCancel := context.WithCancel(context.Background())
-	defer rootCancel()
-
 	go dispositivoSvc.StartReaper(rootCtx, reaperInterval, offlineThreshold)
+
+	// Worker de notificaciones: reintenta el outbox mientras rootCtx viva.
+	notifInterval := getEnvDuration("NOTIFICACIONES_INTERVALO", 15*time.Second)
+	notifMaxIntentos := getEnvInt("NOTIFICACIONES_MAX_INTENTOS", 5)
+	go notifSvc.StartWorker(rootCtx, notifInterval, notifMaxIntentos)
 
 	// 8. Launch server with graceful shutdown
 	port := os.Getenv("PORT")
@@ -201,8 +539,10 @@ func main() {
 		// clientes legítimos y deja margen frente a ReadTimeout (15s).
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// SSE handlers intentionally hold the response open; a write deadline
+		// here would disconnect healthy dashboard subscriptions every 15s.
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	go func() {
@@ -225,8 +565,12 @@ func main() {
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("Error durante graceful shutdown: %v", err)
+		log.Printf("Error durante graceful shutdown: %v", err)
 	}
+
+	// Recién ahora, con el HTTP cerrado (no entran nuevos /control/start),
+	// cancelamos los loops de control activos.
+	loopRegistry.StopAll()
 
 	log.Println("Servidor apagado exitosamente.")
 }
@@ -237,18 +581,41 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Smart-Check Automation Backend running.\n"))
+	_, _ = w.Write([]byte("SmartCheck Automation Backend running.\n"))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		allowed := false
+		origins := os.Getenv("FRONTEND_ORIGINS")
+		if origins == "" {
+			origins = "http://localhost:3000,http://127.0.0.1:3000"
+		}
+		for _, candidate := range strings.Split(origins, ",") {
+			if strings.TrimSpace(candidate) != "" && strings.TrimSpace(candidate) == origin {
+				allowed = true
+			}
+		}
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-API-Key")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == http.MethodOptions {
+			if origin != "" && !allowed {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if origin != "" && !allowed && isManagementWrite(r) {
+			response.Error(w, http.StatusForbidden, "Origen no permitido", map[string]string{"code": "origin_not_allowed"})
 			return
 		}
 
@@ -256,13 +623,51 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func isManagementWrite(r *http.Request) bool {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch && r.Method != http.MethodDelete {
+		return false
+	}
+	// Endpoints originados por nodos: no tienen Origin de navegador, así que no
+	// aplican el allowlist de orígenes (su auth es el Bearer secret).
+	if r.URL.Path == "/api/v1/dispositivos/ping" || r.URL.Path == "/api/v1/lotes/inicio" || r.URL.Path == "/api/v1/registration-requests" {
+		return false
+	}
+	// Reporte de eventos y cierre de lote: también device-only.
+	if strings.HasPrefix(r.URL.Path, "/api/v1/lotes/") &&
+		(strings.HasSuffix(r.URL.Path, "/eventos") || strings.HasSuffix(r.URL.Path, "/cierre")) {
+		return false
+	}
+	// Aprobar/rechazar una solicitud son escrituras del panel (cookie JWT).
+	if strings.HasSuffix(r.URL.Path, "/approve") || strings.HasSuffix(r.URL.Path, "/reject") {
+		return strings.HasPrefix(r.URL.Path, "/api/v1/registration-requests/")
+	}
+	return strings.HasPrefix(r.URL.Path, "/api/v1/admin/") || strings.HasPrefix(r.URL.Path, "/api/v1/dispositivos") || strings.HasPrefix(r.URL.Path, "/api/v1/productos") || strings.HasPrefix(r.URL.Path, "/api/v1/sectores") || strings.HasPrefix(r.URL.Path, "/api/v1/horno/") || strings.HasPrefix(r.URL.Path, "/api/v1/alertas")
+}
+
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Printf("[HTTP] %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		path := redactPath(r.URL.Path)
+		log.Printf("[HTTP] %s %s from %s", r.Method, path, r.RemoteAddr)
 		next(w, r)
-		log.Printf("[HTTP] %s %s finished in %v", r.Method, r.URL.Path, time.Since(start))
+		log.Printf("[HTTP] %s %s finished in %v", r.Method, path, time.Since(start))
 	}
+}
+
+// redactPath oculta el request_id de las rutas de registro: es una credencial de
+// alta capacidad y no debe quedar en los logs de acceso.
+func redactPath(path string) string {
+	const prefix = "/api/v1/registration-requests/"
+	if !strings.HasPrefix(path, prefix) {
+		return path
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	for _, suffix := range []string{"/approve", "/reject"} {
+		if strings.HasSuffix(rest, suffix) {
+			return prefix + "{id}" + suffix
+		}
+	}
+	return prefix + "{id}"
 }
 
 // getEnvDuration lee una variable de entorno en formato de duración Go,
@@ -278,6 +683,37 @@ func getEnvDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// getEnvFloatSeconds lee una variable de entorno en segundos (float) y la
+// convierte a time.Duration. Devuelve el default si no está configurada, es
+// inválida o es negativa.
+func getEnvFloatSeconds(key string, defSeconds float64) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return time.Duration(defSeconds * float64(time.Second))
+	}
+	secs, err := strconv.ParseFloat(raw, 64)
+	if err != nil || secs < 0 {
+		log.Printf("Advertencia: valor inválido para %s ('%s'), usando default %gs", key, raw, defSeconds)
+		return time.Duration(defSeconds * float64(time.Second))
+	}
+	return time.Duration(secs * float64(time.Second))
+}
+
+// getEnvInt lee una variable de entorno entera positiva, devolviendo el default
+// si no está configurada o es inválida.
+func getEnvInt(key string, def int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		log.Printf("Advertencia: valor inválido para %s ('%s'), usando default %d", key, raw, def)
+		return def
+	}
+	return v
 }
 
 func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {

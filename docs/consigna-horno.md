@@ -1,239 +1,314 @@
-# Consigna térmica al horno — SCA-142 (automática) y SCA-320 (manual)
+# Consigna térmica al horno — SCA-320 (manual) y SCA-400 (MPC)
 
-## 1. Qué resuelven estas dos historias
+Este documento describe el diseño **actual** de la consigna del horno. La Pi
+ENTRADA es la única actuadora: hace pull por lote y escribe el PLC real. El
+backend no simula ni aplica consignas.
 
-| | SCA-142 | SCA-320 |
-|---|---|---|
-| Quién dispara | La IA del nodo de entrada, al identificar la variedad de producto | Un operario/supervisor, a mano, desde el panel web |
-| Endpoint | `POST /api/v1/lotes/inicio` | `POST /api/v1/horno/consigna` |
-| Valor a despachar | `temp_setpoint` / `velocidad_cinta_setpoint` precargados para el producto | Lo que el operario ingresa en el formulario |
-| Validación | El producto debe tener setpoints cargados | El valor ingresado debe caer dentro de `[temp_min, temp_max]` / `[velocidad_cinta_min, velocidad_cinta_max]` del producto |
-| Auth | `X-API-Key` (mismo esquema que `POST /api/v1/lotes`, origen Raspberry Pi) | Sin auth por ahora (mismo criterio que `parametros_producto`, pendiente Google OAuth) |
-| `origen` en la auditoría | `AUTOMATICO` | `MANUAL` (+ `usuario`, best-effort) |
+> **Estado actual (SCA-320 + SCA-400).**
+> - La consigna manual está disponible en `POST /api/v1/horno/consigna`
+>   (JWT, Operario/Supervisor/Admin) y queda **encolada** para la Pi; no se
+>   aplica en el backend.
+> - El control predictivo (MPC) de SCA-400 corre por lote en modos
+>   `SUPERVISION` y `AUTOMATICO`; en `MANUAL` no hay loop.
+> - `POST /api/v1/lotes/inicio` **ya no dispara la consigna automática de
+>   SCA-142**. Sólo abre/persiste el lote y, si el modo no es `MANUAL`, arranca
+>   el loop del MPC.
+> - La Pi ENTRADA es la única que escribe el PLC real, con su propio
+>   `control.sensores`/`actuadores` (`modbus_tcp`/`modbus_rtu`). El backend no
+>   abre conexiones Modbus ni mantiene un horno en memoria.
+> - La Raspberry aplica la consigna haciendo pull de
+>   `GET /api/v1/lotes/{id}/consigna-propuesta` y confirma con
+>   `POST /api/v1/lotes/{id}/consigna/ack`.
+> - El predictor es un sidecar Python (`cmd/predictor_svc`, puerto `8090`) que el
+>   backend consulta por HTTP. Sin predictor, el MPC opera degradado.
 
-Ambas terminan en el mismo mecanismo compartido — no hay dos implementaciones paralelas, solo dos puertas de entrada distintas al mismo `ConsignaService`.
+## 1. Las tres puertas de entrada
 
-## 2. Arquitectura
+| | SCA-142 (histórico) | SCA-320 (manual) | SCA-400 (MPC) |
+|---|---|---|---|
+| Quién dispara | La IA del nodo de entrada al identificar el producto | Un operario/supervisor desde el panel | El loop del MPC por lote |
+| Endpoint | `POST /api/v1/lotes/inicio` (ya no despacha) | `POST /api/v1/horno/consigna` | `GET /lotes/{id}/consigna-propuesta` + `POST /lotes/{id}/consigna/ack` |
+| Valor | `temp_setpoint`/`velocidad_cinta_setpoint` del producto | Lo que ingresa el operario | Propuesta del optimizador XGBoost |
+| Validación | Producto con setpoints cargados | Lote abierto MANUAL + rango del producto | Límites del producto + tuning del lote |
+| Auth | Bearer del nodo | JWT `session_token` | Bearer de la Pi (pull) o JWT (panel) |
+| `origen` en auditoría | `AUTOMATICO` (histórico) | `MANUAL` | No escribe `historial_consignas`; audita en `decisiones_control` |
+
+## 2. Arquitectura actual
 
 ```
-                    ┌─────────────────────────────┐
-Raspberry Pi ──────►│ POST /api/v1/lotes/inicio    │  (SCA-142, X-API-Key)
-(IA detecta          └──────────────┬──────────────┘
- producto)                          │
-                                     ▼
-Operario (panel) ──►┌─────────────────────────────┐
- POST /api/v1/       │ ConsignaService.dispatch()   │  (SCA-320, sin auth)
- horno/consigna      └──────────────┬──────────────┘
-                                     │
-        ┌────────────────────────────┼────────────────────────────┐
-        ▼                            ▼                            ▼
-parametros_producto           oven_controller              horno.Repository
-(setpoint o rango,            .SendSetpoint()              .Update()
- según origen)                (simulado, PLC)               (estado en memoria)
-                                     │
-                                     ▼
-                          consigna.Repository.Save()
-                          (historial_consignas, Postgres real)
-                                     │
-                                     ▼
-                          sse.Broker.Broadcast("horno.consigna")
-                          (fire-and-forget, GET /api/v1/horno/events)
+Operario (panel) ──► POST /api/v1/horno/consigna
+                         │
+                         ▼
+                 ConsignaService.DispatchManual
+                         ├─► valida lote ABIERTO + MANUAL y rango del producto
+                         ├─► decisiones_control (override ya aprobado, muestras=0)
+                         ├─► historial_consignas (exitosa=true, estado=PENDIENTE = encolada)
+                         └─► SSE horno.consigna
+
+Loop MPC (por lote) ──► Optimizador ──► Predictor (sidecar XGBoost)
+                         ├─► decisiones_control (audit)
+                         └─► SSE control.propuesta (incluye `autorizada`)
+
+Raspberry Pi ENTRADA ◄── GET /lotes/{id}/consigna-propuesta (pull)
+      ├── escribe el PLC real (control.sensores/actuadores: modbus_tcp|modbus_rtu)
+      └────────► POST /lotes/{id}/consigna/ack (aplicación confirmada)
 ```
 
-### Piezas nuevas
+Piezas principales:
 
 | Capa | Archivo | Qué hace |
 |---|---|---|
-| Dominio | `internal/domain/consigna/consigna.go` | `Consigna` (registro de auditoría), `ConsignaManualRequest` + `Validate()`, sentinels de error, interfaces `Repository`/`Service` |
-| Provider | `internal/provider/oven_controller/client.go` | Cliente simulado del controlador físico (análogo a `yolo_client`): ~40ms de latencia, ~5% de fallo aleatorio |
-| Service | `internal/service/consigna/consigna_service.go` | `dispatch()` centraliza: buscar horno → despachar → actualizar estado → auditar → broadcast SSE. `DispatchAutomatico` y `DispatchManual` son las dos entradas |
-| Repository | `internal/repository/consigna_repo.go` | Persiste el historial en PostgreSQL real (`historial_consignas`) |
-| Controller (SCA-142) | `internal/controller/lote/lote_handler.go` → `HandleIniciarLote` | `POST /api/v1/lotes/inicio` |
-| Controller (SCA-320) | `internal/controller/consigna/consigna_handler.go` | `POST /api/v1/horno/consigna`, `GET /api/v1/horno/consigna/historial` |
+| Dominio | `internal/domain/consigna/consigna.go` | `Consigna`, `ConsignaManualRequest`, orígenes y sentinels |
+| Dominio | `internal/domain/decisiones_control/` | Audit del MPC, aprobación y override manual |
+| Servicio | `internal/service/consigna/consigna_service.go` | Valida el lote/rango y encola el override manual; audita |
+| Servicio | `internal/service/control/control.go` | Loop por lote: precalentamiento, MPC y publicación de propuestas |
+| Servicio | `internal/service/optimizador/optimizador.go` | MPC horizonte 1 sobre grilla de T1 y V |
+| Servicio | `internal/service/predictor/predictor.go` | Cliente HTTP al sidecar XGBoost |
+| Controller | `internal/controller/control/control_handler.go` | Endpoints de control, propuesta, aprobación y ACK |
+| Controller | `internal/controller/consigna/consigna_handler.go` | Consigna manual e historial |
+| Controller | `internal/controller/horno/horno_handler.go` | Proyección de solo lectura `GET /api/v1/horno` |
+| Sidecar | `cmd/predictor_svc/` | FastAPI + XGBoost por producto |
 
-### Piezas existentes que se extendieron (no se reescribieron)
+## 3. Modos de operación del lote
 
-- `internal/domain/horno/horno.go` — se agregaron `VelocidadCinta`, `ProductoID`, `LoteID`, y la constante `EstadoControlManual`. El horno **sigue en memoria** (decisión de arquitectura previa, documentada en `CLAUDE.md`); no hay hardware ni Postgres real detrás todavía.
-- `internal/domain/parametros_producto/parametros_producto.go` — se agregaron `TempSetpoint`/`VelocidadCintaSetpoint` (nullable), leídos por `internal/repository/parametros_producto_repo.go`.
-- `database/schema.sql` — tabla nueva `historial_consignas` + columnas nuevas en `parametros_producto` + catálogo completo de las 6 variedades de panificados.
+El modo se persiste en `lotes_productivos.modo` y se cambia con
+`PATCH /api/v1/lotes/{id}/modo` (panel) o `PUT /api/v1/lotes/{id}/modo` (Pi de
+su sector).
 
-## 2.1 Catálogo de las 6 variedades (subtarea "matriz de parámetros óptimos")
+| Modo | Loop | Propuesta | Quién aplica |
+|---|---|---|---|
+| `MANUAL` | No corre | No hay MPC. Si hay override manual encolado, se sirve con `manual_override=true` | La Pi (pull) |
+| `SUPERVISION` | Sí | `autorizada=false` hasta que se apruebe | Operario/Pi aprueba y luego la Pi aplica |
+| `AUTOMATICO` | Sí | `autorizada=true` | La Pi (pull) |
 
-`database/schema.sql` siembra las 6 variedades con su matriz completa (rango + setpoint puntual):
+En `AUTOMATICO`, el loop arranca en fase `CALENTANDO` salvo que el lote venga
+`iniciado_manualmente`; cuando el horno se mantiene en tolerancia durante 3
+muestras, pasa a `ADAPTANDO` y entrega un setpoint de transición. En
+`SUPERVISION` arranca directo en `ADAPTANDO`.
 
-| Producto | Temp (min–setpoint–max) | Velocidad cinta (min–setpoint–max) |
-|---|---|---|
-| Tostada Integral | 160 – **170** – 180 °C | 0.10 – **0.20** – 0.30 m/s |
-| Pan Lactal | 180 – **190** – 200 °C | 0.15 – **0.25** – 0.35 m/s |
-| Pan Francés | 200 – **210** – 220 °C | 0.20 – **0.30** – 0.40 m/s |
-| Pan de Salvado | 170 – **180** – 190 °C | 0.15 – **0.25** – 0.35 m/s |
-| Medialunas | 190 – **200** – 210 °C | 0.25 – **0.35** – 0.45 m/s |
-| Pan Dulce | 150 – **160** – 170 °C | 0.08 – **0.14** – 0.20 m/s |
+## 4. Consigna manual (SCA-320)
 
-El mecanismo (`ConsignaService.DispatchAutomatico`/`DispatchManual` + `parametros_producto.GetByProductoID`) ya era genérico desde SCA-142 — esto fue únicamente carga de datos, sin cambios de código en el servicio. Valores de referencia, ajustables por el equipo de Producción vía `PUT /api/v1/parametros-producto` (que hoy solo actualiza rangos min/max, no los setpoints puntuales — ver nota en `CLAUDE.md`).
+`POST /api/v1/horno/consigna` valida el body, exige un lote **ABIERTO** y en
+modo **MANUAL**, y valida el rango seguro del producto. Si todo es válido:
 
-## 2.2 Manejo de fallo de enlace: alerta crítica + CONTROL_MANUAL
+1. Deja una decisión en `decisiones_control` con `muestras=0`, aprobada, para
+   que la Pi la levante por `consigna-propuesta` como `manual_override=true`.
+2. Audita en `historial_consignas` con `origen=MANUAL`, `decision_id` de la
+   decisión encolada, `estado=PENDIENTE` y `exitosa=true` (**encolada**, no
+   aplicada).
+3. Emite `horno.consigna` por SSE.
 
-Cuando `OvenController.SendSetpoint` devuelve `Aplicada: false` (hoy simulado con ~5% de probabilidad), además de auditar el intento fallido (como ya hacía SCA-142/320), `ConsignaService.handleFalloDeEnlace` hace dos cosas más:
+Si el encolado falla, deja la fila con `exitosa=false`, `estado=RECHAZADA`,
+`decision_id=null` y `motivo_error`, y responde `502`.
 
-1. **Fuerza `horno.Estado = "CONTROL_MANUAL"`** — un estado nuevo, distinto de `ACTIVO/ATENCION/MANTENIMIENTO`.
-2. **Genera una `Alerta` de nivel `CRITICAL`** (reusa el dominio `alerta` ya existente para umbrales térmicos), visible en `GET /api/v1/horno` (`alertas_recientes`).
+- `loteId` es obligatorio. `sectorId` (o el alias legacy `hornoId`) es opcional;
+  si viene, debe coincidir con el sector del lote.
+- `productoId`, `temperaturaObjetivo` y `velocidadCintaObjetivo` son
+  obligatorios; `usuario` es opcional.
+- `exitosa=true` no confirma que el PLC haya aplicado el setpoint. El ciclo de
+  vida fino vive en `estado`: `PENDIENTE` al encolar, `APLICADA` cuando el ack
+  de la Pi lo confirma y `RECHAZADA` si no se pudo encolar. `exitosa` se
+  mantiene por compatibilidad.
 
-Mientras el horno esté en `CONTROL_MANUAL`:
-- `DispatchAutomatico` (SCA-142, `POST /api/v1/lotes/inicio`) lo **rechaza** con `consigna.ErrHornoEnControlManual` → `409 Conflict`. El control automático deja de insistir.
-- `DispatchManual` (SCA-320, `POST /api/v1/horno/consigna`) **sigue funcionando sin restricciones** — es la vía de escape segura para que un operario reactive el horno a mano.
-- Un despacho **exitoso**, de cualquier origen, restaura `Estado = "ACTIVO"` — el control automático se reanuda solo, sin pasos manuales extra más allá de que la próxima consigna se aplique bien.
+## 5. Control MPC y predictor (SCA-400)
 
-```
-Fallo de enlace (Aplicada: false)
-        │
-        ├─► historial_consignas.exitosa = false, motivo_error   (ya existía)
-        ├─► Alerta{Nivel: CRITICAL, ...}                         (nuevo)
-        └─► horno.Estado = "CONTROL_MANUAL"                      (nuevo)
-                     │
-                     ├─► POST /api/v1/lotes/inicio  → 409 (bloqueado)
-                     └─► POST /api/v1/horno/consigna → sigue funcionando
-                                  │
-                                  ▼ (éxito)
-                          horno.Estado = "ACTIVO"  (se reanuda el automático)
-```
+Cada tick del loop:
 
-`ConsignaService` depende de una interfaz `OvenController` (no del struct concreto `oven_controller.OvenControllerClient`), lo que permitió agregar tests deterministas del escenario de fallo sin depender del ~5% aleatorio (`internal/service/consigna/consigna_service_test.go`, `fakeController`). Es también el punto de swap para cuando exista un driver real.
+1. Lee las últimas métricas del horno (`metricas_horno`) y los eventos del lote
+   en la ventana.
+2. Calcula la confianza promedio; si está por debajo de `MPC_CONFIANZA_MIN`, la
+   decisión se audita como `confianza_baja`.
+3. Pide al optimizador una propuesta. El optimizador muestrea una grilla de T1 y
+   V dentro de los Δmáx, evalúa el predictor XGBoost en cada candidato y elige
+   el menor Z que cumpla los umbrales de aceptación. Si ninguno cumple, devuelve
+   el mejor Z absoluto con `restriccion_relajada=true`.
+4. Persiste la decisión en `decisiones_control` y publica la propuesta por SSE
+   (`autorizada=true` en AUTOMATICO, `false` en SUPERVISION). El backend no
+   aplica nada.
 
-## 3. Por qué está diseñado así (decisiones clave)
+El predictor:
 
-- **El setpoint automático es un valor puntual explícito**, no el punto medio del rango. Si `temp_setpoint`/`velocidad_cinta_setpoint` no están cargados para un producto, `DispatchAutomatico` devuelve error — no se infiere nada.
-- **`POST /api/v1/lotes/inicio` ≠ `POST /api/v1/lotes`**: el segundo sigue siendo un resumen que llega con el lote ya terminado (`inicioAt` y `finAt` juntos). El primero es el trigger real de "la IA identificó el producto", antes de que exista una fila en `lotes_productivos` — por eso genera un UUID de correlación propio (`crypto/rand`, sin dependencia nueva) en vez de esperar un ID real.
-- **`historial_consignas.lote_id` no tiene FK** a propósito: en el despacho automático el lote todavía no está persistido en ese momento. `producto_id` sí tiene FK real.
-- **El controlador físico es 100% simulado**, mismo patrón que `yolo_client`: no hay red, PLC ni hardware de por medio. El día que exista hardware real, se reemplaza `OvenControllerClient.SendSetpoint(...)` por un cliente real con la misma firma — nada más en el flujo cambia.
-- **`ConsignaManualRequest.ProductoID` es obligatorio** en el envío manual: siempre se valida contra el rango real cargado en `parametros_producto`, para no tener una segunda fuente de verdad de "qué es seguro" (límites hardcodeados).
-- **`ConsignaManualRequest.LoteID` es opcional**: si el panel conoce el `loteId` del lote en curso (por ejemplo, el que devolvió `POST /api/v1/lotes/inicio`), puede mandarlo en el request manual para que ese ajuste quede correlacionado en el mismo historial de auditoría del lote. Si se omite, la consigna manual queda auditada igual, solo que sin lote asociado.
-- **Auditoría incluso en fallos**: si el controlador simulado rechaza la consigna (~5% de las veces), igual se guarda la fila en `historial_consignas` con `exitosa=false` y `motivo_error`.
+- Es un sidecar FastAPI en `cmd/predictor_svc`, puerto `8090`.
+- Usa un modelo XGBoost por `producto_id`; si no hay modelo entrenado, usa un
+  placeholder determinístico.
+- Los artefactos se guardan como JSON (`save_raw(raw_format="json")`) en
+  `models_xgb/producto_{uuid}_v{n}.json`.
+- El request acepta `snake_case` y alias `camelCase`; la respuesta es
+  `camelCase` (`pctCrudos`, `pctOk`, `pctQuemados`, `modelVersion`,
+  `esPlaceholder`).
+- Se puede entrenar con el dataset sintético
+  `cmd/predictor_svc/data/sintetico_6_productos.csv`.
+- Si el sidecar no responde, el optimizador no propone y la decisión se audita
+  como `skipped`; el horno conserva el último setpoint aplicado.
 
-## 4. Cómo probarlo
+En `AUTOMATICO`, una predicción de placeholder no se publica salvo
+`MPC_PERMITIR_PLACEHOLDER=true` (solo demo/tesis); la decisión se audita como
+`modelo_no_entrenado`. En `SUPERVISION` la propuesta se publica igual para que
+el operario vea el warning.
 
-### 4.1 Tests automatizados
+## 6. Aprobación y ACK
+
+Aprobación en SUPERVISION:
+
+- `POST /api/v1/lotes/{id}/aplicar-consigna` (alias `/aprobar-consigna`).
+- El body opcional `decision_id` evita aprobar una propuesta distinta de la que
+  el operario está viendo.
+- El endpoint sólo autoriza; la aprobación se persiste en
+  `decisiones_control.aprobada_por` y `aprobada_at`. La aplicación real la hace
+  la Pi.
+
+ACK:
+
+- `POST /api/v1/lotes/{id}/consigna/ack` (Bearer de la Pi) con
+  `decision_id`, `temp_aplicado` y `vel_aplicado`.
+- Marca la decisión como aplicada (`aplicado_por=OPERARIO` en SUPERVISION,
+  `MPC` en AUTOMATICO) y actualiza los setpoints aplicados del lote.
+- Cierra como `APLICADA` la consigna de `historial_consignas` encolada con ese
+  `decision_id` (update best-effort: si falla, el ack igual responde `200`).
+- Es idempotente: un reenvío del mismo ACK vuelve a responder `200` (no hay
+  fila pendiente o ya está `APLICADA`).
+
+## 7. SSE y estado real del horno
+
+- `GET /api/v1/lotes/{id}/control/events` emite `control.propuesta` filtrado por
+  lote. El evento incluye `lote_id`, `propuesta`, `decision_id`, `autorizada` y
+  `ventana`. La `propuesta` serializa `temp1`, `velocidad`, `z` y `prediccion`.
+- `GET /api/v1/horno/events` emite `horno.consigna` con el resultado de cada
+  encolado manual.
+- `GET /api/v1/horno?sector_id=horno-1` devuelve una **proyección de solo
+  lectura** del horno (`data.horno.id` es el id del sector): lote abierto +
+  último sample de `metricas_horno`. No hay horno en memoria. Sin
+  telemetría, T/V y el resto de las lecturas viajan `null`.
+- La telemetría real (T1, combustión, humedad, ambiente, velocidad y setpoints
+  observados) llega por `POST /api/v1/lotes/{id}/metricas-horno`; es el estado
+  real del horno y el panel la lee por `GET /api/v1/horno` (o cruda con
+  `GET /api/v1/lotes/{id}/metricas-horno`).
+
+## 8. Fallo de encolado
+
+Si no se puede persistir o aprobar la decisión del override manual:
+
+1. El intento se audita en `historial_consignas` con `exitosa=false`,
+   `estado=RECHAZADA` y `motivo_error`.
+2. Se responde `502` ("No se pudo encolar la consigna para la Pi").
+3. La Pi no ve ninguna propuesta nueva; el horno sigue con el último setpoint
+   aplicado.
+
+No se generan alertas ni se cambia el estado del horno: el backend no tiene un
+actuador propio cuyo enlace pueda fallar.
+
+## 9. Cómo probarlo
+
+### 9.1 Tests
 
 ```bash
 go test ./internal/domain/consigna/... \
          ./internal/service/consigna/... \
-         ./internal/controller/lote/... \
-         ./internal/controller/consigna/... -v
+         ./internal/controller/consigna/... \
+         ./internal/service/control/... \
+         ./internal/service/optimizador/... -v
 ```
 
-Cubre: validación de ambos requests, `DispatchAutomatico`/`DispatchManual` (casos de éxito y error con mocks), y los dos handlers HTTP (200/404/422/401/405/502).
-
-### 4.2 Levantar el entorno
+### 9.2 Entorno
 
 ```bash
+cp .env.example .env   # completar variables
 docker compose up --build
 ```
 
-`database/schema.sql` ya crea `historial_consignas` y siembra setpoints para "Tostada Integral" (`temp_setpoint=170`, `velocidad_cinta_setpoint=0.20`). Verificá con `GET http://localhost:8080/health`.
+Verificar `GET http://localhost:8080/health`, `GET /healthz` y
+`GET http://localhost:8090/health` (predictor). Instalación completa en
+[`../MANUAL_INSTALACION.md`](../MANUAL_INSTALACION.md).
 
-### 4.3 SCA-142 — flujo automático
-
-```bash
-curl -X POST http://localhost:8080/api/v1/lotes/inicio \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: <API_KEY_SECRET del .env>" \
-  -d '{
-    "hornoId": "horno-01",
-    "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab"
-  }'
-```
-Esperado: `200`, `consigna.temperaturaObjetivo: 170`, `consigna.velocidadCintaObjetivo: 0.20`, `origen: "AUTOMATICO"`.
-
-### 4.4 SCA-320 — flujo manual
+### 9.3 Consigna manual
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/horno/consigna \
+  -b "session_token=<JWT>" \
   -H "Content-Type: application/json" \
   -d '{
-    "hornoId": "horno-01",
+    "loteId": "<lote abierto MANUAL>",
+    "sectorId": "horno-1",
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-    "temperaturaObjetivo": 175,
-    "velocidadCintaObjetivo": 0.25,
-    "usuario": "operario-demo",
-    "loteId": "<opcional: loteId devuelto por /api/v1/lotes/inicio>"
+    "temperaturaObjetivo": 195,
+    "velocidadCintaObjetivo": 0.22,
+    "usuario": "operario-demo"
   }'
 ```
-Esperado: `200`, `origen: "MANUAL"`. El campo `loteId` es opcional — si se manda, el ajuste manual queda correlacionado en el historial de ese lote (ver 4.7); si se omite, la consigna se audita igual, pero sin lote asociado.
 
-Probá también el rechazo por rango:
-```bash
-curl -X POST http://localhost:8080/api/v1/horno/consigna \
-  -H "Content-Type: application/json" \
-  -d '{
-    "hornoId": "horno-01",
-    "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-    "temperaturaObjetivo": 999,
-    "velocidadCintaObjetivo": 0.20
-  }'
-```
-Esperado: `422`, mensaje "Los valores solicitados están fuera del rango seguro del producto".
+Esperado: `200`, `origen: "MANUAL"`, `exitosa: true` (encolada para la Pi). Un
+lote cerrado, no MANUAL o inexistente responde `409`/`404`; un valor fuera del
+rango del producto responde `422`.
 
-> El controlador simulado falla ~5% de las veces a propósito (para ejercitar la rama de error). Si te toca en cualquiera de los dos flujos, la respuesta es `502` con `exitosa: false` — reintentá para ver el camino feliz.
+### 9.4 Flujo MPC en SUPERVISION
 
-### 4.5 Verificar que el horno refleja el estado real
+1. Abrir un lote con `modo: "SUPERVISION"` vía `POST /api/v1/lotes/inicio`.
+2. Esperar a que el loop publique una propuesta; consultarla con
+   `GET /api/v1/lotes/{id}/consigna-propuesta`. Debe traer `autorizada: false`.
+3. Aprobarla con `POST /api/v1/lotes/{id}/aplicar-consigna`.
+4. La Pi (o el panel) vuelve a consultar la propuesta: ahora `autorizada: true`.
+5. La Pi aplica y confirma con `POST /api/v1/lotes/{id}/consigna/ack`.
 
-```bash
-curl http://localhost:8080/api/v1/horno?id=horno-01
-```
-Debe mostrar `temperatura`, `velocidad_cinta`, `producto_id` y `lote_id` con los últimos valores despachados (por cualquiera de los dos flujos).
+### 9.5 Flujo MPC en AUTOMATICO
 
-### 4.6 Verificar la auditoría en Postgres
+Abrir el lote con `modo: "AUTOMATICO"`. La propuesta se publica con
+`autorizada: true`; la Pi la aplica y ackea. Sin modelo entrenado y con
+`MPC_PERMITIR_PLACEHOLDER=false`, la decisión se audita como
+`modelo_no_entrenado` y no se publica.
+
+### 9.6 Verificar auditoría
 
 ```bash
-docker compose exec db psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c \
-  "SELECT horno_id, lote_id, producto_id, temperatura_objetivo, velocidad_cinta_objetivo, origen, exitosa, motivo_error, creada_en FROM historial_consignas ORDER BY creada_en DESC LIMIT 10;"
-```
-Deberías ver filas con `origen = 'AUTOMATICO'` (4.3) y `origen = 'MANUAL'` (4.4), incluidas las fallidas.
+docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+  "SELECT horno_id, lote_id, origen, decision_id, estado, exitosa, motivo_error, creada_en
+   FROM historial_consignas ORDER BY creada_en DESC LIMIT 10;"
 
-### 4.7 Consultar el historial por lote
-
-```bash
-curl "http://localhost:8080/api/v1/horno/consigna/historial?loteId=<loteId devuelto por 4.3>"
+docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+  "SELECT lote_id, temp_propuesto, vel_propuesto, aplicado_por, razon_skipped, aprobada_por, created_at
+   FROM decisiones_control ORDER BY created_at DESC LIMIT 10;"
 ```
 
-El `loteId` es generado por `POST /api/v1/lotes/inicio` (despacho automático). Si además se manda ese mismo `loteId` en un `POST /api/v1/horno/consigna` manual posterior (campo opcional `loteId` del request), ambos quedan en el mismo historial — así el panel puede mostrar "todo lo que le pasó a este lote": la consigna automática inicial más cualquier corrección manual posterior.
+## 10. Histórico: SCA-142 (despacho automático original)
 
-### 4.8 Fallo de enlace: alerta crítica + CONTROL_MANUAL
+> ⚠️ **HISTÓRICO / OBSOLETO.** Esta sección conserva el diseño original de
+> SCA-142. El trigger automático desde `POST /api/v1/lotes/inicio` fue retirado.
+> Hoy ese endpoint sólo abre/persiste el lote; el control automático es el MPC de
+> SCA-400.
 
-Como el fallo es simulado con ~5% de probabilidad, hay que insistir hasta capturarlo:
+En SCA-142, la IA del nodo de entrada identificaba el producto y llamaba a
+`POST /api/v1/lotes/inicio`. El backend tomaba `temp_setpoint` y
+`velocidad_cinta_setpoint` del producto y los despachaba con
+`origen=AUTOMATICO`. El flujo terminaba en el mismo `ConsignaService` que la
+consigna manual.
 
-```bash
-for i in $(seq 1 40); do
-  curl -s -o /dev/null -w "%{http_code} " -X POST http://localhost:8080/api/v1/horno/consigna \
-    -H "Content-Type: application/json" \
-    -d '{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab","temperaturaObjetivo":170,"velocidadCintaObjetivo":0.20}'
-done
-```
-Apenas veas un `502` en la salida, verificá **inmediatamente** (antes de mandar otro request, porque un éxito subsiguiente restaura el estado):
+Decisiones históricas que siguen siendo válidas conceptualmente:
 
-```bash
-curl -s http://localhost:8080/api/v1/horno?id=horno-01
-```
-Esperado: `estado: "CONTROL_MANUAL"` y una `Alerta` nueva en `alertas_recientes` con `nivel: "CRITICAL"`.
+- El setpoint automático era un valor puntual explícito, no el punto medio del
+  rango.
+- `historial_consignas.lote_id` no tiene FK a propósito: el lote podía no estar
+  persistido al momento del despacho.
+- La auditoría se guardaba incluso en fallos.
+- El controlador físico era simulado en SCA-142. Hoy la Pi ENTRADA es la única
+  que escribe el PLC real; el backend no tiene driver Modbus ni horno en
+  memoria.
 
-```bash
-curl -X POST http://localhost:8080/api/v1/lotes/inicio \
-  -H "Content-Type: application/json" -H "X-API-Key: <API_KEY_SECRET>" \
-  -d '{"hornoId":"horno-01","productoId":"a1b2c3d4-5678-90ab-cdef-1234567890ab"}'
-```
-Esperado: `409` "El horno está en modo CONTROL_MANUAL...". El envío manual, en cambio, sigue aceptando requests con normalidad — reintentando `POST /api/v1/horno/consigna` hasta que salga exitoso, `estado` vuelve a `"ACTIVO"` y el automático vuelve a responder `200`.
+Diferencias con el presente:
 
-> Para probar esto de forma determinista sin depender del azar, ver los tests `TestDispatch_Fallido_GeneraAlertaCriticaYPasaAControlManual`, `TestDispatchAutomatico_BloqueadoSiHornoEnControlManual`, `TestDispatchManual_NoSeBloqueaAunqueHornoEsteEnControlManual` y `TestDispatchManual_ExitosoTrasFalloRestauraEstadoActivo` en `internal/service/consigna/consigna_service_test.go` (usan un `fakeController` inyectable en vez del cliente simulado real).
+- `POST /api/v1/lotes/inicio` ya no dispara consigna.
+- La autenticación de nodos es `Authorization: Bearer <secret>`; no existe el
+  header de API key compartido.
+- El MPC no depende exclusivamente de `temp_setpoint` del producto: propone
+  setpoints por ventana y usa el setpoint del producto sólo como receta de
+  arranque cuando el lote no tiene setpoints propios.
+- La consigna manual se encola para la Pi; las filas `origen=AUTOMATICO` de
+  `historial_consignas` quedan sólo como histórico y ya no se escriben.
 
-### 4.9 Casos de error — tabla resumen
+## 11. Referencias
 
-| Escenario | Endpoint | Esperado |
-|---|---|---|
-| Sin `X-API-Key` | `/api/v1/lotes/inicio` | `401` |
-| `hornoId` inexistente | ambos | `404` |
-| `productoId` sin setpoints (automático) / sin parámetros (manual) | ambos | `422` |
-| Valor fuera de rango | `/api/v1/horno/consigna` | `422` |
-| Body incompleto | ambos | `422` |
-| Método incorrecto | ambos | `405` |
-| `loteId` faltante | `/api/v1/horno/consigna/historial` | `400` |
-| Horno en `CONTROL_MANUAL` | `/api/v1/lotes/inicio` | `409` |
+- [`api-endpoints.md`](api-endpoints.md) — contrato HTTP de consigna, control,
+  propuesta, aprobación, ACK y telemetría.
+- [`../CLAUDE.md`](../CLAUDE.md) — estado y decisiones de arquitectura.
+- [`../MANUAL_INSTALACION.md`](../MANUAL_INSTALACION.md) — instalación,
+  variables y despliegue.
+- [`../cmd/predictor_svc/README.md`](../cmd/predictor_svc/README.md) — sidecar
+  predictor y entrenamiento.

@@ -1,15 +1,17 @@
 package controller
 
 import (
-	"crypto/subtle"
-	"encoding/json"
+	"context"
 	"errors"
 	"log"
 	"net/http"
-	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
+	authController "github.com/angelobenedetti29/smart-check-automation/internal/controller/auth"
+	"github.com/angelobenedetti29/smart-check-automation/internal/controller/requestjson"
+	"github.com/angelobenedetti29/smart-check-automation/internal/deviceauth"
 	dispositivo "github.com/angelobenedetti29/smart-check-automation/internal/domain/dispositivo"
 	"github.com/angelobenedetti29/smart-check-automation/pkg/response"
 )
@@ -17,22 +19,37 @@ import (
 // maxRequestBodyBytes limita el tamaño del body a 1 MB para evitar DoS por memoria.
 const maxRequestBodyBytes = 1 << 20 // 1 MB
 
+// dispositivoUUIDPattern valida el id del dispositivo extraído del path para el
+// rename desde el panel. Es el mismo patrón que el dominio aplica al id
+// informado en el body de CreateDispositivoRequest/UpdateDispositivoRequest.
+var dispositivoUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
 // DispositivoHandler maneja los endpoints HTTP para dispositivos Raspberry Pi.
 type DispositivoHandler struct {
 	service dispositivo.Service
+	secure  interface {
+		ListDeviceReads(context.Context) ([]dispositivo.DeviceRead, error)
+	}
 }
 
 // NewDispositivoHandler instancia el handler inyectando el servicio.
-func NewDispositivoHandler(svc dispositivo.Service) *DispositivoHandler {
-	return &DispositivoHandler{service: svc}
+func NewDispositivoHandler(svc dispositivo.Service, secure ...interface {
+	ListDeviceReads(context.Context) ([]dispositivo.DeviceRead, error)
+}) *DispositivoHandler {
+	h := &DispositivoHandler{service: svc}
+	if len(secure) > 0 {
+		h.secure = secure[0]
+	}
+	return h
 }
 
-// Handle despacha GET /api/v1/dispositivos (listar estados), POST (alta), PUT
-// (modificar) y DELETE (eliminar) sobre la misma ruta según el método HTTP.
+// Handle despacha GET /api/v1/dispositivos (listar estados), PUT (modificar) y
+// DELETE (baja lógica) sobre la misma ruta según el método HTTP.
 //
-// La autenticación JWT de POST/PUT/DELETE se aplica en el wiring de rutas, sin
-// restricción de rol. No se reusa X-API-Key: esa clave es exclusiva de las
-// Raspberry Pi y no del panel del operador.
+// POST no está expuesto: el wiring de rutas responde 405 antes de llegar aquí.
+// La autenticación JWT se aplica en el wiring: PUT y DELETE exigen rol
+// Supervisor/Admin; GET admite cualquier rol autenticado. No se reusa X-API-Key:
+// esa clave es exclusiva de las Raspberry Pi y no del panel del operador.
 func (h *DispositivoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -49,7 +66,8 @@ func (h *DispositivoHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleCreate maneja POST /api/v1/dispositivos — alta de un dispositivo del
-// catálogo por nombre/ubicación desde el panel del operador.
+// catálogo. No está expuesto actualmente: el wiring de rutas responde 405 y se
+// conserva como implementación interna del handler.
 func (h *DispositivoHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	req, ok := h.decodeAndValidate(w, r)
 	if !ok {
@@ -58,16 +76,27 @@ func (h *DispositivoHandler) HandleCreate(w http.ResponseWriter, r *http.Request
 
 	estado, err := h.service.Create(r.Context(), req)
 	if err != nil {
-		log.Printf("[ERROR] Error al crear dispositivo: %v", err)
-		response.Error(w, http.StatusInternalServerError, "Error al crear el dispositivo", nil)
+		switch {
+		case dispositivo.IsValidationError(err):
+			response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		case errors.Is(err, dispositivo.ErrSectorNotFound):
+			response.Error(w, http.StatusBadRequest, "El sector indicado no existe", nil)
+		case errors.Is(err, dispositivo.ErrSectorTipoDuplicado):
+			response.Error(w, http.StatusConflict, "El sector ya tiene un dispositivo de ese tipo", nil)
+		default:
+			log.Printf("[ERROR] Error al crear dispositivo: %v", err)
+			response.Error(w, http.StatusInternalServerError, "Error al crear el dispositivo", nil)
+		}
 		return
 	}
 
 	response.JSON(w, http.StatusCreated, true, "Dispositivo creado exitosamente", estado, nil)
 }
 
-// HandleUpdate maneja PUT /api/v1/dispositivos — modifica nombre/ubicación de un
-// dispositivo existente, identificado por dispositivoId en el body.
+// HandleUpdate maneja PUT /api/v1/dispositivos — modifica la asignación de
+// sector (sectorId) y la URL WHEP de un dispositivo existente, identificado por
+// dispositivoId en el body. El nombre es inmutable desde el panel: solo el
+// rename autenticado del nodo puede cambiarlo.
 func (h *DispositivoHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	req, ok := h.decodeAndValidateUpdate(w, r)
 	if !ok {
@@ -79,6 +108,10 @@ func (h *DispositivoHandler) HandleUpdate(w http.ResponseWriter, r *http.Request
 		switch {
 		case errors.Is(err, dispositivo.ErrDispositivoNotFound):
 			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+		case errors.Is(err, dispositivo.ErrSectorNotFound):
+			response.Error(w, http.StatusBadRequest, "El sector indicado no existe", nil)
+		case errors.Is(err, dispositivo.ErrSectorTipoDuplicado):
+			response.Error(w, http.StatusConflict, "El sector ya tiene un dispositivo de ese tipo", nil)
 		case dispositivo.IsValidationError(err):
 			response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
 		default:
@@ -91,8 +124,10 @@ func (h *DispositivoHandler) HandleUpdate(w http.ResponseWriter, r *http.Request
 	response.JSON(w, http.StatusOK, true, "Dispositivo actualizado exitosamente", estado, nil)
 }
 
-// HandleDelete maneja DELETE /api/v1/dispositivos?dispositivoId=... — elimina un
-// dispositivo del catálogo y de la caché de estado.
+// HandleDelete maneja DELETE /api/v1/dispositivos?dispositivoId=... — da de baja
+// lógica un dispositivo: revoca su credencial, lo desasigna del sector y lo
+// quita del caché. No borra la fila ni el historial de telemetría. El nodo queda
+// con su secret viejo autenticando 401. El actor se toma de los claims JWT.
 func (h *DispositivoHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	dispositivoID := r.URL.Query().Get("dispositivoId")
 	if strings.TrimSpace(dispositivoID) == "" {
@@ -100,17 +135,23 @@ func (h *DispositivoHandler) HandleDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.service.Delete(r.Context(), dispositivoID); err != nil {
+	claims := authController.GetClaimsFromContext(r.Context())
+	if claims == nil {
+		response.Error(w, http.StatusUnauthorized, "Sesión requerida", nil)
+		return
+	}
+
+	if err := h.service.Revoke(r.Context(), claims.Email, dispositivoID); err != nil {
 		if errors.Is(err, dispositivo.ErrDispositivoNotFound) {
 			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
 			return
 		}
-		log.Printf("[ERROR] Error al eliminar dispositivo: %v", err)
-		response.Error(w, http.StatusInternalServerError, "Error al eliminar el dispositivo", nil)
+		log.Printf("[ERROR] Error al dar de baja dispositivo: %v", err)
+		response.Error(w, http.StatusInternalServerError, "Error al dar de baja el dispositivo", nil)
 		return
 	}
 
-	response.JSON(w, http.StatusOK, true, "Dispositivo eliminado exitosamente", nil, nil)
+	response.JSON(w, http.StatusOK, true, "Dispositivo dado de baja exitosamente", nil, nil)
 }
 
 // decodeAndValidate valida Content-Type, límite de tamaño, formato JSON y reglas
@@ -119,15 +160,11 @@ func (h *DispositivoHandler) HandleDelete(w http.ResponseWriter, r *http.Request
 func (h *DispositivoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Request) (dispositivo.CreateDispositivoRequest, bool) {
 	var req dispositivo.CreateDispositivoRequest
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return req, false
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
 		return req, false
 	}
 
@@ -145,15 +182,11 @@ func (h *DispositivoHandler) decodeAndValidate(w http.ResponseWriter, r *http.Re
 func (h *DispositivoHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *http.Request) (dispositivo.UpdateDispositivoRequest, bool) {
 	var req dispositivo.UpdateDispositivoRequest
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return req, false
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
 		return req, false
 	}
 
@@ -187,25 +220,24 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-		response.Error(w, http.StatusUnsupportedMediaType, "Content-Type debe ser application/json", nil)
+	if !requestjson.RequireJSON(w, r) {
 		return
 	}
 
-	apiKey := r.Header.Get("X-API-Key")
-	secret := os.Getenv("API_KEY_SECRET")
-	if apiKey == "" || subtle.ConstantTimeCompare([]byte(apiKey), []byte(secret)) != 1 {
-		response.Error(w, http.StatusUnauthorized, "API key inválida o ausente", nil)
+	principal, ok := deviceauth.PrincipalFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "Token de dispositivo inválido", map[string]string{"code": "invalid_device_token"})
 		return
 	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
 	var req dispositivo.PingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "Formato JSON inválido o body demasiado grande", nil)
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
 		return
 	}
+
+	// El id del dispositivo es autoritativo del principal: el nodo puede omitirlo
+	// en el body y el servidor inyecta el suyo antes de validar.
+	req.DispositivoID = principal.DeviceID
 
 	if err := req.Validate(); err != nil {
 		response.Error(w, http.StatusUnprocessableEntity, "Datos del ping inválidos", err.Error())
@@ -214,6 +246,10 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 
 	estado, err := h.service.ProcessPing(r.Context(), req)
 	if err != nil {
+		if errors.Is(err, deviceauth.ErrInvalidToken) {
+			response.Error(w, http.StatusUnauthorized, "Token de dispositivo inválido", map[string]string{"code": "invalid_device_token"})
+			return
+		}
 		if errors.Is(err, dispositivo.ErrDispositivoNotFound) {
 			response.Error(w, http.StatusUnprocessableEntity, "El dispositivo no existe en el catálogo", err.Error())
 			return
@@ -225,6 +261,186 @@ func (h *DispositivoHandler) HandlePing(w http.ResponseWriter, r *http.Request) 
 	response.JSON(w, http.StatusOK, true, "Ping recibido correctamente", estado, nil)
 }
 
+// HandleRename maneja PUT /api/v1/dispositivos/nombre — la propia Raspberry,
+// autenticada con su secret, cambia únicamente su nombre. El id del dispositivo
+// es siempre el del principal verificado, nunca el del body.
+func (h *DispositivoHandler) HandleRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+
+	if !requestjson.RequireJSON(w, r) {
+		return
+	}
+
+	principal, ok := deviceauth.PrincipalFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "Token de dispositivo inválido", map[string]string{"code": "invalid_device_token"})
+		return
+	}
+
+	var req dispositivo.RenameDispositivoRequest
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		return
+	}
+
+	estado, err := h.service.Rename(r.Context(), principal.DeviceID, req.Nombre)
+	if err != nil {
+		if errors.Is(err, dispositivo.ErrDispositivoNotFound) {
+			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+			return
+		}
+		log.Printf("[ERROR] Error al renombrar dispositivo: %v", err)
+		response.Error(w, http.StatusInternalServerError, "Error al renombrar el dispositivo", nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, true, "Dispositivo renombrado exitosamente", estado, nil)
+}
+
+// HandleRenameURL maneja PATCH /api/v1/dispositivos/rename-url — la propia
+// Raspberry, autenticada con su secret, vuelve a anunciar su URL de renombre. El
+// id del dispositivo es siempre el del principal verificado, nunca el del body.
+func (h *DispositivoHandler) HandleRenameURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+
+	if !requestjson.RequireJSON(w, r) {
+		return
+	}
+
+	principal, ok := deviceauth.PrincipalFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "Token de dispositivo inválido", map[string]string{"code": "invalid_device_token"})
+		return
+	}
+
+	var req dispositivo.RenameURLDispositivoRequest
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
+		return
+	}
+
+	// Falta rename_url o viene vacío: 400 según el contrato del endpoint, antes
+	// de la validación de URL absoluta (que responde 422).
+	if strings.TrimSpace(req.RenameURL) == "" {
+		response.Error(w, http.StatusBadRequest, "El campo rename_url es requerido", nil)
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		return
+	}
+
+	if err := h.service.UpdateRenameURL(r.Context(), principal.DeviceID, strings.TrimSpace(req.RenameURL)); err != nil {
+		switch {
+		case errors.Is(err, dispositivo.ErrDispositivoNotFound):
+			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+		case dispositivo.IsValidationError(err):
+			response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		default:
+			log.Printf("[ERROR] Error al actualizar la rename_url del dispositivo: %v", err)
+			response.Error(w, http.StatusInternalServerError, "Error al actualizar la rename_url", nil)
+		}
+		return
+	}
+
+	// El contrato del endpoint es 204 sin body.
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleRenameByID maneja PUT /api/v1/dispositivos/{id}/nombre — un operador
+// autenticado por JWT (rol Supervisor/Administrador) cambia el nombre de un
+// dispositivo del catálogo, identificado por el {id} del path. La ruta NO está
+// protegida por BeforeMux: pasa por JWTMiddleware + RequireRoleFromDB en el
+// wiring. Se conserva HandleRename (sin id en el path) para que la Raspberry
+// pueda autopropiarse su nombre sin necesidad de conocer su UUID.
+//
+// Aplica push-first: si la Pi anunció `rename_url`/`rename_token`, el cambio
+// se propaga a la Raspberry antes de persistir en la DB. Si la red falla, se
+// cancela sin tocar la DB (la Pi conserva su nombre) y se devuelve 502 para
+// que el operador reintente. Si la Pi es legacy (no anunció push), se rechaza
+// con 422 para evitar la inconsistencia que el polling posterior introduciría.
+func (h *DispositivoHandler) HandleRenameByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		response.Error(w, http.StatusMethodNotAllowed, "Método no permitido", nil)
+		return
+	}
+
+	if !requestjson.RequireJSON(w, r) {
+		return
+	}
+
+	deviceID := extractDispositivoID(r.URL.Path)
+	if deviceID == "" {
+		response.Error(w, http.StatusBadRequest, "El path debe incluir el id del dispositivo", nil)
+		return
+	}
+	if !dispositivoUUIDPattern.MatchString(deviceID) {
+		response.Error(w, http.StatusBadRequest, "El id del dispositivo debe ser un UUID válido", nil)
+		return
+	}
+
+	var req dispositivo.RenameDispositivoRequest
+	if !requestjson.Decode(w, r, maxRequestBodyBytes, &req) {
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		response.Error(w, http.StatusUnprocessableEntity, "Datos del dispositivo inválidos", err.Error())
+		return
+	}
+
+	estado, err := h.service.RenameFromPanel(r.Context(), deviceID, req.Nombre)
+	if err != nil {
+		switch {
+		case errors.Is(err, dispositivo.ErrDispositivoNotFound):
+			response.Error(w, http.StatusNotFound, "El dispositivo no existe en el catálogo", err.Error())
+		case errors.Is(err, dispositivo.ErrRenameNotPushable):
+			// Legacy / sin push anunciado: rechazar para no generar inconsistencia
+			// con el próximo polling de la Pi.
+			response.Error(w, http.StatusUnprocessableEntity,
+				"El dispositivo no tiene push de renombre configurado; renombrar solo desde la Pi", err.Error())
+		default:
+			// Falla de red, timeout o respuesta no-2xx: la DB no se tocó.
+			log.Printf("[ERROR] Error al renombrar dispositivo (push cancelado): %v", err)
+			response.Error(w, http.StatusBadGateway,
+				"No se pudo propagar el renombre al dispositivo; no se aplicaron cambios", err.Error())
+		}
+		return
+	}
+
+	response.JSON(w, http.StatusOK, true, "Dispositivo renombrado exitosamente", estado, nil)
+}
+
+// extractDispositivoID obtiene el {id} de /api/v1/dispositivos/{id}/nombre
+// decodificando el path manualmente (las rutas se registran en el subtree y
+// PathValue no está disponible). Devuelve "" si el path no tiene un id válido
+// (UUID).
+func extractDispositivoID(path string) string {
+	const prefix = "/api/v1/dispositivos/"
+	const suffix = "/nombre"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	// Quita el "/nombre" final; queda "{id}" o vacío si el id falta.
+	rest := strings.TrimSuffix(path, suffix)
+	rest = strings.TrimPrefix(rest, prefix)
+	rest = strings.Trim(rest, "/")
+	if rest == "" || strings.Contains(rest, "/") {
+		return ""
+	}
+	return rest
+}
+
 // HandleEstados maneja GET /api/v1/dispositivos.
 // Devuelve el estado de salud actual (online/offline) de todos los dispositivos.
 func (h *DispositivoHandler) HandleEstados(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +449,30 @@ func (h *DispositivoHandler) HandleEstados(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if h.secure != nil {
+		reads, err := h.secure.ListDeviceReads(r.Context())
+		if err != nil {
+			response.Error(w, http.StatusServiceUnavailable, "No se pudo consultar el estado de seguridad de los dispositivos", map[string]string{"code": "auth_store_unavailable"})
+			return
+		}
+		telemetry := make(map[string]dispositivo.EstadoDispositivo)
+		for _, state := range h.service.GetAllEstados() {
+			telemetry[state.DispositivoID] = state
+		}
+		out := make([]dispositivo.DeviceRead, 0, len(reads))
+		for _, read := range reads {
+			read.Estado = dispositivo.EstadoOffline
+			if state, ok := telemetry[read.DispositivoID]; ok {
+				read.Estado = state.Estado
+				read.UltimaMetrica = state.UltimaMetrica
+				read.LastSeen = state.LastSeen
+			}
+			out = append(out, read)
+		}
+		noStore(w)
+		response.OK(w, "Estados de dispositivos obtenidos exitosamente", out)
+		return
+	}
 	estados := h.service.GetAllEstados()
 	response.OK(w, "Estados de dispositivos obtenidos exitosamente", estados)
 }
@@ -266,3 +506,6 @@ func (h *DispositivoHandler) HandleMetricas(w http.ResponseWriter, r *http.Reque
 
 	response.Paginated(w, "Métricas del dispositivo obtenidas exitosamente", result.Items, result.Total, result.Page, result.PageSize)
 }
+
+// noStore marca la respuesta como no cacheable para datos sensibles de seguridad.
+func noStore(w http.ResponseWriter) { w.Header().Set("Cache-Control", "no-store") }

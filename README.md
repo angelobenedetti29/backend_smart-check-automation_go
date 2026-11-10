@@ -1,298 +1,187 @@
-# Smart-Check Automation — Backend
+# SmartCheck Automation — Backend
 
-Backend REST en Go para el sistema de supervisión inteligente de hornos túnel de Fermar S.A.
-Registra y consulta lotes productivos, monitorea temperaturas de hornos y recibe datos de nodos Raspberry Pi via HTTP.
+Backend REST en Go para el sistema de supervisión inteligente de hornos túnel de
+Fermar S.A. Registra y consulta lotes productivos, monitorea temperaturas de
+hornos y recibe telemetría de nodos Raspberry Pi vía HTTP. Incluye un control
+predictivo (MPC) por lote que propone setpoints de temperatura y velocidad de
+cinta, y un sidecar Python que sirve las predicciones XGBoost.
 
 ## Stack
 
 | Capa | Tecnología |
 |---|---|
 | Lenguaje | Go 1.25 |
-| Base de datos | PostgreSQL 16 |
+| Base de datos | PostgreSQL 16 (Supabase en producción) |
 | Driver DB | pgx/v5 |
-| Infraestructura local | Docker + Docker Compose |
-| Autenticación | API Key (header `X-API-Key`) |
+| Infraestructura local | Docker + Docker Compose (`db`, `app`, `predictor-svc`) |
+| Predictor | Sidecar Python/FastAPI + XGBoost (`cmd/predictor_svc`, puerto `8090`) |
+| Autenticación (usuarios) | Google OAuth 2.0 + credenciales locales (bcrypt) → JWT en cookie HttpOnly `session_token` |
+| Autenticación (nodos Raspberry Pi) | secret por nodo vía header `Authorization: Bearer <secret>` |
 
 ## Arquitectura
 
 El proyecto sigue el patrón por capas: **Handler → Service → Repository → PostgreSQL**
 
 ```
-cmd/server/main.go              # Entry point, wiring de dependencias
+cmd/server/main.go              # Entry point, wiring de dependencias y rutas
+cmd/predictor_svc/              # Sidecar FastAPI que sirve el predictor XGBoost
 internal/
   controller/                   # Handlers HTTP (capa de presentación)
-  service/                      # Lógica de negocio
+  service/                      # Lógica de negocio (incluye control MPC y optimizador)
   domain/                       # Modelos y contratos (interfaces)
   repository/                   # Repositorios reales contra PostgreSQL
   provider/database/            # Conexión al pool de PostgreSQL
-database/schema.sql             # DDL: tablas, constraints, índices, seed
+database/schema.sql             # Esquema canónico de instalación limpia: tablas, constraints, índices, seed
+database/migrations/            # Migraciones incrementales para bases existentes (schema_migrations)
+docker-compose.yml              # db + app + predictor-svc
 ```
 
----
+El backend aplica `database/schema.sql` embebido en cada arranque
+(`database/schema.go`) y luego las migraciones pendientes de
+`database/migrations/` (registradas en `schema_migrations`). El contenedor `db`
+también ejecuta `schema.sql` al inicializar un volumen vacío. Para cambios
+estructurales, agregá `database/migrations/NNNN_descripcion.sql`; no edites
+`schema.sql` para bases existentes. `go run ./cmd/migrate` aplica lo mismo sin
+levantar el servidor.
 
-## Endpoints
+## Servicios de Docker Compose
 
-### GET /health
+`docker compose up --build` levanta **tres** contenedores:
 
-Verifica conectividad con PostgreSQL.
-
-```
-200 OK    → {"status":"healthy"}
-503       → {"status":"unhealthy","reason":"database unreachable"}
-```
-
----
-
-### GET /api/v1/lotes-productivos
-
-Devuelve lotes productivos paginados, ordenados por `inicio_at` descendente.
-
-**Query params:**
-| Param | Default | Máximo |
+| Servicio | Qué es | Puerto |
 |---|---|---|
-| `page` | 1 | — |
-| `pageSize` | 10 | 100 |
+| `db` | PostgreSQL 16 | `5432` |
+| `app` | API Go | `${PORT}` (default `8080`) |
+| `predictor-svc` | Sidecar predictor XGBoost | `8090` |
 
-**Respuesta 200:**
-```json
-{
-  "success": true,
-  "message": "Lotes productivos obtenidos exitosamente",
-  "data": [{ ... }],
-  "total": 42,
-  "page": 1,
-  "pageSize": 10
-}
+El servicio `app` usa `PREDICTOR_URL=http://predictor-svc:8090`. Fuera de
+Compose, el default del código es `http://localhost:8090`. Si el predictor no
+responde, el MPC opera degradado: la decisión se audita como `skipped` y el
+horno conserva el último setpoint aplicado.
+
+## Control del horno (SCA-400)
+
+Cada lote abierto puede operar en tres modos:
+
+- **MANUAL:** no corre loop de MPC. La consigna se envía a mano por
+  `POST /api/v1/horno/consigna`, que exige un lote abierto en modo MANUAL y la
+  deja **encolada** (no aplicada) como decisión ya aprobada (`manual_override`)
+  para que la Raspberry la levante por
+  `GET /api/v1/lotes/{id}/consigna-propuesta` y la aplique sin el límite de Δ
+  por ciclo. `exitosa=true` en `historial_consignas` significa encolada, no
+  aplicada en el PLC.
+- **SUPERVISION:** el loop del MPC publica propuestas sin autorizar. Un operario
+  (o la propia Pi) las aprueba con `POST /api/v1/lotes/{id}/aplicar-consigna`
+  (alias `/aprobar-consigna`); la Pi las aplica y confirma con
+  `POST /api/v1/lotes/{id}/consigna/ack`.
+- **AUTOMATICO:** el loop publica propuestas ya autorizadas (`autorizada=true`)
+  y la Pi las aplica.
+
+**La Pi ENTRADA es la única que escribe el PLC real**, con su propio
+`control.sensores`/`control.actuadores` (`modbus_tcp`/`modbus_rtu`). El backend
+no abre conexiones Modbus ni escribe ningún PLC, y tampoco mantiene un horno en
+memoria: sólo encola/propone y audita. El estado real del horno es la telemetría
+de la Pi (`metricas_horno`), que `GET /api/v1/horno` proyecta.
+
+El loop emite `control.propuesta` por SSE; el evento incluye `autorizada`. La
+propuesta serializa `temp1`, `velocidad`, `z` y `prediccion`. Variables y puesta
+en marcha en [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md).
+
+## Alertas operativas
+
+Las alertas se persisten en `alertas` y quedan en estado **ACTIVA** hasta que un
+operario las reconoce (ACK); no hay auto-resolve. Tipos actuales:
+
+- `TEMPERATURA_HORNO` — T1 promedio de las últimas 3 muestras fuera del
+  objetivo ± `tolerancia_temp_c` (default 2 °C). La evalúa el loop MPC en
+  ADAPTANDO y, para lotes `MANUAL`, el monitor de telemetría.
+- `TELEMETRIA_DESACTUALIZADA` — el lote abierto no tiene muestras y lleva
+  abierto más de `TELEMETRIA_DESACTUALIZADA_SEGUNDOS`, o su última muestra es
+  más vieja que ese umbral (default 30 s). El monitor corre cada
+  `TELEMETRIA_MONITOR_INTERVALO` (default 15 s).
+- `DISPOSITIVO_OFFLINE` — el reaper detecta la transición online→offline de una
+  Raspberry (`DISPOSITIVO_REAPER_INTERVAL` / `DISPOSITIVO_OFFLINE_THRESHOLD`).
+- `PRECALENTAMIENTO_TIMEOUT` — el horno no alcanza la receta antes de
+  `MPC_PRECALENTAMIENTO_TIMEOUT_SEGUNDOS`.
+- `PORCENTAJE_QUEMADOS_ALTO` / `PORCENTAJE_CRUDOS_ALTO` — el porcentaje
+  observado en la ventana del lote supera su umbral de aceptación (default
+  `5 %`).
+
+Las alertas de lote llevan `lote_id` y las de dispositivo `dispositivo_id`;
+`horno_id` queda vacío.
+
+## Notificaciones de alertas
+
+Las alertas **WARNING** y **CRITICAL** generan una notificación por cada usuario
+activo y canal habilitado (email vía Resend o Gmail API, Telegram vía Bot API).
+Los emails llevan HTML estilizado (tabla, header por severidad, detalles y CTA)
+con fallback de texto plano. Se persisten en un outbox
+(`notificaciones_outbox`) y un worker las reintenta con backoff hasta
+`NOTIFICACIONES_MAX_INTENTOS`; el unique `(alerta_id, usuario_id, canal)`
+garantiza una sola notificación por alerta y usuario. Para reenviar una alerta
+existente a destinatarios concretos sin esperar el flujo automático:
+
+```bash
+go run ./cmd/notificar_alerta -emails "a@x.com,b@y.com"
+go run ./cmd/notificar_alerta -alerta-id <uuid> -emails "a@x.com" \
+  -panel-url "https://panel.example"
 ```
 
----
+El comando sólo encola filas `EMAIL`; el worker del backend las envía.
 
-### POST /api/v1/lotes
+El proveedor de email se elige con `NOTIFICACIONES_EMAIL_PROVIDER`
+(`resend` por defecto, o `gmail`/`gmail_api`; Gmail usa HTTPS, sin dominio
+propio y con la cuenta autenticada como remitente). Cada canal se habilita sólo
+si su configuración está completa; con variables vacías el backend arranca igual
+y ese canal queda deshabilitado. El alta y las pruebas se administran desde
+`/api/v1/admin/notificaciones` (sólo Administrador). Guía de Resend, Gmail API y
+Telegram en
+[`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md#35-notificaciones-de-alertas-opcional).
 
-Registra un lote productivo enviado por la Raspberry Pi. Requiere `X-API-Key`.
+## Endpoints (resumen)
 
-**Headers requeridos:**
-| Header | Valor |
-|---|---|
-| `Content-Type` | `application/json` |
-| `X-API-Key` | Valor de `API_KEY_SECRET` en `.env` |
+La referencia completa y actualizada —con auth, rol mínimo, request/response y
+códigos— está en [`docs/api-endpoints.md`](docs/api-endpoints.md). Los puntos de
+mayor impacto:
 
-**Body:**
-```json
-{
-  "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-  "productoNombre": "Tostada Integral",
-  "turno": "tarde",
-  "inicioAt": "2026-06-12T14:00:00Z",
-  "finAt": "2026-06-12T18:00:00Z",
-  "totalUnidades": 500,
-  "correctos": 480,
-  "quemados": 20,
-  "crudas": null,
-  "correctosKg": 96.0,
-  "quemadosKg": 4.0,
-  "crudosKg": null,
-  "tempHorno1": 188.0,
-  "tempHorno2": 192.0,
-  "velocidadCinta": 1.1,
-  "createdAt": "2026-06-12T14:00:00Z",
-  "updatedAt": "2026-06-12T18:00:00Z"
-}
-```
+- **Auth del panel/usuarios:** JWT en cookie HttpOnly `session_token` (Google
+  OAuth 2.0 o credenciales locales). No existe un header de API key compartido.
+- **Auth de dispositivos (Raspberry Pi):** cada nodo aprobado usa
+  `Authorization: Bearer <secret>`; el alta se hace vía
+  `POST /api/v1/registration-requests`.
+- **Ciclo de lote por sector:** se inicia con `POST /api/v1/lotes/inicio`
+  (device-only) y el historial se consulta con `GET /api/v1/lotes` (device o
+  JWT). El alta legada `POST /api/v1/lotes` responde **405**.
+- **Consigna manual:** `POST /api/v1/horno/consigna` (JWT;
+  Operario/Supervisor/Admin). El historial por lote se consulta en
+  `GET /api/v1/horno/consigna/historial?loteId=...`.
+- **Control MPC:** `GET /api/v1/lotes/{id}/control/estado`,
+  `PATCH /api/v1/lotes/{id}/modo`, `POST /api/v1/lotes/{id}/control/start|stop`,
+  `PATCH /api/v1/lotes/{id}/control/parametros`,
+  `GET /api/v1/lotes/{id}/consigna-propuesta`,
+  `POST /api/v1/lotes/{id}/aplicar-consigna`,
+  `POST /api/v1/lotes/{id}/consigna/ack` y `GET /api/v1/lotes/{id}/decisiones`.
+- **Notificaciones:** `GET|PATCH /api/v1/admin/notificaciones[...]` y
+  `POST /api/v1/admin/notificaciones/test` (Administrador). Ver
+  [`docs/api-endpoints.md`](docs/api-endpoints.md).
+- **`/api/v1/productos`:** `GET` acepta JWT o Bearer de dispositivo; las
+  escrituras (`POST`/`PUT`/`DELETE`) exigen rol Supervisor o Admin.
+- **Salud:** `GET /health` y `GET /healthz` verifican conectividad con
+  PostgreSQL.
 
-**Reglas de validación:**
-- `productoId` requerido y no vacío
-- `turno` debe ser `mañana`, `tarde` o `noche`
-- `correctos + quemados + crudas (si se envía) <= totalUnidades`
-- `finAt >= inicioAt`
-- Unidades, pesos y velocidad no negativos
+## Documentación
 
-**Códigos de respuesta:**
-| Código | Significado |
-|---|---|
-| 201 | Lote creado |
-| 400 | JSON malformado o body > 1MB |
-| 401 | API key inválida o ausente |
-| 415 | Content-Type incorrecto |
-| 422 | Error de validación de negocio |
-| 500 | Error de base de datos |
-
----
-
-### GET /api/v1/parametros-producto
-
-Devuelve todos los sets de parámetros y umbrales de control configurados, uno por producto, ordenados por nombre. Usado por el panel de configuración del Supervisor.
-
-**Respuesta 200:**
-```json
-{
-  "success": true,
-  "message": "Parámetros por producto obtenidos exitosamente",
-  "data": [
-    {
-      "id": "de91d67e-a9e1-4b69-a08a-46a965a4b728",
-      "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-      "productoNombre": "Tostada Integral",
-      "pesoReferenciaKg": 0.03,
-      "toleranciaPesoPct": 10,
-      "dimensionBaseCm": 8,
-      "toleranciaDimensionCm": 0.5,
-      "tempMin": 160,
-      "tempMax": 180,
-      "velocidadCintaMin": 0.1,
-      "velocidadCintaMax": 0.3,
-      "activo": true,
-      "createdAt": "2026-07-23T23:10:05Z",
-      "updatedAt": "2026-07-23T23:10:05Z"
-    }
-  ]
-}
-```
-
----
-
-### POST /api/v1/parametros-producto
-
-Da de alta un nuevo set de parámetros para un producto que todavía no tiene uno cargado. No requiere `X-API-Key` (login con Google OAuth 2.0 pendiente — ver sección de tareas).
-
-**Body:**
-```json
-{
-  "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
-  "pesoReferenciaKg": 0.03,
-  "toleranciaPesoPct": 10,
-  "dimensionBaseCm": 8,
-  "toleranciaDimensionCm": 0.5,
-  "tempMin": 160,
-  "tempMax": 180,
-  "velocidadCintaMin": 0.1,
-  "velocidadCintaMax": 0.3
-}
-```
-
-**Reglas de validación** (replican los CHECK constraints de `parametros_producto`):
-- `productoId` requerido y no vacío
-- `pesoReferenciaKg` y `dimensionBaseCm` deben ser mayores a 0
-- `toleranciaPesoPct` y `toleranciaDimensionCm` no pueden ser negativos
-- `tempMax` debe ser mayor a `tempMin`
-- `velocidadCintaMax` debe ser mayor a `velocidadCintaMin`
-
-**Códigos de respuesta:**
-| Código | Significado |
-|---|---|
-| 201 | Parámetros creados |
-| 400 | JSON malformado o body > 1MB |
-| 409 | El producto ya tiene un set de parámetros cargado |
-| 415 | Content-Type incorrecto |
-| 422 | Error de validación de negocio, o `productoId` inexistente en el catálogo |
-| 500 | Error de base de datos |
-
----
-
-### PUT /api/v1/parametros-producto
-
-Modifica el set de parámetros existente de un producto. El `productoId` (dentro del body) identifica el registro a actualizar — no hay path param. El sistema aplica los nuevos rangos de inmediato a los próximos lotes de ese producto.
-
-**Body:** mismo formato que el POST, incluyendo todos los campos (reemplazo completo, no parcial).
-
-**Códigos de respuesta:**
-| Código | Significado |
-|---|---|
-| 200 | Parámetros actualizados |
-| 400 | JSON malformado o body > 1MB |
-| 404 | No existe un set de parámetros para el `productoId` indicado |
-| 415 | Content-Type incorrecto |
-| 422 | Error de validación de negocio |
-| 500 | Error de base de datos |
-
----
-
-### GET /api/v1/horno?id=horno-01
-
-Consulta el estado del horno y ejecuta una inspección visual (YOLO).
-
----
-
-### POST /api/v1/horno/temperatura
-
-Actualiza la temperatura del horno y aplica reglas de umbral:
-
-| Temperatura | Estado | Alerta |
-|---|---|---|
-| > 200°C | MANTENIMIENTO | CRITICAL |
-| 180–200°C | ATENCION | WARNING |
-| ≤ 180°C | ACTIVO | — |
-
-**Body:**
-```json
-{ "id": "horno-01", "temperatura": 212.8 }
-```
-
----
-
-### POST /api/v1/dispositivos/ping
-
-Recibe el heartbeat de telemetría de una Raspberry Pi (cada ~10s): uso de CPU, memoria RAM, almacenamiento y temperatura interna del chip. Autenticado con header `X-API-Key`.
-
-**Body:**
-```json
-{
-  "dispositivoId": "b1c2d3e4-5678-90ab-cdef-1234567890ab",
-  "cpuPct": 42.5,
-  "memRamDisponibleMb": 512.0,
-  "memRamTotalMb": 1024.0,
-  "almacenamientoDisponibleMb": 20000.0,
-  "almacenamientoTotalMb": 64000.0,
-  "tempChip": 58.3
-}
-```
-
-`dispositivoId` debe ser un UUID válido. Los tres campos nuevos son opcionales. `almacenamientoDisponibleMb` y `almacenamientoTotalMb` deben informarse juntos; los pings legacy pueden omitirlos.
-
-**Códigos de respuesta:**
-| Código | Significado |
-|---|---|
-| 200 | Ping procesado. `data.estado` indica `online`/`offline` actual |
-| 400 | JSON malformado o body > 1MB |
-| 401 | API key inválida o ausente |
-| 415 | Content-Type incorrecto |
-| 422 | Error de validación, o `dispositivoId` inexistente en el catálogo |
-| 500 | Error interno |
-
----
-
-### GET /api/v1/dispositivos
-
-Devuelve el estado de salud actual (`online`/`offline`) de todos los dispositivos, con la última métrica y `lastSeen`.
-Requiere la cookie JWT `session_token`; no aplica restricción de rol.
-La misma autenticación aplica a `POST`, `PUT` y `DELETE /api/v1/dispositivos`.
-
----
-
-### GET /api/v1/dispositivos/metricas?dispositivoId=...&page=1&pageSize=10
-
-Devuelve el historial paginado de métricas de un dispositivo, ordenado por `receivedAt` descendente.
-Requiere la cookie JWT `session_token`; no aplica restricción de rol.
-
-**Códigos de respuesta:**
-| Código | Significado |
-|---|---|
-| 200 | Historial paginado obtenido |
-| 400 | Falta el parámetro `dispositivoId` |
-| 404 | El dispositivo no existe en el catálogo |
-| 401 | Falta la cookie JWT o la sesión es inválida/expirada |
-| 500 | Error de base de datos |
-
----
-
-### GET /api/v1/dispositivos/events
-
-Stream SSE de telemetría de dispositivos. Eventos:
-- Requiere la cookie JWT `session_token`; no aplica restricción de rol.
-- `dispositivo.metric`: se emite en cada ping con la última métrica.
-- `dispositivo.state`: se emite solo cuando un dispositivo transiciona `online`↔`offline`.
-
-```json
-event: dispositivo.state
-data: {"success":true,"message":"El estado del dispositivo cambió a offline","data":{...}}
-```
+- [`MANUAL_INSTALACION.md`](MANUAL_INSTALACION.md) — instalación, variables de
+  entorno, ejecución, tests y despliegue.
+- [`docs/api-endpoints.md`](docs/api-endpoints.md) — contrato detallado de los
+  endpoints.
+- [`CLAUDE.md`](CLAUDE.md) — convenciones, estructura, estado y decisiones de
+  arquitectura del proyecto.
+- [`docs/consigna-horno.md`](docs/consigna-horno.md) — diseño de consigna
+  manual y control MPC (incluye notas históricas de SCA-142).
+- [`docs/backend-go-lotes-sector.md`](docs/backend-go-lotes-sector.md) —
+  contrato de lotes por sector.
+- [`docs/device-registration-contract.md`](docs/device-registration-contract.md)
+  — registro y autenticación de dispositivos.
+- [`cmd/predictor_svc/README.md`](cmd/predictor_svc/README.md) — sidecar
+  predictor XGBoost.

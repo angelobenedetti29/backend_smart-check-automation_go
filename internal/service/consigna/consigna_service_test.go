@@ -3,95 +3,98 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/angelobenedetti29/smart-check-automation/internal/domain/consigna"
-	"github.com/angelobenedetti29/smart-check-automation/internal/domain/horno"
-	parametrosproducto "github.com/angelobenedetti29/smart-check-automation/internal/domain/parametros_producto"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/database"
-	"github.com/angelobenedetti29/smart-check-automation/internal/provider/oven_controller"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/decisiones_control"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/lote_sector"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/metricashorno"
+	"github.com/angelobenedetti29/smart-check-automation/internal/domain/producto"
 	"github.com/angelobenedetti29/smart-check-automation/internal/sse"
 )
 
-// fakeController es un doble de prueba determinista de OvenController: en vez
-// del ~5% de fallo aleatorio del cliente simulado real, siempre devuelve el
-// DispatchResult configurado — necesario para probar la rama de fallo de
-// enlace (alerta crítica + CONTROL_MANUAL) sin depender del azar.
-type fakeController struct {
-	result oven_controller.DispatchResult
-}
-
-func (f *fakeController) SendSetpoint(hornoID string, temperatura, velocidad float64) oven_controller.DispatchResult {
-	return f.result
-}
-
 const testProductoID = "a1b2c3d4-5678-90ab-cdef-1234567890ab"
 
-// fakeParamRepo es un mock en memoria de parametros_producto.Repository.
-type fakeParamRepo struct {
-	byProducto map[string]parametrosproducto.ParametroProducto
+// fakeProductoRepo es un mock en memoria de producto.Repository.
+type fakeProductoRepo struct {
+	byID map[string]producto.Producto
 }
 
-func newFakeParamRepo() *fakeParamRepo {
-	return &fakeParamRepo{byProducto: make(map[string]parametrosproducto.ParametroProducto)}
+func newFakeProductoRepo() *fakeProductoRepo {
+	return &fakeProductoRepo{byID: make(map[string]producto.Producto)}
 }
 
-func (f *fakeParamRepo) GetAll(ctx context.Context) ([]parametrosproducto.ParametroProducto, error) {
-	var out []parametrosproducto.ParametroProducto
-	for _, p := range f.byProducto {
+func (f *fakeProductoRepo) List(context.Context) ([]producto.Producto, error) {
+	out := make([]producto.Producto, 0, len(f.byID))
+	for _, p := range f.byID {
 		out = append(out, p)
 	}
 	return out, nil
 }
 
-func (f *fakeParamRepo) GetByProductoID(ctx context.Context, productoID string) (*parametrosproducto.ParametroProducto, error) {
-	if p, ok := f.byProducto[productoID]; ok {
+func (f *fakeProductoRepo) GetByID(_ context.Context, id string) (*producto.Producto, error) {
+	if p, ok := f.byID[id]; ok {
 		return &p, nil
 	}
-	return nil, parametrosproducto.ErrNotFound
+	return nil, producto.ErrDesconocido
 }
 
-func (f *fakeParamRepo) Create(ctx context.Context, p *parametrosproducto.ParametroProducto) error {
-	f.byProducto[p.ProductoID] = *p
+func (f *fakeProductoRepo) Create(_ context.Context, p *producto.Producto) (*producto.Producto, error) {
+	f.byID[p.ID] = *p
+	return p, nil
+}
+
+func (f *fakeProductoRepo) Update(_ context.Context, p *producto.Producto) (*producto.Producto, error) {
+	f.byID[p.ID] = *p
+	return p, nil
+}
+
+func (f *fakeProductoRepo) Deactivate(_ context.Context, id string) error {
+	p, ok := f.byID[id]
+	if !ok {
+		return producto.ErrDesconocido
+	}
+	p.Activo = false
+	f.byID[id] = p
 	return nil
 }
 
-func (f *fakeParamRepo) Update(ctx context.Context, p *parametrosproducto.ParametroProducto) error {
-	f.byProducto[p.ProductoID] = *p
-	return nil
+func (f *fakeProductoRepo) ExistsByNombre(context.Context, string, string) (bool, error) {
+	return false, nil
 }
 
-func floatPtr(v float64) *float64 { return &v }
-
-// baseParametros devuelve un set de parámetros válido con setpoint cargado para testProductoID.
-func baseParametros() parametrosproducto.ParametroProducto {
-	return parametrosproducto.ParametroProducto{
-		ProductoID:             testProductoID,
-		TempMin:                160.00,
-		TempMax:                180.00,
-		VelocidadCintaMin:      0.10,
-		VelocidadCintaMax:      0.30,
-		TempSetpoint:           floatPtr(170.00),
-		VelocidadCintaSetpoint: floatPtr(0.20),
+func productoValido() producto.Producto {
+	return producto.Producto{
+		ID:                testProductoID,
+		Nombre:            "Tostada Integral",
+		TempMin:           160,
+		TempMax:           180,
+		VelocidadCintaMin: 0.10,
+		VelocidadCintaMax: 0.30,
 	}
 }
 
 // fakeConsignaRepo es un mock en memoria de consigna.Repository.
 type fakeConsignaRepo struct {
-	mu    sync.Mutex
-	saved []consigna.Consigna
+	mu      sync.Mutex
+	saved   []consigna.Consigna
+	saveErr error
 }
 
-func (f *fakeConsignaRepo) Save(ctx context.Context, c *consigna.Consigna) error {
+func (f *fakeConsignaRepo) Save(_ context.Context, c *consigna.Consigna) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	c.ID = "consigna-1"
 	f.saved = append(f.saved, *c)
 	return nil
 }
 
-func (f *fakeConsignaRepo) GetByLoteID(ctx context.Context, loteID string) ([]consigna.Consigna, error) {
+func (f *fakeConsignaRepo) GetByLoteID(_ context.Context, loteID string) ([]consigna.Consigna, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []consigna.Consigna
@@ -103,16 +106,12 @@ func (f *fakeConsignaRepo) GetByLoteID(ctx context.Context, loteID string) ([]co
 	return out, nil
 }
 
-func (f *fakeConsignaRepo) GetByHornoID(ctx context.Context, hornoID string, limit int) ([]consigna.Consigna, error) {
+func (f *fakeConsignaRepo) MarcarAplicadaPorDecision(context.Context, string) error { return nil }
+
+func (f *fakeConsignaRepo) all() []consigna.Consigna {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []consigna.Consigna
-	for _, c := range f.saved {
-		if c.HornoID == hornoID {
-			out = append(out, c)
-		}
-	}
-	return out, nil
+	return append([]consigna.Consigna(nil), f.saved...)
 }
 
 func (f *fakeConsignaRepo) count() int {
@@ -121,302 +120,401 @@ func (f *fakeConsignaRepo) count() int {
 	return len(f.saved)
 }
 
-// newTestService arma un ConsignaService con el cliente simulado real (~5%
-// de fallo aleatorio) — usado por los tests existentes que toleran esa
-// variabilidad. database.PostgresRepository (en memoria) implementa tanto
-// horno.Repository como alerta.Repository, así que se reutiliza para ambos.
-func newTestService(paramRepo *fakeParamRepo) (*ConsignaService, *database.PostgresRepository, *fakeConsignaRepo) {
-	hornoRepo := database.NewPostgresRepository()
-	consignaRepo := &fakeConsignaRepo{}
-	ctrl := oven_controller.NewOvenControllerClient("http://localhost:8600/plc/horno")
-	broker := sse.NewBroker()
-	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
-	return svc, hornoRepo, consignaRepo
+// fakeDecisionesRepo es un doble en memoria del mínimo de decisiones_control
+// que consume el service (Save + Aprobar).
+type fakeDecisionesRepo struct {
+	mu         sync.Mutex
+	saved      []decisiones_control.DecisionControl
+	aprobadas  []string
+	saveErr    error
+	aprobarErr error
 }
 
-// newTestServiceWithController arma un ConsignaService con un OvenController
-// determinista (fakeController), para probar rutas de éxito/fallo sin depender
-// del azar del cliente simulado real.
-func newTestServiceWithController(paramRepo *fakeParamRepo, ctrl OvenController) (*ConsignaService, *database.PostgresRepository, *fakeConsignaRepo) {
-	hornoRepo := database.NewPostgresRepository()
-	consignaRepo := &fakeConsignaRepo{}
-	broker := sse.NewBroker()
-	svc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, ctrl, broker, hornoRepo)
-	return svc, hornoRepo, consignaRepo
+func (f *fakeDecisionesRepo) Save(_ context.Context, d *decisiones_control.DecisionControl) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+	d.ID = fmt.Sprintf("dec-%d", len(f.saved)+1)
+	f.saved = append(f.saved, *d)
+	return nil
 }
 
-func TestDispatchAutomatico_SinSetpointCargado(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	p := baseParametros()
-	p.TempSetpoint = nil
-	paramRepo.byProducto[testProductoID] = p
+func (f *fakeDecisionesRepo) Aprobar(_ context.Context, decisionID, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.aprobarErr != nil {
+		return f.aprobarErr
+	}
+	f.aprobadas = append(f.aprobadas, decisionID)
+	return nil
+}
 
-	svc, _, consignaRepo := newTestService(paramRepo)
+func (f *fakeDecisionesRepo) snapshot() ([]decisiones_control.DecisionControl, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]decisiones_control.DecisionControl(nil), f.saved...), append([]string(nil), f.aprobadas...)
+}
 
-	_, err := svc.DispatchAutomatico(context.Background(), "horno-01", "lote-1", testProductoID)
+// fakeLoteLookup resuelve el lote configurado por id.
+type fakeLoteLookup struct {
+	lotes map[string]*lote_sector.Lote
+	err   error
+}
+
+func (f *fakeLoteLookup) GetByID(_ context.Context, loteID string) (*lote_sector.Lote, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if l, ok := f.lotes[loteID]; ok {
+		return l, nil
+	}
+	return nil, lote_sector.ErrNotFound
+}
+
+// fakeMetricasLookup devuelve la telemetría configurada para cualquier lote.
+type fakeMetricasLookup struct {
+	muestras []metricashorno.MetricaHorno
+	err      error
+}
+
+func (f *fakeMetricasLookup) GetUltimasParaLote(context.Context, string, int) ([]metricashorno.MetricaHorno, error) {
+	return f.muestras, f.err
+}
+
+func loteAbiertoManual() *lote_sector.Lote {
+	return &lote_sector.Lote{
+		ID:       "lote-1",
+		SectorID: "sector-1",
+		Estado:   lote_sector.EstadoAbierto,
+		Modo:     lote_sector.ModoManual,
+	}
+}
+
+// testHarness agrupa el service y sus dobles para inspeccionar el resultado.
+type testHarness struct {
+	svc        *ConsignaService
+	consignas  *fakeConsignaRepo
+	decisiones *fakeDecisionesRepo
+	lotes      *fakeLoteLookup
+	metricas   *fakeMetricasLookup
+	productos  *fakeProductoRepo
+}
+
+func newHarness(lote *lote_sector.Lote) *testHarness {
+	productos := newFakeProductoRepo()
+	productos.byID[testProductoID] = productoValido()
+	consignas := &fakeConsignaRepo{}
+	decisiones := &fakeDecisionesRepo{}
+	lotes := &fakeLoteLookup{lotes: map[string]*lote_sector.Lote{}}
+	if lote != nil {
+		lotes.lotes[lote.ID] = lote
+	}
+	metricas := &fakeMetricasLookup{}
+	return &testHarness{
+		svc:        NewConsignaService(consignas, productos, sse.NewBroker(), decisiones, lotes, metricas),
+		consignas:  consignas,
+		decisiones: decisiones,
+		lotes:      lotes,
+		metricas:   metricas,
+		productos:  productos,
+	}
+}
+
+func reqManual(loteID string) consigna.ConsignaManualRequest {
+	var lote *string
+	if loteID != "" {
+		lote = &loteID
+	}
+	return consigna.ConsignaManualRequest{
+		ProductoID:             testProductoID,
+		TemperaturaObjetivo:    170,
+		VelocidadCintaObjetivo: 0.20,
+		Usuario:                "operario-demo",
+		LoteID:                 lote,
+	}
+}
+
+func TestDispatchManual_LoteRequerido(t *testing.T) {
+	h := newHarness(loteAbiertoManual())
+
+	for _, loteID := range []string{"", "   "} {
+		_, err := h.svc.DispatchManual(context.Background(), reqManual(loteID))
+		if !errors.Is(err, consigna.ErrLoteRequerido) {
+			t.Fatalf("loteID=%q: expected ErrLoteRequerido, got %v", loteID, err)
+		}
+	}
+	if h.consignas.count() != 0 {
+		t.Fatalf("un request sin lote no debe auditarse")
+	}
+}
+
+func TestDispatchManual_LoteNoExiste(t *testing.T) {
+	h := newHarness(loteAbiertoManual())
+
+	_, err := h.svc.DispatchManual(context.Background(), reqManual("lote-inexistente"))
+	if !errors.Is(err, consigna.ErrLoteNoExiste) {
+		t.Fatalf("expected ErrLoteNoExiste, got %v", err)
+	}
+	if h.consignas.count() != 0 {
+		t.Fatalf("un lote inexistente no debe auditarse")
+	}
+}
+
+func TestDispatchManual_LoteNoAbierto(t *testing.T) {
+	lote := loteAbiertoManual()
+	lote.Estado = lote_sector.EstadoCerrado
+	h := newHarness(lote)
+
+	_, err := h.svc.DispatchManual(context.Background(), reqManual(lote.ID))
+	if !errors.Is(err, consigna.ErrLoteNoAbierto) {
+		t.Fatalf("expected ErrLoteNoAbierto, got %v", err)
+	}
+	if h.consignas.count() != 0 {
+		t.Fatalf("un lote cerrado no debe auditarse")
+	}
+}
+
+func TestDispatchManual_LoteNoManual(t *testing.T) {
+	lote := loteAbiertoManual()
+	lote.Modo = lote_sector.ModoAutomatico
+	h := newHarness(lote)
+
+	_, err := h.svc.DispatchManual(context.Background(), reqManual(lote.ID))
+	if !errors.Is(err, consigna.ErrLoteNoManual) {
+		t.Fatalf("expected ErrLoteNoManual, got %v", err)
+	}
+	if decisiones, aprobadas := h.decisiones.snapshot(); len(decisiones) != 0 || len(aprobadas) != 0 {
+		t.Fatalf("un lote no MANUAL no debe encolar ni aprobar; decisiones=%d aprobadas=%d", len(decisiones), len(aprobadas))
+	}
+}
+
+func TestDispatchManual_SectorMismatch(t *testing.T) {
+	h := newHarness(loteAbiertoManual())
+
+	req := reqManual("lote-1")
+	req.SectorID = "otro-sector"
+	_, err := h.svc.DispatchManual(context.Background(), req)
+	if !errors.Is(err, consigna.ErrSectorMismatch) {
+		t.Fatalf("expected ErrSectorMismatch, got %v", err)
+	}
+	if h.consignas.count() != 0 {
+		t.Fatalf("un mismatch no debe auditarse")
+	}
+
+	// El alias legacy hornoId también se compara contra el sector del lote.
+	req = reqManual("lote-1")
+	req.HornoID = "otro-sector"
+	_, err = h.svc.DispatchManual(context.Background(), req)
+	if !errors.Is(err, consigna.ErrSectorMismatch) {
+		t.Fatalf("alias hornoId: expected ErrSectorMismatch, got %v", err)
+	}
+}
+
+func TestDispatchManual_SectorOpcionalCoincide(t *testing.T) {
+	h := newHarness(loteAbiertoManual())
+
+	req := reqManual("lote-1")
+	req.SectorID = "sector-1"
+	rec, err := h.svc.DispatchManual(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.HornoID != "sector-1" {
+		t.Fatalf("HornoID = %q, want sector-1", rec.HornoID)
+	}
+}
+
+func TestDispatchManual_LoteSinSector(t *testing.T) {
+	lote := loteAbiertoManual()
+	lote.SectorID = ""
+	h := newHarness(lote)
+
+	_, err := h.svc.DispatchManual(context.Background(), reqManual(lote.ID))
+	if !errors.Is(err, consigna.ErrSectorRequerido) {
+		t.Fatalf("expected ErrSectorRequerido, got %v", err)
+	}
+}
+
+func TestDispatchManual_ParametrosNoExiste(t *testing.T) {
+	h := newHarness(loteAbiertoManual())
+
+	req := reqManual("lote-1")
+	req.ProductoID = "producto-inexistente"
+	_, err := h.svc.DispatchManual(context.Background(), req)
 	if !errors.Is(err, consigna.ErrParametrosNoExiste) {
 		t.Fatalf("expected ErrParametrosNoExiste, got %v", err)
-	}
-	if consignaRepo.count() != 0 {
-		t.Fatalf("no debería auditarse un intento que ni siquiera llega al controlador")
-	}
-}
-
-func TestDispatchAutomatico_ProductoSinParametros(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	svc, _, _ := newTestService(paramRepo)
-
-	_, err := svc.DispatchAutomatico(context.Background(), "horno-01", "lote-1", "producto-inexistente")
-	if !errors.Is(err, consigna.ErrParametrosNoExiste) {
-		t.Fatalf("expected ErrParametrosNoExiste, got %v", err)
-	}
-}
-
-func TestDispatchAutomatico_HornoInexistente(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, _, _ := newTestService(paramRepo)
-
-	_, err := svc.DispatchAutomatico(context.Background(), "horno-inexistente", "lote-1", testProductoID)
-	if !errors.Is(err, consigna.ErrHornoNoExiste) {
-		t.Fatalf("expected ErrHornoNoExiste, got %v", err)
 	}
 }
 
 func TestDispatchManual_FueraDeRango(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, _, consignaRepo := newTestService(paramRepo)
+	h := newHarness(loteAbiertoManual())
 
-	req := consigna.ConsignaManualRequest{
-		HornoID:                "horno-01",
-		ProductoID:             testProductoID,
-		TemperaturaObjetivo:    999.0, // fuera de [160, 180]
-		VelocidadCintaObjetivo: 0.20,
-	}
-
-	_, err := svc.DispatchManual(context.Background(), req)
+	req := reqManual("lote-1")
+	req.TemperaturaObjetivo = 999
+	_, err := h.svc.DispatchManual(context.Background(), req)
 	if !errors.Is(err, consigna.ErrFueraDeRango) {
 		t.Fatalf("expected ErrFueraDeRango, got %v", err)
 	}
-	if consignaRepo.count() != 0 {
-		t.Fatalf("un valor fuera de rango no debería llegar a auditarse/despacharse")
+	if h.consignas.count() != 0 {
+		t.Fatalf("un valor fuera de rango no debe auditarse")
 	}
 }
 
-func TestDispatchManual_DentroDeRango_ActualizaHornoYAudita(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, hornoRepo, consignaRepo := newTestService(paramRepo)
+func TestDispatchManual_ExitoEncolaYAudita(t *testing.T) {
+	temp, vel := 198.0, 0.31
+	h := newHarness(loteAbiertoManual())
+	h.metricas.muestras = []metricashorno.MetricaHorno{{TempHorno1: &temp, VelocidadCinta: &vel}}
 
-	req := consigna.ConsignaManualRequest{
-		HornoID:                "horno-01",
-		ProductoID:             testProductoID,
-		TemperaturaObjetivo:    170.0,
-		VelocidadCintaObjetivo: 0.20,
-		Usuario:                "operario-demo",
-	}
-
-	rec, err := svc.DispatchManual(context.Background(), req)
-	// El controlador simulado falla ~5% de las veces; ambas ramas deben auditar.
-	if err != nil && !errors.Is(err, consigna.ErrDispatchFallido) {
+	rec, err := h.svc.DispatchManual(context.Background(), reqManual("lote-1"))
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !rec.Exitosa {
+		t.Fatalf("Exitosa = false, want true (aceptada y encolada)")
+	}
+	if rec.Estado != consigna.EstadoConsignaPendiente {
+		t.Fatalf("Estado = %q, want PENDIENTE", rec.Estado)
+	}
+	if rec.DecisionID == nil || *rec.DecisionID != "dec-1" {
+		t.Fatalf("DecisionID = %v, want dec-1", rec.DecisionID)
+	}
+	if rec.HornoID != "sector-1" {
+		t.Fatalf("HornoID = %q, want sector-1", rec.HornoID)
 	}
 	if rec.Origen != consigna.OrigenManual {
-		t.Errorf("expected origen MANUAL, got %s", rec.Origen)
+		t.Fatalf("Origen = %q, want MANUAL", rec.Origen)
 	}
-	if consignaRepo.count() != 1 {
-		t.Fatalf("expected 1 registro de auditoría, got %d", consignaRepo.count())
+	if rec.LoteID == nil || *rec.LoteID != "lote-1" {
+		t.Fatalf("LoteID = %v, want lote-1", rec.LoteID)
+	}
+	if rec.ProductoID == nil || *rec.ProductoID != testProductoID {
+		t.Fatalf("ProductoID = %v, want %s", rec.ProductoID, testProductoID)
+	}
+	if rec.Usuario == nil || *rec.Usuario != "operario-demo" {
+		t.Fatalf("Usuario = %v, want operario-demo", rec.Usuario)
+	}
+	if rec.TemperaturaPrevia == nil || *rec.TemperaturaPrevia != 198 {
+		t.Fatalf("TemperaturaPrevia = %v, want 198", rec.TemperaturaPrevia)
+	}
+	if rec.VelocidadCintaPrevia == nil || *rec.VelocidadCintaPrevia != 0.31 {
+		t.Fatalf("VelocidadCintaPrevia = %v, want 0.31", rec.VelocidadCintaPrevia)
 	}
 
-	if err == nil {
-		h, getErr := hornoRepo.GetByID("horno-01")
-		if getErr != nil {
-			t.Fatalf("unexpected error fetching horno: %v", getErr)
-		}
-		if h.Temperatura != 170.0 || h.VelocidadCinta != 0.20 {
-			t.Errorf("expected horno state to reflect dispatched setpoint, got temp=%.2f vel=%.2f", h.Temperatura, h.VelocidadCinta)
-		}
+	if h.consignas.count() != 1 {
+		t.Fatalf("expected 1 registro auditado, got %d", h.consignas.count())
+	}
+	decisiones, aprobadas := h.decisiones.snapshot()
+	if len(decisiones) != 1 {
+		t.Fatalf("expected 1 decisión encolada, got %d", len(decisiones))
+	}
+	d := decisiones[0]
+	if d.LoteID != "lote-1" {
+		t.Fatalf("decision.LoteID = %q, want lote-1", d.LoteID)
+	}
+	if d.Muestras != 0 {
+		t.Fatalf("decision.Muestras = %d, want 0 (override manual)", d.Muestras)
+	}
+	if d.TempPropuesto != 170 || d.VelPropuesto != 0.20 {
+		t.Fatalf("propuesta = %.2f/%.2f, want 170/0.20", d.TempPropuesto, d.VelPropuesto)
+	}
+	if d.TempActual != 198 {
+		t.Fatalf("TempActual = %.2f, want 198 (telemetría)", d.TempActual)
+	}
+	if d.VelActual == nil || *d.VelActual != 0.31 {
+		t.Fatalf("VelActual = %v, want 0.31", d.VelActual)
+	}
+	if d.AplicadoPor != decisiones_control.AplicadoPorNadie {
+		t.Fatalf("AplicadoPor = %q, want NADIE", d.AplicadoPor)
+	}
+	if len(aprobadas) != 1 || aprobadas[0] != d.ID {
+		t.Fatalf("expected la decisión %q aprobada, got %v", d.ID, aprobadas)
 	}
 }
 
-func TestDispatchManual_ConLoteID_QuedaCorrelacionadoEnHistorial(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, _, consignaRepo := newTestService(paramRepo)
+func TestDispatchManual_SinTelemetriaPreviosNil(t *testing.T) {
+	h := newHarness(loteAbiertoManual())
 
-	loteID := "lote-correlacion-1"
-	req := consigna.ConsignaManualRequest{
-		HornoID:                "horno-01",
-		ProductoID:             testProductoID,
-		TemperaturaObjetivo:    170.0,
-		VelocidadCintaObjetivo: 0.20,
-		LoteID:                 &loteID,
-	}
-
-	rec, err := svc.DispatchManual(context.Background(), req)
-	if err != nil && !errors.Is(err, consigna.ErrDispatchFallido) {
+	rec, err := h.svc.DispatchManual(context.Background(), reqManual("lote-1"))
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if rec.LoteID == nil || *rec.LoteID != loteID {
-		t.Fatalf("expected LoteID %q en el registro, got %v", loteID, rec.LoteID)
+	if rec.TemperaturaPrevia != nil || rec.VelocidadCintaPrevia != nil {
+		t.Fatalf("sin telemetría los previos deben ser nil; got %v/%v", rec.TemperaturaPrevia, rec.VelocidadCintaPrevia)
+	}
+	decisiones, _ := h.decisiones.snapshot()
+	if len(decisiones) != 1 {
+		t.Fatalf("expected 1 decisión, got %d", len(decisiones))
+	}
+	if decisiones[0].TempActual != 0 {
+		t.Fatalf("TempActual = %v, want 0 sin telemetría", decisiones[0].TempActual)
+	}
+	if decisiones[0].VelActual == nil || *decisiones[0].VelActual != 0 {
+		t.Fatalf("VelActual = %v, want 0 sin telemetría", decisiones[0].VelActual)
+	}
+}
+
+func TestDispatchManual_FalloDeEncolado(t *testing.T) {
+	casos := []struct {
+		nombre string
+		setErr func(*testHarness)
+	}{
+		{"save_decision", func(h *testHarness) { h.decisiones.saveErr = errors.New("db down") }},
+		{"aprobar_decision", func(h *testHarness) { h.decisiones.aprobarErr = errors.New("db down") }},
+	}
+	for _, tc := range casos {
+		t.Run(tc.nombre, func(t *testing.T) {
+			h := newHarness(loteAbiertoManual())
+			tc.setErr(h)
+
+			rec, err := h.svc.DispatchManual(context.Background(), reqManual("lote-1"))
+			if !errors.Is(err, consigna.ErrEncoladoFallido) {
+				t.Fatalf("expected ErrEncoladoFallido, got %v", err)
+			}
+			if rec == nil || rec.Exitosa {
+				t.Fatalf("el registro debe quedar con exitosa=false; got %+v", rec)
+			}
+			if rec.Estado != consigna.EstadoConsignaRechazada {
+				t.Fatalf("Estado = %q, want RECHAZADA", rec.Estado)
+			}
+			if rec.DecisionID != nil {
+				t.Fatalf("DecisionID = %v, want nil sin encolado", rec.DecisionID)
+			}
+			if rec.MotivoError == nil {
+				t.Fatalf("el registro fallido debe tener motivo_error")
+			}
+			saved := h.consignas.all()
+			if len(saved) != 1 {
+				t.Fatalf("expected el intento fallido auditado, got %d", len(saved))
+			}
+			if saved[0].Exitosa {
+				t.Fatalf("el historial debe guardar exitosa=false")
+			}
+			if saved[0].Estado != consigna.EstadoConsignaRechazada {
+				t.Fatalf("el historial debe guardar estado=RECHAZADA; got %q", saved[0].Estado)
+			}
+			if saved[0].MotivoError == nil {
+				t.Fatalf("el historial debe guardar motivo_error")
+			}
+		})
+	}
+}
+
+func TestGetHistorialByLote(t *testing.T) {
+	h := newHarness(loteAbiertoManual())
+	if _, err := h.svc.DispatchManual(context.Background(), reqManual("lote-1")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	historial, err := consignaRepo.GetByLoteID(context.Background(), loteID)
+	historial, err := h.svc.GetHistorialByLote(context.Background(), "lote-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(historial) != 1 {
-		t.Fatalf("expected 1 registro en el historial del lote, got %d", len(historial))
+		t.Fatalf("expected 1 registro en el historial, got %d", len(historial))
 	}
 	if historial[0].Origen != consigna.OrigenManual {
-		t.Errorf("expected origen MANUAL en el historial, got %s", historial[0].Origen)
-	}
-}
-
-func TestDispatchManual_SinLoteID_NoQuedaAsociadoANingunLote(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, _, _ := newTestService(paramRepo)
-
-	req := consigna.ConsignaManualRequest{
-		HornoID:                "horno-01",
-		ProductoID:             testProductoID,
-		TemperaturaObjetivo:    170.0,
-		VelocidadCintaObjetivo: 0.20,
-	}
-
-	rec, err := svc.DispatchManual(context.Background(), req)
-	if err != nil && !errors.Is(err, consigna.ErrDispatchFallido) {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if rec.LoteID != nil {
-		t.Errorf("expected LoteID nil cuando no se especifica en el request, got %v", *rec.LoteID)
-	}
-}
-
-func TestDispatch_Fallido_GeneraAlertaCriticaYPasaAControlManual(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	failing := &fakeController{result: oven_controller.DispatchResult{Aplicada: false, Motivo: "timeout simulado del enlace"}}
-	svc, hornoRepo, consignaRepo := newTestServiceWithController(paramRepo, failing)
-
-	req := consigna.ConsignaManualRequest{
-		HornoID:                "horno-01",
-		ProductoID:             testProductoID,
-		TemperaturaObjetivo:    170.0,
-		VelocidadCintaObjetivo: 0.20,
-	}
-
-	_, err := svc.DispatchManual(context.Background(), req)
-	if !errors.Is(err, consigna.ErrDispatchFallido) {
-		t.Fatalf("expected ErrDispatchFallido, got %v", err)
-	}
-	if consignaRepo.count() != 1 {
-		t.Fatalf("expected el intento fallido auditado, got %d registros", consignaRepo.count())
-	}
-
-	h, getErr := hornoRepo.GetByID("horno-01")
-	if getErr != nil {
-		t.Fatalf("unexpected error: %v", getErr)
-	}
-	if h.Estado != horno.EstadoControlManual {
-		t.Errorf("expected Estado CONTROL_MANUAL tras el fallo, got %s", h.Estado)
-	}
-
-	alertas, alertaErr := hornoRepo.GetByHornoID("horno-01")
-	if alertaErr != nil {
-		t.Fatalf("unexpected error: %v", alertaErr)
-	}
-	if len(alertas) != 1 {
-		t.Fatalf("expected 1 alerta crítica generada, got %d", len(alertas))
-	}
-	if alertas[0].Nivel != "CRITICAL" {
-		t.Errorf("expected nivel CRITICAL, got %s", alertas[0].Nivel)
-	}
-}
-
-func TestDispatchAutomatico_BloqueadoSiHornoEnControlManual(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, hornoRepo, _ := newTestServiceWithController(paramRepo, &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}})
-
-	h, err := hornoRepo.GetByID("horno-01")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	h.Estado = horno.EstadoControlManual
-	if err := hornoRepo.Update(h); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	_, err = svc.DispatchAutomatico(context.Background(), "horno-01", "lote-1", testProductoID)
-	if !errors.Is(err, consigna.ErrHornoEnControlManual) {
-		t.Fatalf("expected ErrHornoEnControlManual, got %v", err)
-	}
-}
-
-func TestDispatchManual_NoSeBloqueaAunqueHornoEsteEnControlManual(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-	svc, hornoRepo, _ := newTestServiceWithController(paramRepo, &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}})
-
-	h, _ := hornoRepo.GetByID("horno-01")
-	h.Estado = horno.EstadoControlManual
-	_ = hornoRepo.Update(h)
-
-	req := consigna.ConsignaManualRequest{
-		HornoID:                "horno-01",
-		ProductoID:             testProductoID,
-		TemperaturaObjetivo:    170.0,
-		VelocidadCintaObjetivo: 0.20,
-	}
-
-	rec, err := svc.DispatchManual(context.Background(), req)
-	if err != nil {
-		t.Fatalf("el envío manual no debería bloquearse en CONTROL_MANUAL: %v", err)
-	}
-	if !rec.Exitosa {
-		t.Errorf("expected consigna exitosa, got Exitosa=false")
-	}
-}
-
-func TestDispatchManual_ExitosoTrasFalloRestauraEstadoActivo(t *testing.T) {
-	paramRepo := newFakeParamRepo()
-	paramRepo.byProducto[testProductoID] = baseParametros()
-
-	failingCtrl := &fakeController{result: oven_controller.DispatchResult{Aplicada: false, Motivo: "timeout simulado"}}
-	failingSvc, hornoRepo, consignaRepo := newTestServiceWithController(paramRepo, failingCtrl)
-
-	req := consigna.ConsignaManualRequest{
-		HornoID:                "horno-01",
-		ProductoID:             testProductoID,
-		TemperaturaObjetivo:    170.0,
-		VelocidadCintaObjetivo: 0.20,
-	}
-
-	_, err := failingSvc.DispatchManual(context.Background(), req)
-	if !errors.Is(err, consigna.ErrDispatchFallido) {
-		t.Fatalf("expected ErrDispatchFallido, got %v", err)
-	}
-	h, _ := hornoRepo.GetByID("horno-01")
-	if h.Estado != horno.EstadoControlManual {
-		t.Fatalf("precondición fallida: esperaba CONTROL_MANUAL, got %s", h.Estado)
-	}
-
-	// Reutiliza el mismo hornoRepo/consignaRepo/paramRepo, pero con un
-	// controller exitoso, para simular que el operario reactivó el enlace.
-	okCtrl := &fakeController{result: oven_controller.DispatchResult{Aplicada: true, TemperaturaReal: 170, VelocidadReal: 0.20}}
-	broker := sse.NewBroker()
-	okSvc := NewConsignaService(consignaRepo, hornoRepo, paramRepo, okCtrl, broker, hornoRepo)
-
-	_, err = okSvc.DispatchManual(context.Background(), req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	h2, _ := hornoRepo.GetByID("horno-01")
-	if h2.Estado != "ACTIVO" {
-		t.Errorf("expected Estado ACTIVO tras despacho exitoso, got %s", h2.Estado)
+		t.Fatalf("Origen = %q, want MANUAL", historial[0].Origen)
 	}
 }

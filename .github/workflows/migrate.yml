@@ -18,18 +18,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y postgresql-client
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-      # El schema usa IF NOT EXISTS y ON CONFLICT DO NOTHING: es idempotente.
-      # Al agregar tablas nuevas, crear un nuevo archivo .sql en database/ y
-      # aplicarlo aquí; o migrar a golang-migrate cuando el esquema evolucione.
-      - name: Run migrations
+      # Aplica schema.sql (instalación limpia) y las migraciones pendientes de
+      # database/migrations. El runner registra cada versión en schema_migrations.
+      - name: Apply schema and migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: psql "$DATABASE_URL" -f database/schema.sql
+        run: go run ./cmd/migrate
 
       - name: Trigger Render deploy
         env:

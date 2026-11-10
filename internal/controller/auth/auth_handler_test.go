@@ -16,31 +16,6 @@ import (
 	authServicePkg "github.com/angelobenedetti29/smart-check-automation/internal/service/auth"
 )
 
-
-// --- Mock del AuthService ---
-
-type mockAuthService struct {
-	loginFunc func(ctx context.Context, googleToken string) (string, error)
-}
-
-func (m *mockAuthService) LoginWithGoogle(ctx context.Context, googleToken string) (string, error) {
-	return m.loginFunc(ctx, googleToken)
-}
-
-// mockableAuthHandler usa una interfaz para permitir mock en tests.
-type mockableAuthHandler struct {
-	loginFunc func(ctx context.Context, googleToken string) (string, error)
-}
-
-func (m *mockableAuthHandler) LoginWithGoogle(w http.ResponseWriter, r *http.Request) {
-	// Delegamos al handler real con el mock como service via composición
-}
-
-// Para testear el handler real usamos un struct que implementa la interfaz del service.
-type authServiceIface interface {
-	LoginWithGoogle(ctx context.Context, googleToken string) (string, error)
-}
-
 // testHandler construye un AuthHandler con un service fake usando reflexión de interfaz.
 // Nota: como AuthHandler tiene *AuthService (concreto), usamos la misma técnica
 // que el resto del proyecto (mock de la interfaz del dominio, no del service).

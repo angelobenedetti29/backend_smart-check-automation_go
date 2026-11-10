@@ -20,10 +20,13 @@ import (
 // se corte.
 const userRequestTimeout = 10 * time.Second
 
+// UserHandler maneja los endpoints HTTP de gestión de usuarios del panel de
+// administración.
 type UserHandler struct {
 	svc *userService.Service
 }
 
+// NewUserHandler instancia el handler inyectando el servicio de usuarios.
 func NewUserHandler(svc *userService.Service) *UserHandler {
 	return &UserHandler{svc: svc}
 }
@@ -73,6 +76,8 @@ func (h *UserHandler) HandleUserByID(w http.ResponseWriter, r *http.Request) {
 	h.UpdateUser(w, r)
 }
 
+// ListUsers maneja GET /api/v1/admin/usuarios — devuelve el listado de usuarios
+// sin exponer el password_hash.
 func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), userRequestTimeout)
 	defer cancel()
@@ -102,6 +107,8 @@ type createUserReqPayload struct {
 	Password string `json:"password"`
 }
 
+// CreateUser maneja POST /api/v1/admin/usuarios — crea un usuario local con
+// contraseña y rol válidos.
 func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var payload createUserReqPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -145,6 +152,8 @@ type updateUserReqPayload struct {
 	Activo *bool  `json:"activo"`
 }
 
+// UpdateUser maneja PATCH /api/v1/admin/usuarios/{id} — actualiza el nombre, el
+// rol y el estado activo del usuario.
 func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	// Extraer ID de la URL: /api/v1/admin/usuarios/{id}
 	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")

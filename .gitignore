@@ -1,10 +1,13 @@
-# Environment variables (contain credentials for Aiven PostgreSQL)
+# Environment variables (contain credentials for Supabase PostgreSQL)
 .env
 
 # AI tool files — generados por/para agentes de IA, no para el equipo
 .claude/
 .agents/
 skills-lock.json
+
+# Deepwork session state (local, no se versiona)
+.slim/deepwork/
 
 # OS files
 Thumbs.db
@@ -15,3 +18,7 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Binario local de `go build ./cmd/server`
+/server
+.env.old

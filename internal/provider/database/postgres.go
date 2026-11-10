@@ -10,14 +10,14 @@ import (
 
 // NewPostgresPool creates a configured connection pool to PostgreSQL and
 // verifies connectivity with a Ping before returning.
-// Pool limits are tuned for Aiven Cloud Free Tier (max 5 simultaneous connections).
+// Pool limits are tuned for the production database (max 5 simultaneous connections).
 func NewPostgresPool(ctx context.Context, connString string) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(connString)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing database config: %w", err)
 	}
 
-	// Connection pool limits — calibrated for Aiven Free Tier
+	// Connection pool limits — calibrated for production
 	config.MaxConns = 5
 	config.MinConns = 1
 	config.MaxConnLifetime = 30 * time.Minute

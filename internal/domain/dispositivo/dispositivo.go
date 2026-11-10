@@ -16,12 +16,34 @@ const (
 	EstadoOffline = "offline"
 )
 
+// TipoDispositivo identifica la ubicación funcional del nodo dentro de la línea
+// de horneado. Es el enum canónico del dominio: entrada o salida del horno.
+type TipoDispositivo string
+
+// Tipos de dispositivo admitidos por el contrato.
+const (
+	TipoEntradaHorno TipoDispositivo = "ENTRADA_HORNO"
+	TipoSalidaHorno  TipoDispositivo = "SALIDA_HORNO"
+)
+
+// ParseTipoDispositivo normaliza (trim + upper) y valida un tipo de dispositivo.
+// Devuelve ok=false si el valor está vacío o no corresponde a un tipo conocido.
+func ParseTipoDispositivo(raw string) (TipoDispositivo, bool) {
+	switch TipoDispositivo(strings.ToUpper(strings.TrimSpace(raw))) {
+	case TipoEntradaHorno:
+		return TipoEntradaHorno, true
+	case TipoSalidaHorno:
+		return TipoSalidaHorno, true
+	default:
+		return "", false
+	}
+}
+
 // Límites de largo de los campos de un dispositivo, coherentes con los
 // VARCHAR(100) de la tabla dispositivos (database/schema.sql).
 const (
-	maxNombreLength    = 100
-	maxUbicacionLength = 100
-	maxWhepURLLength   = 500
+	maxNombreLength  = 100
+	maxWhepURLLength = 500
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -44,13 +66,33 @@ func IsValidationError(err error) bool {
 // ErrDispositivoNotFound indica que el dispositivo no existe en el catálogo.
 var ErrDispositivoNotFound = errors.New("dispositivo no encontrado")
 
+// ErrSectorNotFound indica que el sectorId informado no existe en el catálogo
+// de sectores. Se traduce a un 400 en el handler.
+var ErrSectorNotFound = errors.New("el sector indicado no existe")
+
+// ErrSectorTipoDuplicado indica que el sector ya tiene un dispositivo del mismo
+// tipo funcional (violación de uq_dispositivos_sector_tipo). Se traduce a 409.
+var ErrSectorTipoDuplicado = errors.New("el sector ya tiene un dispositivo de ese tipo")
+
+// ErrRenameNotPushable indica que el dispositivo no tiene `rename_url` y/o
+// `rename_token` anunciados, así que el backend no puede empujar el renombre a
+// la Pi. Para mantener la consistencia entre backend y Raspberry, el rename
+// desde el panel se rechaza con este error en lugar de tocar la DB (la Pi
+// volvería a sobreescribir el nombre con su polling). Se traduce a 422.
+var ErrRenameNotPushable = errors.New("el dispositivo no tiene push de renombre configurado")
+
 // Dispositivo representa un nodo Raspberry Pi del catálogo de monitoreo.
+// RenameURL/RenameToken son el anuncio del nodo para el push de renombre: la
+// credencial nunca se expone (json:"-").
 type Dispositivo struct {
-	ID        string    `json:"id"        db:"id"`
-	Nombre    string    `json:"nombre"    db:"nombre"`
-	Ubicacion string    `json:"ubicacion" db:"ubicacion"`
-	WhepURL   string    `json:"whepUrl,omitempty" db:"whep_url"`
-	CreatedAt time.Time `json:"createdAt" db:"created_at"`
+	ID          string    `json:"id"        db:"id"`
+	Nombre      string    `json:"nombre"    db:"nombre"`
+	SectorID    *string   `json:"sectorId,omitempty" db:"sector_id"`
+	WhepURL     string    `json:"whepUrl,omitempty" db:"whep_url"`
+	Tipo        *string   `json:"type,omitempty" db:"tipo"`
+	RenameURL   *string   `json:"renameUrl,omitempty" db:"rename_url"`
+	RenameToken *string   `json:"-" db:"rename_token"`
+	CreatedAt   time.Time `json:"createdAt" db:"created_at"`
 }
 
 // MetricaDispositivo representa un registro de telemetría recibido de un dispositivo.
@@ -70,10 +112,15 @@ type MetricaDispositivo struct {
 // EstadoDispositivo representa el estado de salud actual de un dispositivo,
 // calculado a partir de su último heartbeat (last_seen).
 type EstadoDispositivo struct {
-	DispositivoID string              `json:"dispositivoId"`
-	Nombre        string              `json:"nombre"`
-	Ubicacion     string              `json:"ubicacion"`
-	WhepURL       string              `json:"whepUrl,omitempty"`
+	DispositivoID string  `json:"dispositivoId"`
+	Nombre        string  `json:"nombre"`
+	SectorID      *string `json:"sectorId,omitempty"`
+	WhepURL       string  `json:"whepUrl,omitempty"`
+	Tipo          *string `json:"type,omitempty"`
+	// Metadatos del push de renombre. Se mantienen internos (json:"-") para no
+	// cambiar el contrato de las respuestas ni filtrar la credencial del nodo.
+	RenameURL     *string             `json:"-"`
+	RenameToken   *string             `json:"-"`
 	Estado        string              `json:"estado"`
 	UltimaMetrica *MetricaDispositivo `json:"ultimaMetrica,omitempty"`
 	LastSeen      *time.Time          `json:"lastSeen,omitempty"`
@@ -112,10 +159,9 @@ type PingRequest struct {
 func (req PingRequest) Validate() error {
 	var errs []string
 
-	// Campo obligatorio: dispositivo_id
-	if strings.TrimSpace(req.DispositivoID) == "" {
-		errs = append(errs, "dispositivoId: es requerido")
-	} else if !uuidPattern.MatchString(req.DispositivoID) {
+	// Campo opcional: dispositivo_id. Un dispositivo registrado se autentica con
+	// su Bearer secret y el servidor inyecta su id; si se informa, debe ser UUID.
+	if trimmed := strings.TrimSpace(req.DispositivoID); trimmed != "" && !uuidPattern.MatchString(trimmed) {
 		errs = append(errs, "dispositivoId: debe ser un UUID válido")
 	}
 
@@ -172,9 +218,10 @@ func (req PingRequest) Validate() error {
 // CreateDispositivoRequest representa el payload JSON entrante para el alta
 // (POST) de un dispositivo Raspberry Pi desde el panel del operador.
 type CreateDispositivoRequest struct {
-	Nombre    string `json:"nombre"`
-	Ubicacion string `json:"ubicacion"`
-	WhepURL   string `json:"whepUrl,omitempty"`
+	Nombre   string  `json:"nombre"`
+	SectorID *string `json:"sectorId,omitempty"`
+	WhepURL  string  `json:"whepUrl,omitempty"`
+	Tipo     string  `json:"type"`
 }
 
 // Validate verifica las reglas de negocio del CreateDispositivoRequest,
@@ -182,8 +229,13 @@ type CreateDispositivoRequest struct {
 // Retorna un *ValidationError con el listado completo de campos inválidos,
 // o nil si el request es válido.
 func (req CreateDispositivoRequest) Validate() error {
-	errs := validateNombreUbicacion(req.Nombre, req.Ubicacion)
+	errs := validateNombre(req.Nombre)
 	errs = append(errs, validateWhepURL(req.WhepURL)...)
+
+	// Campo obligatorio: tipo, enum canónico ENTRADA_HORNO/SALIDA_HORNO.
+	if _, ok := ParseTipoDispositivo(req.Tipo); !ok {
+		errs = append(errs, "type: debe ser ENTRADA_HORNO o SALIDA_HORNO")
+	}
 
 	if len(errs) > 0 {
 		return &ValidationError{Fields: errs}
@@ -191,10 +243,10 @@ func (req CreateDispositivoRequest) Validate() error {
 	return nil
 }
 
-// validateNombreUbicacion valida las reglas de negocio de nombre y ubicación
-// compartidas entre el alta (CreateDispositivoRequest) y la modificación
-// (UpdateDispositivoRequest). Retorna el listado de campos inválidos.
-func validateNombreUbicacion(nombre, ubicacion string) []string {
+// validateNombre valida las reglas de negocio del nombre, compartidas entre el
+// alta (CreateDispositivoRequest) y el rename autenticado de la propia Raspberry
+// (RenameDispositivoRequest). Retorna el listado de campos inválidos.
+func validateNombre(nombre string) []string {
 	var errs []string
 
 	// Campo obligatorio: nombre
@@ -202,11 +254,6 @@ func validateNombreUbicacion(nombre, ubicacion string) []string {
 		errs = append(errs, "nombre: es requerido")
 	} else if len([]rune(strings.TrimSpace(nombre))) > maxNombreLength {
 		errs = append(errs, fmt.Sprintf("nombre: no puede superar los %d caracteres", maxNombreLength))
-	}
-
-	// Ubicación opcional, con límite de largo coherente con VARCHAR(100)
-	if len([]rune(strings.TrimSpace(ubicacion))) > maxUbicacionLength {
-		errs = append(errs, fmt.Sprintf("ubicacion: no puede superar los %d caracteres", maxUbicacionLength))
 	}
 
 	return errs
@@ -237,30 +284,74 @@ func validateWhepURL(raw string) []string {
 
 // UpdateDispositivoRequest representa el payload JSON entrante para la
 // modificación (PUT) de un dispositivo existente desde el panel del operador.
+// El nombre NO es modificable desde el panel: solo el rename autenticado del nodo
+// (RenameDispositivoRequest) puede cambiarlo. SectorID nil desasigna el
+// dispositivo de su sector.
 type UpdateDispositivoRequest struct {
-	DispositivoID string `json:"dispositivoId"`
-	Nombre        string `json:"nombre"`
-	Ubicacion     string `json:"ubicacion"`
-	WhepURL       string `json:"whepUrl,omitempty"`
+	DispositivoID string  `json:"dispositivoId"`
+	SectorID      *string `json:"sectorId,omitempty"`
+	WhepURL       string  `json:"whepUrl,omitempty"`
 }
 
 // Validate verifica las reglas de negocio del UpdateDispositivoRequest: exige un
-// dispositivoId presente y aplica las mismas reglas de nombre/ubicación que el
-// alta. Retorna un *ValidationError con el listado completo de campos inválidos,
-// o nil si el request es válido.
+// dispositivoId presente y valida el whepUrl opcional. El nombre no participa
+// porque es inmutable desde el panel. Retorna un *ValidationError con el listado
+// completo de campos inválidos, o nil si el request es válido.
 func (req UpdateDispositivoRequest) Validate() error {
 	var errs []string
 
-	// Campo obligatorio: dispositivo_id
-	if strings.TrimSpace(req.DispositivoID) == "" {
+	// Campo obligatorio: dispositivo_id (UUID). Validarlo evita que un id
+	// malformado llegue a la query y derive en un 500 (22P02).
+	if trimmed := strings.TrimSpace(req.DispositivoID); trimmed == "" {
 		errs = append(errs, "dispositivoId: es requerido")
+	} else if !uuidPattern.MatchString(trimmed) {
+		errs = append(errs, "dispositivoId: debe ser un UUID válido")
 	}
 
-	errs = append(errs, validateNombreUbicacion(req.Nombre, req.Ubicacion)...)
 	errs = append(errs, validateWhepURL(req.WhepURL)...)
 
 	if len(errs) > 0 {
 		return &ValidationError{Fields: errs}
+	}
+	return nil
+}
+
+// RenameDispositivoRequest representa el payload del rename que emite la
+// propia Raspberry autenticada con su secret.
+type RenameDispositivoRequest struct {
+	Nombre string `json:"nombre"`
+}
+
+// Validate aplica las reglas de nombre compartidas con el alta/modificación.
+func (req RenameDispositivoRequest) Validate() error {
+	errs := validateNombre(req.Nombre)
+	if len(errs) > 0 {
+		return &ValidationError{Fields: errs}
+	}
+	return nil
+}
+
+// RenamePushPath compone la ruta del push de renombre que el backend Go le
+// hace a la Raspberry: se anexa al `rename_url` anunciado por el nodo. El path
+// lleva el `device_id` para que la Pi valide que coincide con su principal
+// (defensa en profundidad junto con el `rename_token`).
+func RenamePushPath(deviceID string) string {
+	return "/api/v1/dispositivos/" + deviceID + "/nombre"
+}
+
+// RenameURLDispositivoRequest representa el payload del reanuncio de la URL de
+// renombre que emite la propia Raspberry autenticada con su secret.
+type RenameURLDispositivoRequest struct {
+	RenameURL string `json:"rename_url"`
+}
+
+// Validate verifica que rename_url sea una URL absoluta con esquema y host,
+// replicando la semántica de validateRenameURL del dominio de registro.
+func (req RenameURLDispositivoRequest) Validate() error {
+	trimmed := strings.TrimSpace(req.RenameURL)
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return &ValidationError{Fields: []string{"rename_url: debe ser una URL absoluta con esquema y host (ej: http://host:puerto)"}}
 	}
 	return nil
 }
@@ -270,7 +361,8 @@ func (req UpdateDispositivoRequest) Validate() error {
 type Repository interface {
 	Create(ctx context.Context, d *Dispositivo) error
 	Update(ctx context.Context, d *Dispositivo) error
-	Delete(ctx context.Context, id string) error
+	UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error
+	Revoke(ctx context.Context, actorEmail, id string) error
 	InsertMetrica(ctx context.Context, m *MetricaDispositivo) error
 	GetDispositivosConUltimaMetrica(ctx context.Context) ([]DispositivoConUltimaMetrica, error)
 	GetDispositivoByID(ctx context.Context, id string) (*Dispositivo, error)
@@ -293,7 +385,16 @@ type StateStore interface {
 type Service interface {
 	Create(ctx context.Context, req CreateDispositivoRequest) (*EstadoDispositivo, error)
 	Update(ctx context.Context, req UpdateDispositivoRequest) (*EstadoDispositivo, error)
-	Delete(ctx context.Context, id string) error
+	Rename(ctx context.Context, deviceID, nombre string) (*EstadoDispositivo, error)
+	// RenameFromPanel cambia el nombre desde el panel del operador. Aplica
+	// push-first: si la Pi anunció rename_url/rename_token, el push debe
+	// completarse antes de persistir en la DB. Si falla, devuelve un error y
+	// no toca la DB (la Pi conservaría su nombre viejo). Si la Pi no anunció
+	// credenciales de push (firmware legacy), devuelve ErrRenameNotPushable
+	// para que el handler rechace con 422 y mantenga la consistencia.
+	RenameFromPanel(ctx context.Context, deviceID, nombre string) (*EstadoDispositivo, error)
+	UpdateRenameURL(ctx context.Context, deviceID, renameURL string) error
+	Revoke(ctx context.Context, actorEmail, id string) error
 	ProcessPing(ctx context.Context, req PingRequest) (*EstadoDispositivo, error)
 	GetAllEstados() []EstadoDispositivo
 	GetMetricas(ctx context.Context, dispositivoID string, page, pageSize int) (*PaginatedResult, error)

@@ -9,11 +9,13 @@ import (
 
 // baseValidManualRequest returns a fully valid ConsignaManualRequest for use as a test baseline.
 func baseValidManualRequest() ConsignaManualRequest {
+	loteID := "lote-1"
 	return ConsignaManualRequest{
-		HornoID:                "horno-01",
+		SectorID:               "horno-01",
 		ProductoID:             "a1b2c3d4-5678-90ab-cdef-1234567890ab",
 		TemperaturaObjetivo:    170.00,
 		VelocidadCintaObjetivo: 0.20,
+		LoteID:                 &loteID,
 	}
 }
 
@@ -22,23 +24,31 @@ func TestValidate_ValidRequest(t *testing.T) {
 	assert.NoError(t, req.Validate(), "un request válido no debe producir errores")
 }
 
-func TestValidate_EmptyHornoID(t *testing.T) {
+func TestValidate_ValidRequestWithoutSector(t *testing.T) {
 	req := baseValidManualRequest()
+	req.SectorID = ""
 	req.HornoID = ""
 
-	err := req.Validate()
-	require.Error(t, err)
-	assert.True(t, IsValidationError(err))
-	assert.Contains(t, err.Error(), "hornoId")
+	assert.NoError(t, req.Validate(), "el sector es opcional: se deduce del lote")
 }
 
-func TestValidate_WhitespaceHornoID(t *testing.T) {
+func TestValidate_MissingLoteID(t *testing.T) {
 	req := baseValidManualRequest()
-	req.HornoID = "   "
+	req.LoteID = nil
 
 	err := req.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "hornoId")
+	assert.Contains(t, err.Error(), "loteId")
+}
+
+func TestValidate_EmptyLoteID(t *testing.T) {
+	req := baseValidManualRequest()
+	vacio := "   "
+	req.LoteID = &vacio
+
+	err := req.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "loteId")
 }
 
 func TestValidate_EmptyProductoID(t *testing.T) {
@@ -91,13 +101,19 @@ func TestValidate_MultipleErrorsAggregated(t *testing.T) {
 
 	err := req.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "hornoId")
+	assert.Contains(t, err.Error(), "loteId")
 	assert.Contains(t, err.Error(), "productoId")
 	assert.Contains(t, err.Error(), "temperaturaObjetivo")
 	assert.Contains(t, err.Error(), "velocidadCintaObjetivo")
 }
 
-func TestIsValidationError_FalseForOtherErrors(t *testing.T) {
-	assert.False(t, IsValidationError(ErrHornoNoExiste))
-	assert.False(t, IsValidationError(ErrFueraDeRango))
+func TestOvenID_PrefersSectorID(t *testing.T) {
+	req := ConsignaManualRequest{SectorID: " sector-1 ", HornoID: "horno-01"}
+	assert.Equal(t, "sector-1", req.OvenID())
+
+	req = ConsignaManualRequest{HornoID: " horno-01 "}
+	assert.Equal(t, "horno-01", req.OvenID())
+
+	req = ConsignaManualRequest{}
+	assert.Equal(t, "", req.OvenID())
 }
