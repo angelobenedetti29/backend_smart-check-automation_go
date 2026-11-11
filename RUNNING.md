@@ -163,9 +163,6 @@ curl -X PUT http://localhost:8080/api/v1/productos \
   -d '{
     "productoId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
     "pesoReferenciaKg": 0.03,
-    "toleranciaPesoPct": 10,
-    "dimensionBaseCm": 8,
-    "toleranciaDimensionCm": 0.5,
     "tempMin": 160,
     "tempMax": 180,
     "velocidadCintaMin": 0.1,

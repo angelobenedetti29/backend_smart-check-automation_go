@@ -170,9 +170,6 @@ func TestApply_CreaEsquemaSectorLotes(t *testing.T) {
 	for _, tc := range []struct{ table, column string }{
 		{"productos", "activo"},
 		{"productos", "peso_referencia_kg"},
-		{"productos", "tolerancia_peso_pct"},
-		{"productos", "dimension_base_cm"},
-		{"productos", "tolerancia_dimension_cm"},
 		{"productos", "temp_min"},
 		{"productos", "temp_max"},
 		{"productos", "velocidad_cinta_min"},
@@ -201,15 +198,15 @@ func TestApply_CreaEsquemaSectorLotes(t *testing.T) {
 	}
 }
 
-// TestApply_ParametrosControlNotNull verifica que los 8 parámetros de control
-// hayan quedado NOT NULL y que los setpoints sigan siendo nullable.
+// TestApply_ParametrosControlNotNull verifica que los 5 parámetros de control
+// (peso, temperatura y velocidad) hayan quedado NOT NULL y que los setpoints
+// sigan siendo nullable.
 func TestApply_ParametrosControlNotNull(t *testing.T) {
 	p := isolatedPool(t)
 	require.NoError(t, Apply(context.Background(), p))
 
 	for _, column := range []string{
-		"peso_referencia_kg", "tolerancia_peso_pct",
-		"dimension_base_cm", "tolerancia_dimension_cm",
+		"peso_referencia_kg",
 		"temp_min", "temp_max",
 		"velocidad_cinta_min", "velocidad_cinta_max",
 	} {

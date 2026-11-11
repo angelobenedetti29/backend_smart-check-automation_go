@@ -20,10 +20,9 @@ func TestReportesRepo_ResumenIntegracion(t *testing.T) {
 	art := time.FixedZone("ART", -3*60*60)
 	_, err := pool.Exec(ctx, `
 		INSERT INTO productos (
-			id, nombre, activo, peso_referencia_kg, tolerancia_peso_pct,
-			dimension_base_cm, tolerancia_dimension_cm,
+			id, nombre, activo, peso_referencia_kg,
 			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
-		) VALUES ($1, 'Tostada Reportes', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3)`, testProductoID)
+		) VALUES ($1, 'Tostada Reportes', true, 0.25, 180, 220, 0.1, 0.3)`, testProductoID)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `INSERT INTO sectores (id, nombre) VALUES ($1, 'Sector Reportes')`, testSectorID)
 	require.NoError(t, err)
@@ -227,11 +226,11 @@ func TestReportesRepo_LotesIntegracion(t *testing.T) {
 	art := time.FixedZone("ART", -3*60*60)
 
 	_, err := pool.Exec(ctx, `
-		INSERT INTO productos (id, nombre, activo, peso_referencia_kg, tolerancia_peso_pct,
-			dimension_base_cm, tolerancia_dimension_cm, temp_min, temp_max,
+		INSERT INTO productos (id, nombre, activo, peso_referencia_kg,
+			temp_min, temp_max,
 			velocidad_cinta_min, velocidad_cinta_max) VALUES
-			($1, 'Tostada Reportes', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3),
-			($2, 'Tostada Reportes 2', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3)`,
+			($1, 'Tostada Reportes', true, 0.25, 180, 220, 0.1, 0.3),
+			($2, 'Tostada Reportes 2', true, 0.25, 180, 220, 0.1, 0.3)`,
 		testProductoID, producto2)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
@@ -382,11 +381,11 @@ func TestReportesRepo_AlertasIntegracion(t *testing.T) {
 	art := time.FixedZone("ART", -3*60*60)
 
 	_, err := pool.Exec(ctx, `
-		INSERT INTO productos (id, nombre, activo, peso_referencia_kg, tolerancia_peso_pct,
-			dimension_base_cm, tolerancia_dimension_cm, temp_min, temp_max,
+		INSERT INTO productos (id, nombre, activo, peso_referencia_kg,
+			temp_min, temp_max,
 			velocidad_cinta_min, velocidad_cinta_max) VALUES
-			($1, 'Tostada Reportes', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3),
-			($2, 'Tostada Reportes 2', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3)`,
+			($1, 'Tostada Reportes', true, 0.25, 180, 220, 0.1, 0.3),
+			($2, 'Tostada Reportes 2', true, 0.25, 180, 220, 0.1, 0.3)`,
 		testProductoID, producto2)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `

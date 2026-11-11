@@ -28,10 +28,9 @@ func setupPlanificacionRepo(t *testing.T) *PlanificacionPostgresRepository {
 	_, err = pool.Exec(ctx, `
 		INSERT INTO productos (
 			id, nombre, activo,
-			peso_referencia_kg, tolerancia_peso_pct,
-			dimension_base_cm, tolerancia_dimension_cm,
+			peso_referencia_kg,
 			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
-		) VALUES ($1, 'Producto Plan', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3)`, planTestProductoID)
+		) VALUES ($1, 'Producto Plan', true, 0.25, 180, 220, 0.1, 0.3)`, planTestProductoID)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
 		INSERT INTO lotes_productivos (id, producto_id, inicio_at, estado, sector_id)

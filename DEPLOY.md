@@ -101,7 +101,7 @@ aplica ambos en cada arranque; las versiones quedan en `schema_migrations`).
 Tablas principales:
 
 - `productos` — catálogo maestro **y** parámetros de control embebidos (peso,
-  dimensión, temperatura, velocidad de cinta, setpoints opcionales y Δmáx del
+  temperatura, velocidad de cinta, setpoints opcionales y Δmáx del
   MPC). La antigua tabla `parametros_producto` fue unificada y eliminada.
 - `lotes_productivos` — registro transaccional de lotes, con sector, estado,
   modo de operación, ventanas, tolerancias, umbrales y setpoints aplicados.

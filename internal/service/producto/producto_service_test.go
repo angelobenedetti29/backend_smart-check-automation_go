@@ -66,15 +66,12 @@ func (f *fakeProductoRepo) ExistsByNombre(context.Context, string, string) (bool
 
 func reqValido() producto.ProductoRequest {
 	return producto.ProductoRequest{
-		Nombre:                "Tostada Integral",
-		PesoReferenciaKg:      0.25,
-		ToleranciaPesoPct:     5.0,
-		DimensionBaseCm:       12.0,
-		ToleranciaDimensionCm: 0.5,
-		TempMin:               180.0,
-		TempMax:               220.0,
-		VelocidadCintaMin:     0.1,
-		VelocidadCintaMax:     0.3,
+		Nombre:            "Tostada Integral",
+		PesoReferenciaKg:  0.25,
+		TempMin:           180.0,
+		TempMax:           220.0,
+		VelocidadCintaMin: 0.1,
+		VelocidadCintaMax: 0.3,
 	}
 }
 

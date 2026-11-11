@@ -109,15 +109,13 @@ INSERT INTO sectores (id, nombre) VALUES ('e2e', 'E2E') ON CONFLICT (id) DO NOTH
 
 INSERT INTO productos (
   id, nombre,
-  peso_referencia_kg, tolerancia_peso_pct,
-  dimension_base_cm, tolerancia_dimension_cm,
+  peso_referencia_kg,
   temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
   temp_setpoint, velocidad_cinta_setpoint,
   delta_temp1_max_c, delta_vel_max
 ) VALUES (
   '${PRODUCTO_ID}', 'E2E Horno Túnel',
-  0.250, 5.00,
-  12.00, 0.50,
+  0.250,
   180.00, 220.00, 0.10, 0.60,
   200.00, 0.40,
   10.00, 0.050

@@ -26,11 +26,10 @@ func TestOEERepo_DatosIntegracion(t *testing.T) {
 
 	_, err := pool.Exec(ctx, `
 		INSERT INTO productos (
-			id, nombre, activo, peso_referencia_kg, tolerancia_peso_pct,
-			dimension_base_cm, tolerancia_dimension_cm,
+			id, nombre, activo, peso_referencia_kg,
 			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
 			capacidad_nominal_kg_h
-		) VALUES ($1, 'Tostada OEE', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3, 100)`,
+		) VALUES ($1, 'Tostada OEE', true, 0.25, 180, 220, 0.1, 0.3, 100)`,
 		productoID)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `INSERT INTO sectores (id, nombre) VALUES ($1, 'Sector OEE')`, sectorID)
@@ -137,10 +136,10 @@ func TestOEERepo_FiltroSector(t *testing.T) {
 	)
 
 	_, err := pool.Exec(ctx, `
-		INSERT INTO productos (id, nombre, activo, peso_referencia_kg, tolerancia_peso_pct,
-			dimension_base_cm, tolerancia_dimension_cm, temp_min, temp_max,
+		INSERT INTO productos (id, nombre, activo, peso_referencia_kg,
+			temp_min, temp_max,
 			velocidad_cinta_min, velocidad_cinta_max, capacidad_nominal_kg_h)
-		VALUES ($1, 'Tostada OEE 2', true, 0.25, 5, 12, 0.5, 180, 220, 0.1, 0.3, 50)`,
+		VALUES ($1, 'Tostada OEE 2', true, 0.25, 180, 220, 0.1, 0.3, 50)`,
 		productoID)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `INSERT INTO sectores (id, nombre) VALUES ($1, 'A'), ($2, 'B')`, sectorA, sectorB)

@@ -24,8 +24,7 @@ func NewProductoPostgresRepository(db *pgxpool.Pool) *ProductoPostgresRepository
 
 const selectProductoColumns = `
 	id, nombre,
-	peso_referencia_kg, tolerancia_peso_pct,
-	dimension_base_cm, tolerancia_dimension_cm,
+	peso_referencia_kg,
 	temp_min, temp_max,
 	velocidad_cinta_min, velocidad_cinta_max,
 	temp_setpoint, velocidad_cinta_setpoint,
@@ -37,8 +36,7 @@ const selectProductoColumns = `
 func scanProducto(row pgx.Row, p *producto.Producto) error {
 	return row.Scan(
 		&p.ID, &p.Nombre,
-		&p.PesoReferenciaKg, &p.ToleranciaPesoPct,
-		&p.DimensionBaseCm, &p.ToleranciaDimensionCm,
+		&p.PesoReferenciaKg,
 		&p.TempMin, &p.TempMax,
 		&p.VelocidadCintaMin, &p.VelocidadCintaMax,
 		&p.TempSetpoint, &p.VelocidadCintaSetpoint,
@@ -114,24 +112,19 @@ func (r *ProductoPostgresRepository) ExistsByNombre(ctx context.Context, nombre 
 func (r *ProductoPostgresRepository) Create(ctx context.Context, p *producto.Producto) (*producto.Producto, error) {
 	const query = `
 		INSERT INTO productos (
-			nombre, peso_referencia_kg, tolerancia_peso_pct,
-			dimension_base_cm, tolerancia_dimension_cm,
+			nombre, peso_referencia_kg,
 			temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max,
 			temp_setpoint, velocidad_cinta_setpoint,
 			delta_temp1_max_c, delta_vel_max,
 			capacidad_nominal_kg_h, costo_fabricacion_unitario_ars
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-			$13, $14, $15
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		)
 		RETURNING id, temp_setpoint, velocidad_cinta_setpoint, capacidad_nominal_kg_h, costo_fabricacion_unitario_ars, created_at, updated_at, activo`
 
 	err := r.db.QueryRow(ctx, query,
 		p.Nombre,
 		p.PesoReferenciaKg,
-		p.ToleranciaPesoPct,
-		p.DimensionBaseCm,
-		p.ToleranciaDimensionCm,
 		p.TempMin,
 		p.TempMax,
 		p.VelocidadCintaMin,
@@ -158,19 +151,16 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 		UPDATE productos SET
 			nombre = $2,
 			peso_referencia_kg = $3,
-			tolerancia_peso_pct = $4,
-			dimension_base_cm = $5,
-			tolerancia_dimension_cm = $6,
-			temp_min = $7,
-			temp_max = $8,
-			velocidad_cinta_min = $9,
-			velocidad_cinta_max = $10,
-			temp_setpoint = $11,
-			velocidad_cinta_setpoint = $12,
-			delta_temp1_max_c = $13,
-			delta_vel_max = $14,
-			capacidad_nominal_kg_h = $15,
-			costo_fabricacion_unitario_ars = CASE WHEN $17 THEN $16::numeric ELSE costo_fabricacion_unitario_ars END,
+			temp_min = $4,
+			temp_max = $5,
+			velocidad_cinta_min = $6,
+			velocidad_cinta_max = $7,
+			temp_setpoint = $8,
+			velocidad_cinta_setpoint = $9,
+			delta_temp1_max_c = $10,
+			delta_vel_max = $11,
+			capacidad_nominal_kg_h = $12,
+			costo_fabricacion_unitario_ars = CASE WHEN $14 THEN $13::numeric ELSE costo_fabricacion_unitario_ars END,
 			updated_at = now()
 		WHERE id = $1
 		RETURNING ` + selectProductoColumns
@@ -179,9 +169,6 @@ func (r *ProductoPostgresRepository) Update(ctx context.Context, p *producto.Pro
 		p.ID,
 		p.Nombre,
 		p.PesoReferenciaKg,
-		p.ToleranciaPesoPct,
-		p.DimensionBaseCm,
-		p.ToleranciaDimensionCm,
 		p.TempMin,
 		p.TempMax,
 		p.VelocidadCintaMin,

@@ -53,16 +53,13 @@ func (e *ValidationError) Error() string {
 // temp_min/temp_max son del horno; delta_temp1_max_c y delta_vel_max son las
 // variaciones máximas admitidas por ciclo del optimizador MPC.
 type Producto struct {
-	ID                    string  `json:"id"`
-	Nombre                string  `json:"nombre"`
-	PesoReferenciaKg      float64 `json:"pesoReferenciaKg"`
-	ToleranciaPesoPct     float64 `json:"toleranciaPesoPct"`
-	DimensionBaseCm       float64 `json:"dimensionBaseCm"`
-	ToleranciaDimensionCm float64 `json:"toleranciaDimensionCm"`
-	TempMin               float64 `json:"tempMin"`
-	TempMax               float64 `json:"tempMax"`
-	VelocidadCintaMin     float64 `json:"velocidadCintaMin"`
-	VelocidadCintaMax     float64 `json:"velocidadCintaMax"`
+	ID                string  `json:"id"`
+	Nombre            string  `json:"nombre"`
+	PesoReferenciaKg  float64 `json:"pesoReferenciaKg"`
+	TempMin           float64 `json:"tempMin"`
+	TempMax           float64 `json:"tempMax"`
+	VelocidadCintaMin float64 `json:"velocidadCintaMin"`
+	VelocidadCintaMax float64 `json:"velocidadCintaMax"`
 	// CapacidadNominalKgH es la capacidad nominal de producción en kg/h.
 	// Nullable: si no está cargada, el producto no participa de cálculos de
 	// capacidad/OEE.
@@ -87,15 +84,12 @@ type Producto struct {
 // modificación (PUT) de un producto del catálogo. El id lo asigna el servidor,
 // por lo que no forma parte del body.
 type ProductoRequest struct {
-	Nombre                string  `json:"nombre"`
-	PesoReferenciaKg      float64 `json:"pesoReferenciaKg"`
-	ToleranciaPesoPct     float64 `json:"toleranciaPesoPct"`
-	DimensionBaseCm       float64 `json:"dimensionBaseCm"`
-	ToleranciaDimensionCm float64 `json:"toleranciaDimensionCm"`
-	TempMin               float64 `json:"tempMin"`
-	TempMax               float64 `json:"tempMax"`
-	VelocidadCintaMin     float64 `json:"velocidadCintaMin"`
-	VelocidadCintaMax     float64 `json:"velocidadCintaMax"`
+	Nombre            string  `json:"nombre"`
+	PesoReferenciaKg  float64 `json:"pesoReferenciaKg"`
+	TempMin           float64 `json:"tempMin"`
+	TempMax           float64 `json:"tempMax"`
+	VelocidadCintaMin float64 `json:"velocidadCintaMin"`
+	VelocidadCintaMax float64 `json:"velocidadCintaMax"`
 	// CapacidadNominalKgH es opcional (nullable) y, si viene, debe ser > 0.
 	CapacidadNominalKgH         *float64 `json:"capacidadNominalKgH"`
 	CostoFabricacionUnitarioARS *float64 `json:"costoFabricacionUnitarioArs"`
@@ -138,15 +132,6 @@ func (req ProductoRequest) Validate() error {
 
 	if req.PesoReferenciaKg <= 0 {
 		fields["pesoReferenciaKg"] = "debe ser un valor numérico mayor a 0"
-	}
-	if req.ToleranciaPesoPct < 0 {
-		fields["toleranciaPesoPct"] = "no puede ser negativo"
-	}
-	if req.DimensionBaseCm <= 0 {
-		fields["dimensionBaseCm"] = "debe ser un valor numérico mayor a 0"
-	}
-	if req.ToleranciaDimensionCm < 0 {
-		fields["toleranciaDimensionCm"] = "no puede ser negativo"
 	}
 	if req.TempMax <= req.TempMin {
 		fields["tempMax"] = fmt.Sprintf("debe ser mayor a tempMin (%.2f)", req.TempMin)

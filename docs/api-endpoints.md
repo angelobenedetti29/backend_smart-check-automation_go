@@ -165,7 +165,7 @@ Cualquier escritura de consigna se hace por `POST /api/v1/horno/consigna`
 
 ## 3. `/api/v1/productos` — Catálogo maestro de productos
 
-El catálogo es la fuente única de productos y de sus parámetros de control de horneado (peso, dimensión, temperatura y velocidad de cinta). Ya no existe la tabla/endpoint separado `parametros-producto`.
+El catálogo es la fuente única de productos y de sus parámetros de control de horneado (peso, temperatura y velocidad de cinta). Ya no existe la tabla/endpoint separado `parametros-producto`.
 
 ### `GET /api/v1/productos`
 
@@ -183,8 +183,7 @@ curl -H "Authorization: Bearer $DEVICE_SECRET" http://localhost:8080/api/v1/prod
   "data": [
     {
       "id": "a1b2c3d4-5678-90ab-cdef-1234567890ab", "nombre": "Tostada Integral",
-      "pesoReferenciaKg": 0.25, "toleranciaPesoPct": 5.0,
-      "dimensionBaseCm": 12.0, "toleranciaDimensionCm": 0.5,
+      "pesoReferenciaKg": 0.25,
       "tempMin": 180.0, "tempMax": 220.0,
       "velocidadCintaMin": 0.1, "velocidadCintaMax": 0.3,
       "tempSetpoint": 200.0, "velocidadCintaSetpoint": 0.2,
@@ -211,8 +210,7 @@ curl -X POST http://localhost:8080/api/v1/productos \
   -b "session_token=$JWT" -H "Content-Type: application/json" \
   -d '{
     "nombre": "Pan Lactal",
-    "pesoReferenciaKg": 0.5, "toleranciaPesoPct": 8.0,
-    "dimensionBaseCm": 25.0, "toleranciaDimensionCm": 1.0,
+    "pesoReferenciaKg": 0.5,
     "tempMin": 180.0, "tempMax": 200.0,
     "velocidadCintaMin": 0.15, "velocidadCintaMax": 0.35
   }'
@@ -240,8 +238,7 @@ curl -X PUT http://localhost:8080/api/v1/productos/a1b2c3d4-5678-90ab-cdef-12345
   -b "session_token=$JWT" -H "Content-Type: application/json" \
   -d '{
     "nombre": "Tostada Integral",
-    "pesoReferenciaKg": 0.28, "toleranciaPesoPct": 5.0,
-    "dimensionBaseCm": 12.0, "toleranciaDimensionCm": 0.5,
+    "pesoReferenciaKg": 0.28,
     "tempMin": 185.0, "tempMax": 225.0,
     "velocidadCintaMin": 0.10, "velocidadCintaMax": 0.30
   }'
@@ -278,7 +275,7 @@ Respuesta `200 OK` con `{ "id": "...", "activo": false }`.
 | 404 | El producto no existe |
 | 500 | Error interno |
 
-**Reglas de validación (POST/PUT):** `nombre` requerido (1–100 caracteres) · `pesoReferenciaKg > 0` · `toleranciaPesoPct >= 0` · `dimensionBaseCm > 0` · `toleranciaDimensionCm >= 0` · `tempMax > tempMin` · `velocidadCintaMax > velocidadCintaMin` · `tempSetpoint` (opcional) dentro de `[tempMin, tempMax]` · `velocidadCintaSetpoint` (opcional) dentro de `[velocidadCintaMin, velocidadCintaMax]`.
+**Reglas de validación (POST/PUT):** `nombre` requerido (1–100 caracteres) · `pesoReferenciaKg > 0` · `tempMax > tempMin` · `velocidadCintaMax > velocidadCintaMin` · `tempSetpoint` (opcional) dentro de `[tempMin, tempMax]` · `velocidadCintaSetpoint` (opcional) dentro de `[velocidadCintaMin, velocidadCintaMax]`.
 
 **Setpoints opcionales:** `tempSetpoint` y `velocidadCintaSetpoint` son nullable y opcionales en el body. Si se omiten, la DB los guarda como `NULL`; si se envían, deben caer dentro del rango min/max correspondiente. En la respuesta sólo aparecen cuando tienen valor (`omitempty`).
 

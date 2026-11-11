@@ -17,9 +17,6 @@ BEGIN
 
     ALTER TABLE productos
         ADD COLUMN IF NOT EXISTS peso_referencia_kg numeric(10,3),
-        ADD COLUMN IF NOT EXISTS tolerancia_peso_pct numeric(5,2),
-        ADD COLUMN IF NOT EXISTS dimension_base_cm numeric(6,2),
-        ADD COLUMN IF NOT EXISTS tolerancia_dimension_cm numeric(6,2),
         ADD COLUMN IF NOT EXISTS temp_min numeric(6,2),
         ADD COLUMN IF NOT EXISTS temp_max numeric(6,2),
         ADD COLUMN IF NOT EXISTS velocidad_cinta_min numeric(6,2),
@@ -35,9 +32,6 @@ BEGIN
     IF to_regclass('parametros_producto') IS NOT NULL THEN
         UPDATE productos p
         SET peso_referencia_kg       = COALESCE(p.peso_referencia_kg, s.peso_referencia_kg),
-            tolerancia_peso_pct      = COALESCE(p.tolerancia_peso_pct, s.tolerancia_peso_pct),
-            dimension_base_cm        = COALESCE(p.dimension_base_cm, s.dimension_base_cm),
-            tolerancia_dimension_cm  = COALESCE(p.tolerancia_dimension_cm, s.tolerancia_dimension_cm),
             temp_min                 = COALESCE(p.temp_min, s.temp_min),
             temp_max                 = COALESCE(p.temp_max, s.temp_max),
             velocidad_cinta_min      = COALESCE(p.velocidad_cinta_min, s.velocidad_cinta_min),
@@ -56,23 +50,16 @@ BEGIN
     -- desde el panel (los mismos del seed de Tostada Integral).
     UPDATE productos SET
         peso_referencia_kg      = COALESCE(peso_referencia_kg, 0.250),
-        tolerancia_peso_pct     = COALESCE(tolerancia_peso_pct, 5.00),
-        dimension_base_cm       = COALESCE(dimension_base_cm, 12.00),
-        tolerancia_dimension_cm = COALESCE(tolerancia_dimension_cm, 0.50),
         temp_min                = COALESCE(temp_min, 180.00),
         temp_max                = COALESCE(temp_max, 220.00),
         velocidad_cinta_min     = COALESCE(velocidad_cinta_min, 0.10),
         velocidad_cinta_max     = COALESCE(velocidad_cinta_max, 0.30)
-    WHERE peso_referencia_kg IS NULL OR tolerancia_peso_pct IS NULL
-       OR dimension_base_cm IS NULL OR tolerancia_dimension_cm IS NULL
+    WHERE peso_referencia_kg IS NULL
        OR temp_min IS NULL OR temp_max IS NULL
        OR velocidad_cinta_min IS NULL OR velocidad_cinta_max IS NULL;
 
     ALTER TABLE productos
         ALTER COLUMN peso_referencia_kg SET NOT NULL,
-        ALTER COLUMN tolerancia_peso_pct SET NOT NULL,
-        ALTER COLUMN dimension_base_cm SET NOT NULL,
-        ALTER COLUMN tolerancia_dimension_cm SET NOT NULL,
         ALTER COLUMN temp_min SET NOT NULL,
         ALTER COLUMN temp_max SET NOT NULL,
         ALTER COLUMN velocidad_cinta_min SET NOT NULL,

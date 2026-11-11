@@ -13,17 +13,14 @@ import (
 // nuevoProductoDePrueba arma un producto válido (cumple los CHECK constraints).
 func nuevoProductoDePrueba(nombre string) *producto.Producto {
 	return &producto.Producto{
-		Nombre:                nombre,
-		PesoReferenciaKg:      0.25,
-		ToleranciaPesoPct:     5.0,
-		DimensionBaseCm:       12.0,
-		ToleranciaDimensionCm: 0.5,
-		TempMin:               180.0,
-		TempMax:               220.0,
-		VelocidadCintaMin:     0.1,
-		VelocidadCintaMax:     0.3,
-		DeltaTemp1MaxC:        10.0,
-		DeltaVelMax:           0.05,
+		Nombre:            nombre,
+		PesoReferenciaKg:  0.25,
+		TempMin:           180.0,
+		TempMax:           220.0,
+		VelocidadCintaMin: 0.1,
+		VelocidadCintaMax: 0.3,
+		DeltaTemp1MaxC:    10.0,
+		DeltaVelMax:       0.05,
 	}
 }
 

@@ -35,9 +35,6 @@ CREATE TABLE IF NOT EXISTS productos (
     nombre character varying(100) NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     peso_referencia_kg numeric(10,3) NOT NULL,
-    tolerancia_peso_pct numeric(5,2) NOT NULL,
-    dimension_base_cm numeric(6,2) NOT NULL,
-    tolerancia_dimension_cm numeric(6,2) NOT NULL,
     temp_min numeric(6,2) NOT NULL,
     temp_max numeric(6,2) NOT NULL,
     velocidad_cinta_min numeric(6,2) NOT NULL,
@@ -50,12 +47,9 @@ CREATE TABLE IF NOT EXISTS productos (
     delta_vel_max numeric(5,3) DEFAULT 0.05 NOT NULL,
     CONSTRAINT chk_productos_delta_temp1_pos CHECK ((delta_temp1_max_c > (0)::numeric)),
     CONSTRAINT chk_productos_delta_vel_pos CHECK ((delta_vel_max > (0)::numeric)),
-    CONSTRAINT chk_productos_dimension_positiva CHECK ((dimension_base_cm > (0)::numeric)),
     CONSTRAINT chk_productos_peso_positivo CHECK ((peso_referencia_kg > (0)::numeric)),
     CONSTRAINT chk_productos_temp_rango CHECK ((temp_max > temp_min)),
     CONSTRAINT chk_productos_temp_setpoint_rango CHECK (((temp_setpoint IS NULL) OR ((temp_setpoint >= temp_min) AND (temp_setpoint <= temp_max)))),
-    CONSTRAINT chk_productos_tolerancia_dimension CHECK ((tolerancia_dimension_cm >= (0)::numeric)),
-    CONSTRAINT chk_productos_tolerancia_peso CHECK ((tolerancia_peso_pct >= (0)::numeric)),
     CONSTRAINT chk_productos_velocidad_rango CHECK ((velocidad_cinta_max > velocidad_cinta_min)),
     CONSTRAINT chk_productos_velocidad_setpoint_rango CHECK (((velocidad_cinta_setpoint IS NULL) OR ((velocidad_cinta_setpoint >= velocidad_cinta_min) AND (velocidad_cinta_setpoint <= velocidad_cinta_max)))),
     CONSTRAINT productos_pkey PRIMARY KEY (id)
@@ -68,9 +62,6 @@ COMMENT ON COLUMN productos.nombre IS 'Nombre descriptivo del producto (ej: Tost
 -- database/migrations/0007_productos_capacidad_nominal.sql para no romper bases
 -- existentes (schema.sql se aplica antes que las migraciones).
 COMMENT ON COLUMN productos.peso_referencia_kg IS 'Peso patrón/ideal de una unidad del producto (kg)';
-COMMENT ON COLUMN productos.tolerancia_peso_pct IS 'Tolerancia admitida sobre el peso de referencia, en porcentaje';
-COMMENT ON COLUMN productos.dimension_base_cm IS 'Dimensión base/tamaño ideal del producto (cm)';
-COMMENT ON COLUMN productos.tolerancia_dimension_cm IS 'Tolerancia de tamaño admitida sobre la dimensión base (cm)';
 COMMENT ON COLUMN productos.temp_min IS 'Temperatura mínima aceptable de horneado (°C)';
 COMMENT ON COLUMN productos.temp_max IS 'Temperatura máxima aceptable de horneado (°C)';
 COMMENT ON COLUMN productos.velocidad_cinta_min IS 'Velocidad mínima aceptable de la cinta transportadora (m/s)';
@@ -84,28 +75,25 @@ COMMENT ON COLUMN productos.delta_vel_max IS 'Máxima variación permitida de ve
 
 INSERT INTO productos (
     id, nombre,
-    peso_referencia_kg, tolerancia_peso_pct,
-    dimension_base_cm, tolerancia_dimension_cm,
+    peso_referencia_kg,
     temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
 ) VALUES (
     'a1b2c3d4-5678-90ab-cdef-1234567890ab', 'Tostada Integral',
-    0.250, 5.00,
-    12.00, 0.50,
+    0.250,
     180.00, 220.00, 0.10, 0.30
 )
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO productos (
     id, nombre,
-    peso_referencia_kg, tolerancia_peso_pct,
-    dimension_base_cm, tolerancia_dimension_cm,
+    peso_referencia_kg,
     temp_min, temp_max, velocidad_cinta_min, velocidad_cinta_max
 ) VALUES
-    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 'Pan Lactal',     0.500,  8.00, 25.00, 1.00, 180.00, 200.00, 0.15, 0.35),
-    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 'Pan Francés',    0.250,  6.00, 30.00, 1.50, 200.00, 220.00, 0.20, 0.40),
-    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 'Pan de Salvado', 0.450,  8.00, 22.00, 1.00, 170.00, 190.00, 0.15, 0.35),
-    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 'Medialunas',     0.060, 12.00, 10.00, 0.50, 190.00, 210.00, 0.25, 0.45),
-    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 'Pan Dulce',      0.800, 10.00, 15.00, 1.00, 150.00, 170.00, 0.08, 0.20)
+    ('b2c3d4e5-6789-01ab-cdef-234567890abc', 'Pan Lactal',     0.500, 180.00, 200.00, 0.15, 0.35),
+    ('c3d4e5f6-789a-12bc-def3-34567890abcd', 'Pan Francés',    0.250, 200.00, 220.00, 0.20, 0.40),
+    ('d4e5f6a7-89ab-23cd-ef34-4567890abcde', 'Pan de Salvado', 0.450, 170.00, 190.00, 0.15, 0.35),
+    ('e5f6a7b8-9abc-34de-f456-567890abcdef', 'Medialunas',     0.060, 190.00, 210.00, 0.25, 0.45),
+    ('f6a7b8c9-abcd-45ef-5678-67890abcdef1', 'Pan Dulce',      0.800, 150.00, 170.00, 0.08, 0.20)
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================

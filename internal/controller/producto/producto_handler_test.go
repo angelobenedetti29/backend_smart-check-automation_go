@@ -57,8 +57,7 @@ func (f *fakeProductoService) Deactivate(ctx context.Context, id string) error {
 
 const productoBodyValido = `{
 	"nombre": "Tostada Integral",
-	"pesoReferenciaKg": 0.25, "toleranciaPesoPct": 5.0,
-	"dimensionBaseCm": 12.0, "toleranciaDimensionCm": 0.5,
+	"pesoReferenciaKg": 0.25,
 	"tempMin": 180.0, "tempMax": 220.0,
 	"velocidadCintaMin": 0.1, "velocidadCintaMax": 0.3
 }`
@@ -144,8 +143,7 @@ func TestProductoHandleCreateSetpointFueraDeRango422(t *testing.T) {
 
 	body := `{
 		"nombre": "Tostada Integral",
-		"pesoReferenciaKg": 0.25, "toleranciaPesoPct": 5.0,
-		"dimensionBaseCm": 12.0, "toleranciaDimensionCm": 0.5,
+		"pesoReferenciaKg": 0.25,
 		"tempMin": 180.0, "tempMax": 220.0,
 		"velocidadCintaMin": 0.1, "velocidadCintaMax": 0.3,
 		"tempSetpoint": 300.0, "velocidadCintaSetpoint": 0.2
